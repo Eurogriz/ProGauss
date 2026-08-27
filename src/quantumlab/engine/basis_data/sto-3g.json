@@ -1,0 +1,626 @@
+{
+ "angular_scheme_published": "cartesian",
+ "bse_name": "STO-3G",
+ "bse_revision_date": "2018-06-19",
+ "description": "STO-3G Minimal Basis (3 functions/AO)",
+ "display_name": "STO-3G",
+ "elements": {
+  "1": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      3.425250914,
+      0.6239137298,
+      0.168855404
+     ]
+    }
+   ]
+  },
+  "14": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1970a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      407.7975514,
+      74.28083305,
+      20.10329229
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      23.19365606,
+      5.389706871,
+      1.752899952
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.219620369,
+       0.2255954336,
+       0.900398426
+      ],
+      [
+       0.01058760429,
+       0.5951670053,
+       0.462001012
+      ]
+     ],
+     "exponents": [
+      1.478740622,
+      0.4125648801,
+      0.1614750979
+     ]
+    }
+   ]
+  },
+  "15": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1970a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      468.3656378,
+      85.31338559,
+      23.08913156
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      28.03263958,
+      6.514182577,
+      2.118614352
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.219620369,
+       0.2255954336,
+       0.900398426
+      ],
+      [
+       0.01058760429,
+       0.5951670053,
+       0.462001012
+      ]
+     ],
+     "exponents": [
+      1.743103231,
+      0.4863213771,
+      0.1903428909
+     ]
+    }
+   ]
+  },
+  "16": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1970a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      533.1257359,
+      97.1095183,
+      26.28162542
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      33.32975173,
+      7.745117521,
+      2.518952599
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.219620369,
+       0.2255954336,
+       0.900398426
+      ],
+      [
+       0.01058760429,
+       0.5951670053,
+       0.462001012
+      ]
+     ],
+     "exponents": [
+      2.029194274,
+      0.5661400518,
+      0.2215833792
+     ]
+    }
+   ]
+  },
+  "17": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1970a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      601.3456136,
+      109.5358542,
+      29.64467686
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      38.96041889,
+      9.053563477,
+      2.944499834
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.219620369,
+       0.2255954336,
+       0.900398426
+      ],
+      [
+       0.01058760429,
+       0.5951670053,
+       0.462001012
+      ]
+     ],
+     "exponents": [
+      2.129386495,
+      0.5940934274,
+      0.232524141
+     ]
+    }
+   ]
+  },
+  "5": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a",
+      "hehre1970a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      48.79111318,
+      8.887362172,
+      2.40526704
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      2.236956142,
+      0.5198204999,
+      0.16906176
+     ]
+    }
+   ]
+  },
+  "6": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      71.61683735,
+      13.04509632,
+      3.53051216
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      2.941249355,
+      0.6834830964,
+      0.2222899159
+     ]
+    }
+   ]
+  },
+  "7": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      99.10616896,
+      18.05231239,
+      4.885660238
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      3.780455879,
+      0.8784966449,
+      0.2857143744
+     ]
+    }
+   ]
+  },
+  "8": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      130.7093214,
+      23.80886605,
+      6.443608313
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      5.033151319,
+      1.169596125,
+      0.38038896
+     ]
+    }
+   ]
+  },
+  "9": {
+   "references": [
+    {
+     "reference_description": "STO-3G Minimal Basis (3 functions/AO)",
+     "reference_keys": [
+      "hehre1969a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1543289673,
+       0.5353281423,
+       0.4446345422
+      ]
+     ],
+     "exponents": [
+      166.679134,
+      30.36081233,
+      8.216820672
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09996722919,
+       0.3995128261,
+       0.7001154689
+      ],
+      [
+       0.155916275,
+       0.6076837186,
+       0.3919573931
+      ]
+     ],
+     "exponents": [
+      6.464803249,
+      1.502281245,
+      0.4885884864
+     ]
+    }
+   ]
+  }
+ },
+ "family": "sto",
+ "name": "sto-3g",
+ "schema_version": "1.0",
+ "source": "Basis Set Exchange (bse 0.12)"
+}

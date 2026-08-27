@@ -1,0 +1,1999 @@
+{
+ "angular_scheme_published": "spherical",
+ "bse_name": "def2-TZVPP",
+ "bse_revision_date": "2018-09-07",
+ "description": "def2-TZVPP",
+ "display_name": "def2-TZVPP",
+ "elements": {
+  "1": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form def2-TZVPP",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0060251978,
+       0.045021094,
+       0.20189726
+      ]
+     ],
+     "exponents": [
+      34.061341,
+      5.1235746,
+      1.1646626
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.32723041
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.10307241
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.407
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.388
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.057
+     ]
+    }
+   ]
+  },
+  "14": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form def2-TZVPP",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00055914765868,
+       0.0043206040189,
+       0.02218709646,
+       0.086489249116,
+       0.24939889716,
+       0.46017197366,
+       0.34250236575
+      ]
+     ],
+     "exponents": [
+      44773.358078,
+      6717.1992104,
+      1528.8960325,
+      432.54746585,
+      140.61505226,
+      49.857636724,
+      18.434974885
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.021300063007,
+       0.094676139318,
+       -0.32616264859
+      ]
+     ],
+     "exponents": [
+      86.533886111,
+      26.624606846,
+      4.4953057159
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.398080385,
+       0.63865786699
+      ]
+     ],
+     "exponents": [
+      2.103504571,
+      1.0106094922
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.23701751489
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.085703405362
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0026285693959,
+       0.020556257749,
+       0.092070262801,
+       0.25565889739,
+       0.42111707185
+      ]
+     ],
+     "exponents": [
+      394.47503628,
+      93.137683104,
+      29.519608742,
+      10.781663791,
+      4.1626574778
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.34401746318
+      ]
+     ],
+     "exponents": [
+      1.6247972989
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.54306660493
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.20582073956
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.070053487306
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.16
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.336
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      2.303
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.476
+     ]
+    }
+   ]
+  },
+  "15": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form def2-TZVPP",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000552071641,
+       0.0042678595308,
+       0.021931529186,
+       0.085667168373,
+       0.24840686605,
+       0.46336753971,
+       0.35350558156
+      ]
+     ],
+     "exponents": [
+      52426.999233,
+      7863.2660552,
+      1789.5227333,
+      506.27300165,
+      164.60698546,
+      58.391918722,
+      21.643663201
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.021895679958,
+       0.095650470295,
+       -0.29454270186
+      ]
+     ],
+     "exponents": [
+      99.01383762,
+      30.550439817,
+      5.4537087661
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.32943812,
+       0.66109396473
+      ]
+     ],
+     "exponents": [
+      2.6503362563,
+      1.2726688867
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.31645005203
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.11417466938
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0025710623052,
+       0.020250297999,
+       0.091580716787,
+       0.25749454014,
+       0.42862899758
+      ]
+     ],
+     "exponents": [
+      472.27219248,
+      111.58882756,
+      35.445936418,
+      12.990776875,
+      5.0486221658
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.34359817849
+      ]
+     ],
+     "exponents": [
+      1.9934049566
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.6652728443
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.25516832128
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.090357762251
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.218
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.452
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      3.12
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.648
+     ]
+    }
+   ]
+  },
+  "16": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form def2-TZVPP",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00054695944225,
+       0.0042297224557,
+       0.021747824159,
+       0.085100053589,
+       0.24799128459,
+       0.46703640406,
+       0.3643458755
+      ]
+     ],
+     "exponents": [
+      60700.928104,
+      9102.6106854,
+      2071.4166009,
+      586.02476821,
+      190.55395021,
+      67.63038426,
+      25.127306905
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.02167004024,
+       0.09360230176,
+       -0.26068001422
+      ]
+     ],
+     "exponents": [
+      112.5746301,
+      34.795554217,
+      6.5115556215
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.2842089435,
+       0.66036416584
+      ]
+     ],
+     "exponents": [
+      3.2399032261,
+      1.5477160881
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.40541030112
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.14550651059
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0024796796317,
+       0.01967793025,
+       0.089980008258,
+       0.25705880575,
+       0.43515167292
+      ]
+     ],
+     "exponents": [
+      564.36716027,
+      133.42624379,
+      42.468271189,
+      15.61652758,
+      6.1093988469
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.34883240595
+      ]
+     ],
+     "exponents": [
+      2.4404160198
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.83882201296
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.312887469
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.10770109004
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.273
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.557
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      3.756
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.812
+     ]
+    }
+   ]
+  },
+  "17": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form def2-TZVPP",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00054314897497,
+       0.0041990463961,
+       0.021592141679,
+       0.084598850094,
+       0.24757249724,
+       0.47016930228,
+       0.37436370716
+      ]
+     ],
+     "exponents": [
+      69507.990945,
+      10426.15688,
+      2373.2334061,
+      671.56420071,
+      218.4199979,
+      77.572249714,
+      28.888815277
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.025182166603,
+       0.10786112456,
+       -0.27408821574
+      ]
+     ],
+     "exponents": [
+      127.10527185,
+      39.339582961,
+      7.6740679989
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.3213875014,
+       0.68636955368
+      ]
+     ],
+     "exponents": [
+      3.874562763,
+      1.8385832573
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.50229057542
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.1796272342
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0023632663836,
+       0.018879300374,
+       0.087206341273,
+       0.2528561297,
+       0.4350715482
+      ]
+     ],
+     "exponents": [
+      666.50423284,
+      157.6424169,
+      50.262520978,
+      18.536078105,
+      7.2940532777
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.35026513165
+      ]
+     ],
+     "exponents": [
+      2.9433248995
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.0404970818
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.3845641508
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.13069642732
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.339
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.706
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      4.61
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.011
+     ]
+    }
+   ]
+  },
+  "5": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00022837198155,
+       0.0017682576447,
+       0.0091407080516,
+       0.036342638989,
+       0.11063458441,
+       0.23367344321
+      ]
+     ],
+     "exponents": [
+      8564.8660687,
+      1284.1516263,
+      292.27871604,
+      82.775469176,
+      27.017939269,
+      9.814961966
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.41818777978,
+       0.22325473798
+      ]
+     ],
+     "exponents": [
+      3.9318559059,
+      1.6595599712
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.35762965239
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.14246277496
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.060560594768
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0050265575179,
+       0.032801738965,
+       0.13151230768,
+       0.33197167769
+      ]
+     ],
+     "exponents": [
+      22.453875803,
+      5.104505833,
+      1.4986081344,
+      0.50927831315
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.4731431957
+      ]
+     ],
+     "exponents": [
+      0.18147077798
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.25802783943
+      ]
+     ],
+     "exponents": [
+      0.064621893904
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.661
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.199
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.49
+     ]
+    }
+   ]
+  },
+  "6": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00022245814352,
+       0.0017232738252,
+       0.0089255715314,
+       0.035727984502,
+       0.11076259931,
+       0.24295627626
+      ]
+     ],
+     "exponents": [
+      13575.349682,
+      2035.233368,
+      463.22562359,
+      131.20019598,
+      42.853015891,
+      15.584185766
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.41440263448,
+       0.23744968655
+      ]
+     ],
+     "exponents": [
+      6.2067138508,
+      2.5764896527
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.57696339419
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.22972831358
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.095164440028
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0053333657805,
+       0.035864109092,
+       0.14215873329,
+       0.34270471845
+      ]
+     ],
+     "exponents": [
+      34.697232244,
+      7.9582622826,
+      2.3780826883,
+      0.81433208183
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.46445822433
+      ]
+     ],
+     "exponents": [
+      0.28887547253
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.24955789874
+      ]
+     ],
+     "exponents": [
+      0.10056823671
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.097
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.318
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.761
+     ]
+    }
+   ]
+  },
+  "7": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00021887984991,
+       0.0016960708803,
+       0.0087954603538,
+       0.035359382605,
+       0.11095789217,
+       0.24982972552
+      ]
+     ],
+     "exponents": [
+      19730.800647,
+      2957.8958745,
+      673.22133595,
+      190.68249494,
+      62.295441898,
+      22.654161182
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.40623896148,
+       0.24338217176
+      ]
+     ],
+     "exponents": [
+      8.9791477428,
+      3.686300237
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.84660076805
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.33647133771
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.13647653675
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0055552416751,
+       0.038052379723,
+       0.14953671029,
+       0.3494930523
+      ]
+     ],
+     "exponents": [
+      49.20038051,
+      11.346790537,
+      3.4273972411,
+      1.1785525134
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.45843153697
+      ]
+     ],
+     "exponents": [
+      0.41642204972
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.24428771672
+      ]
+     ],
+     "exponents": [
+      0.14260826011
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.654
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.469
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.093
+     ]
+    }
+   ]
+  },
+  "8": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00021726302465,
+       0.0016838662199,
+       0.0087395616265,
+       0.035239968808,
+       0.11153519115,
+       0.25588953961
+      ]
+     ],
+     "exponents": [
+      27032.382631,
+      4052.3871392,
+      922.3272271,
+      261.24070989,
+      85.354641351,
+      31.035035245
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.39768730901,
+       0.2462784943
+      ]
+     ],
+     "exponents": [
+      12.260860728,
+      4.9987076005
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.1703108158
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.46474740994
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.18504536357
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0060685103418,
+       0.041912575824,
+       0.16153841088,
+       0.35706951311
+      ]
+     ],
+     "exponents": [
+      63.274954801,
+      14.627049379,
+      4.4501223456,
+      1.5275799647
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.44794207502
+      ]
+     ],
+     "exponents": [
+      0.52935117943
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.24446069663
+      ]
+     ],
+     "exponents": [
+      0.1747842127
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      2.314
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.645
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.428
+     ]
+    }
+   ]
+  },
+  "9": {
+   "references": [
+    {
+     "reference_description": "Common base shells for def2-TZV*",
+     "reference_keys": [
+      "weigend2005a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00021545014888,
+       0.0016700686527,
+       0.0086733211476,
+       0.035049933175,
+       0.11165320133,
+       0.25988506647
+      ]
+     ],
+     "exponents": [
+      35479.100441,
+      5318.4728983,
+      1210.4810975,
+      342.8551814,
+      112.01943181,
+      40.714740248
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.3942296688,
+       0.24998238551
+      ]
+     ],
+     "exponents": [
+      16.039678111,
+      6.503818674
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.5440477509
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.61223452862
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.24027979698
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.0063685999134,
+       0.04430314353,
+       0.16867248708,
+       0.36166346255
+      ]
+     ],
+     "exponents": [
+      80.233900483,
+      18.594010743,
+      5.6867902653,
+      1.9511006294
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.44202901491
+      ]
+     ],
+     "exponents": [
+      0.66970211298
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.2431987573
+      ]
+     ],
+     "exponents": [
+      0.2165130041
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      3.107
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.855
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.917
+     ]
+    }
+   ]
+  }
+ },
+ "family": "ahlrichs",
+ "name": "def2-tzvpp",
+ "schema_version": "1.0",
+ "source": "Basis Set Exchange (bse 0.12)"
+}
