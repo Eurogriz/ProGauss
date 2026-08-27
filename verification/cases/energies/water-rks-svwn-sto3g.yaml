@@ -1,0 +1,33 @@
+id: water-rks-svwn-sto3g-energy
+level: L1
+description: >-
+  RKS/SVWN (LDA) воды в STO-3G. Первый DFT-кейс: проверяет численное
+  XC-интегрирование на квадратурной сетке вместе с обменно-корреляционным
+  функционалом. Пресет сетки зафиксирован, потому что энергия DFT без указания
+  плотности сетки — число без определённого значения.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: svwn }
+  grid: { preset: ultrafine }
+expect:
+  energy_hartree:
+    value: -74.7320493297
+    tol: 1.0e-7
+    source: >-
+      internal-reference (reference-cpu); независимо сверено с PySCF 2.14
+      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 4.0e-08 э
+  dipole_debye:
+    value: 1.728787
+    tol: 1.0e-5
+    source: >-
+      внутренний расчёт по плотности RKS; совпадает с RHF/STO-3G (1.725337)
+      в пределах различия плотностей методов
+quality:
+  scf_converged: true
+  electron_count: true
+  quadrature_electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  basis_angular_scheme: true

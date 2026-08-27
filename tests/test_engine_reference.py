@@ -29,7 +29,11 @@ from quantumlab.engine.basis import build_basis
 from quantumlab.engine.contracts import EngineRequest
 from quantumlab.engine.reference import ENGINE_BACKEND, ENGINE_NAME, ReferenceEngine
 from quantumlab.engine.scf import ScfSettings, run_rhf
-from quantumlab.errors import BasisNotFoundError, MethodNotAvailableError
+from quantumlab.errors import (
+    BasisNotFoundError,
+    FunctionalNotFoundError,
+    MethodNotAvailableError,
+)
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 
@@ -235,10 +239,12 @@ def test_unsupported_task_is_rejected_before_any_computation() -> None:
 
 
 def test_unimplemented_theory_is_rejected() -> None:
-    """DFT, MP2 и CC не реализованы — их нельзя получить даже формально.
+    """MP2 и CC не реализованы — их нельзя получить даже формально.
 
-    Отклонение идёт по методу, а не по функционалу: DFT без функционала
-    ``MethodSpec`` не построит вовсе, поэтому для него функционал указан.
+    DFT из этого списка исключён: LDA-функционал SVWN реализован и считается
+    (см. tests/test_engine_dft.py). Отклоняется конкретный нереализованный
+    функционал, причём отдельным типом ошибки — так GUI может показать
+    «функционал недоступен» вместо общего «метод недоступен».
     """
     for theory in (TheoryFamily.MP2, TheoryFamily.SCS_MP2, TheoryFamily.CCSD, TheoryFamily.CCSD_T):
         with pytest.raises(MethodNotAvailableError):
@@ -248,7 +254,7 @@ def test_unimplemented_theory_is_rejected() -> None:
                     method=MethodSpec(theory=theory, basis="sto-3g"),
                 )
             )
-    with pytest.raises(MethodNotAvailableError):
+    with pytest.raises(FunctionalNotFoundError):
         _run(
             spec=CalculationSpec(
                 task=Task.SINGLE_POINT,

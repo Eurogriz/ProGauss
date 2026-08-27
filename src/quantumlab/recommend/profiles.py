@@ -164,7 +164,13 @@ def resolve_profile(
     functional_class: FunctionalClass | None
     functional, functional_class, basis, dispersion = _base_choice(profile)
     theory = TheoryFamily.DFT
-    if not capabilities.is_available("method:dft"):
+    # Проверяем не только семейство методов, но и конкретный функционал: DFT
+    # может быть реализован частично (например, есть только LDA), и тогда
+    # профиль, обещающий PBE0, обязан откатиться, а не обещать точность,
+    # которой в коде нет (§54 ТЗ).
+    if not capabilities.is_available("method:dft") or not capabilities.is_available(
+        f"functional:{functional}"
+    ):
         # Откат на HF с явным объяснением: профиль обещает точность DFT, а ядро
         # её пока не даёт. Молча подставить HF нельзя — это было бы обманом
         # про точность; скрыть выбор — нарушением объяснимости (§8 ТЗ).

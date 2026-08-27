@@ -20,6 +20,7 @@ from collections.abc import Sequence as Seq
 from quantumlab.domain.spec import Task
 from quantumlab.engine.basis import basis_angular_scheme
 from quantumlab.engine.capabilities import Availability, Capability, CapabilityKind
+from quantumlab.engine.functional import FUNCTIONALS
 from quantumlab.errors import (
     BasisNotFoundError,
     FunctionalNotFoundError,
@@ -149,7 +150,11 @@ _METHODS: tuple[tuple[str, str], ...] = (
     ("ccsd_t", "CCSD(T)"),
 )
 
+#: SVWN реализован и сверен с LibXC; остальные заявлены в ТЗ, но кода нет.
+#: Статус записан рядом с именем, чтобы «заявлено» и «умеет» не разъезжались.
 _FUNCTIONALS: tuple[tuple[str, str, str], ...] = (
+    ("svwn", "SVWN (Слейтер + VWN-5)", "lda"),
+    ("lda", "LDA (синоним SVWN)", "lda"),
     ("pbe", "PBE", "gga"),
     ("blyp", "BLYP", "gga"),
     ("pbe0", "PBE0", "hybrid"),
@@ -238,6 +243,26 @@ _CARTESIAN_LIMITATION = (
 _SCHEDULERS: tuple[str, ...] = ("local", "slurm", "pbs", "lsf")
 
 
+def _method_limitations(name: str) -> tuple[str, ...]:
+    """Ограничения метода, видимые и в реестре, и в предупреждениях (§54 ТЗ)."""
+    if name == "hf":
+        return (
+            "Только RHF: нечётное число электронов отклоняется.",
+            "Задачи: только энергия в точке и оптимизация геометрии "
+            "(частоты, переходные состояния и сканирования требуют гессиана).",
+            "Оптимизация — только в декартовых координатах.",
+        )
+    if name == "dft":
+        return (
+            "Только LDA-функционал SVWN: GGA, meta-GGA, гибриды и "
+            "дальнодействующие гибриды не реализованы.",
+            "Только RKS: UKS для открытой оболочки не реализован.",
+            "Только энергия в точке: XC-вклад в аналитический градиент "
+            "не реализован, поэтому оптимизация геометрии недоступна.",
+        )
+    return ()
+
+
 def default_registry() -> CapabilityRegistry:
     """Собирает реестр, соответствующий текущему состоянию кодовой базы.
 
@@ -274,17 +299,10 @@ def default_registry() -> CapabilityRegistry:
     for name, label in _METHODS:
         # hf реализован, но только в варианте RHF и только для двух задач —
         # поэтому partial с явным перечнем ограничений, а не implemented.
-        availability = Availability.PARTIAL if name == "hf" else Availability.NOT_IMPLEMENTED
-        limitations = (
-            (
-                "Только RHF: нечётное число электронов отклоняется.",
-                "Задачи: только энергия в точке и оптимизация геометрии "
-                "(частоты, переходные состояния и сканирования требуют гессиана).",
-                "Оптимизация — только в декартовых координатах.",
-            )
-            if name == "hf"
-            else ()
+        availability = (
+            Availability.PARTIAL if name in ("hf", "dft") else Availability.NOT_IMPLEMENTED
         )
+        limitations = _method_limitations(name)
         capabilities.append(
             Capability(
                 id=f"method:{name}",
@@ -298,12 +316,30 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for name, label, functional_class in _FUNCTIONALS:
+        # Истина берётся из самого модуля функционалов: если реализация появится
+        # или исчезнет, реестр изменится вместе с ней, а не по чьей-то памяти.
+        implemented = name in FUNCTIONALS
         capabilities.append(
             Capability(
                 id=f"functional:{name}",
                 kind=CapabilityKind.FUNCTIONAL,
                 name=name,
-                availability=Availability.NOT_IMPLEMENTED,
+                availability=(
+                    Availability.PARTIAL if implemented else Availability.NOT_IMPLEMENTED
+                ),
+                since_version=__version__ if implemented else None,
+                limitations=(
+                    (
+                        "Только LDA: градиенты плотности (GGA), кинетическая "
+                        "плотность (meta-GGA) и доля точного обмена (гибриды) "
+                        "не реализованы.",
+                        "Только замкнутая оболочка: UKS не реализован.",
+                        "XC-вклад в градиент не реализован, поэтому оптимизация "
+                        "геометрии недоступна.",
+                    )
+                    if implemented
+                    else ()
+                ),
                 metadata={"label": label, "class": functional_class},
             )
         )

@@ -39,6 +39,7 @@ from quantumlab.domain.molecule import Atom, Molecule  # noqa: E402
 from quantumlab.domain.result import CalculationResult  # noqa: E402
 from quantumlab.domain.spec import (  # noqa: E402
     CalculationSpec,
+    GridSpec,
     MethodSpec,
     OptimizationSpec,
     Task,
@@ -156,10 +157,14 @@ def _build_spec(raw: dict[str, Any]) -> CalculationSpec:
     theory = TheoryFamily(str(method_raw.pop("theory")).lower())
     method = MethodSpec(theory=theory, **method_raw)
     optimization = OptimizationSpec(**raw.get("optimization", {}))
+    # Сетка передаётся явно: энергия DFT без указания пресета сетки — число
+    # без определённого значения, два прогона на разных пресетах различаются.
+    grid = GridSpec(**raw.get("grid", {}))
     return CalculationSpec(
         task=Task(raw["task"]),
         method=method,
         optimization=optimization,
+        grid=grid,
     )
 
 

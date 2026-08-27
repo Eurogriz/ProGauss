@@ -1,0 +1,27 @@
+id: h2-rks-svwn-sto3g-energy
+level: L1
+description: >-
+  RKS/SVWN (LDA) молекулы водорода в STO-3G. Вторая, независимая от воды
+  система для DFT: минимальная по размеру, поэтому расхождение с эталоном
+  здесь целиком определяется функционалом и сеткой, а не накопленной
+  погрешностью интегралов.
+molecule: tests/fixtures/hydrogen.xyz
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: svwn }
+  grid: { preset: ultrafine }
+expect:
+  energy_hartree:
+    value: -1.0953471251
+    tol: 1.0e-7
+    source: >-
+      internal-reference (reference-cpu); независимо сверено с PySCF 2.14
+      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 1.4e-08 э
+quality:
+  scf_converged: true
+  electron_count: true
+  quadrature_electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  basis_angular_scheme: true

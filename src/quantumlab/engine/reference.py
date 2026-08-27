@@ -47,8 +47,15 @@ from quantumlab.domain.spec import CalculationSpec, SpinTreatment, Task, TheoryF
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet, basis_angular_scheme, build_basis
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
+from quantumlab.engine.dft import RksResult, run_rks
+from quantumlab.engine.functional import (
+    density_at_points,
+    evaluate_basis,
+    get_functional,
+)
 from quantumlab.engine.gradients import rhf_gradient
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
+from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import (
     PrecomputedIntegrals,
@@ -84,6 +91,13 @@ _FOCK_COMMUTATOR_TOLERANCE = 1e-6
 
 #: Точность выполнения D′² = 2D′ в ортогональном базисе.
 _IDEMPOTENCY_TOLERANCE = 1e-6
+
+#: Насколько точно ∫ρ dV по квадратурной сетке обязано воспроизводить число
+#: электронов. Строгий порог — для сеток, которыми мы готовы отчитываться;
+#: между порогами выдаётся WARNING: грубая сетка действительно менее точна,
+#: и скрывать это означало бы выдать число с неизвестной погрешностью.
+_QUADRATURE_STRICT_TOLERANCE = 1e-6
+_QUADRATURE_LOOSE_TOLERANCE = 1e-3
 
 #: Избыток <S^2> над S(S+1), при котором сообщается о спиновом загрязнении.
 #: Это порог **сообщения**, а не корректности: само значение <S^2> всегда
@@ -211,9 +225,91 @@ class ReferenceEngine:
         self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
     ) -> CalculationResult:
         """Одноточечный расчёт в фиксированной геометрии."""
-        if request.spec.method is not None and request.spec.method.spin is SpinTreatment.UHF:
+        method = request.spec.method
+        if method is not None and method.theory is TheoryFamily.DFT:
+            return self._run_single_point_rks(request, basis_name, progress=progress)
+        if method is not None and method.spin is SpinTreatment.UHF:
             return self._run_single_point_uhf(request, basis_name, progress=progress)
         return self._run_single_point_rhf(request, basis_name, progress=progress)
+
+    def _run_single_point_rks(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """RKS (LDA) в фиксированной геометрии.
+
+        Сетка и значения базисных функций строятся здесь, а не внутри решателя:
+        проверки качества обязаны пользоваться **той же** сеткой, на которой
+        считалась энергия, иначе сравнение шло бы между двумя разными численными
+        схемами и его результат ничего бы не значил.
+        """
+        spec = request.spec
+        timings: list[TimingRecord] = []
+        method = spec.method
+        # Функционал не выбран пользователем — подставляем единственный
+        # реализованный, но **сообщаем об этом** в предупреждениях: молчаливый
+        # выбор метода расчёта сделал бы результат невоспроизводимым для того,
+        # кто читает только число (§8, §54 ТЗ).
+        # ``MethodSpec`` не пропускает DFT без функционала, поэтому ветки
+        # «подставить что-нибудь по умолчанию» здесь быть не должно: молчаливый
+        # выбор метода сделал бы результат невоспроизводимым (§54 ТЗ). Проверка
+        # ниже — защита инварианта, а не обработка штатного случая.
+        if method is None or method.functional is None:
+            msg = "DFT-расчёт требует явного обменно-корреляционного функционала."
+            raise ValueError(msg)
+        functional = get_functional(method.functional)
+
+        started = time.perf_counter()
+        basis = build_basis(basis_name, request.molecule)
+        timings.append(_timing("basis", started))
+        _report(progress, 5.0, "basis", functions=basis.n_functions)
+
+        started = time.perf_counter()
+        prepared = build_integrals(basis, request.molecule)
+        dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
+        timings.append(_timing("integrals", started))
+        _report(progress, 35.0, "integrals")
+
+        started = time.perf_counter()
+        grid = build_grid(request.molecule, spec.grid.preset)
+        basis_values = evaluate_basis(basis, request.molecule, grid.points)
+        timings.append(_timing("grid", started))
+        _report(progress, 45.0, "grid", points=grid.n_points)
+
+        started = time.perf_counter()
+        rks = run_rks(
+            basis,
+            request.molecule,
+            functional,
+            _scf_settings(spec),
+            integrals=prepared,
+            grid=grid,
+        )
+        timings.append(_timing("scf", started))
+        _report(progress, 85.0, "scf", iterations=rks.iterations, converged=rks.converged)
+
+        started = time.perf_counter()
+        properties = _properties(rks.as_scf_result(), request.molecule, dipole_integrals)
+        checks = _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
+        timings.append(_timing("properties", started))
+        _report(progress, 100.0, "properties")
+
+        return self._result(
+            request,
+            molecule=request.molecule,
+            basis=basis,
+            scf=_ScfSummary(
+                total_energy=rks.total_energy,
+                iterations=rks.iterations,
+                converged=rks.converged,
+            ),
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings_rks(
+                rks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
+            ),
+            final_molecule=None,
+        )
 
     def _run_single_point_rhf(
         self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
@@ -475,6 +571,11 @@ class ReferenceEngine:
                 # градиент по RHF-формулам для открытой оболочки означало бы
                 # выдать неверные силы под видом результата (§54 ТЗ).
                 raise MethodNotAvailableError("uhf-optimization")
+            if spec.method is not None and spec.method.theory is TheoryFamily.DFT:
+                # Энергия RKS есть, а аналитического XC-вклада в градиент нет.
+                # Численный градиент зависел бы от качества сетки, то есть
+                # дал бы силы, в корректности которых нельзя поручиться.
+                raise MethodNotAvailableError("dft-optimization")
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -881,6 +982,165 @@ def _quality_checks(
             ),
         ),
     )
+
+
+def _quality_checks_rks(
+    rks: RksResult,
+    basis: BasisSet,
+    molecule: Molecule,
+    prepared: PrecomputedIntegrals,
+    grid: QuadratureGrid,
+    basis_values: np.ndarray,
+) -> tuple[QualityCheck, ...]:
+    """Проверки качества для RKS.
+
+    Отдельная функция, а не переиспользование RHF-проверок: разложение энергии
+    у DFT другое (вместо обменного члена входит ``E_xc``), и подстановка
+    HF-формул выдала бы FAIL на корректном результате — или, что хуже, PASS на
+    неверном.
+
+    Две проверки здесь ровно потому, что каждая ловит свой класс ошибки:
+    ``quadrature_electron_count`` — неправильную меру интегрирования на сетке,
+    ``energy_decomposition`` — подмену ``E_xc`` следом ``D·V_xc``.
+    """
+    overlap = prepared.overlap
+    expected = molecule.n_electrons
+    density = rks.density
+
+    kinetic = float(np.sum(density * integrals.build_kinetic(basis, molecule)))
+    attraction = float(np.sum(density * integrals.build_nuclear_attraction(basis, molecule)))
+    coulomb = float(np.einsum("uv,ls,uvls", density, density, prepared.eri))
+
+    rho = density_at_points(basis_values, density)
+    grid_electrons = float(np.sum(grid.weights * rho))
+
+    v_xc = rks.v_xc
+    if v_xc is None:
+        msg = "RKS-результат без обменно-корреляционного потенциала: проверки невозможны."
+        raise ValueError(msg)
+    fock = prepared.core + coulomb_matrix(density, prepared.eri) + v_xc
+    commutator_error = float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock)))
+
+    decomposition_error = abs(
+        kinetic
+        + attraction
+        + 0.5 * coulomb
+        + rks.xc_energy
+        + rks.nuclear_repulsion
+        - rks.total_energy
+    )
+
+    orthogonalizer = canonical_orthogonalizer(overlap)
+    inverse = np.linalg.inv(orthogonalizer)
+    density_prime = inverse @ density @ inverse.T
+    idempotency_error = float(np.max(np.abs(density_prime @ density_prime - 2.0 * density_prime)))
+
+    grid_error = abs(grid_electrons - expected)
+    if grid_error < _QUADRATURE_STRICT_TOLERANCE:
+        grid_verdict = QualityVerdict.PASS
+    elif grid_error < _QUADRATURE_LOOSE_TOLERANCE:
+        grid_verdict = QualityVerdict.WARNING
+    else:
+        grid_verdict = QualityVerdict.FAIL
+
+    scheme = basis_angular_scheme(basis.name)
+    return (
+        QualityCheck(
+            name_key="scf_converged",
+            verdict=QualityVerdict.PASS if rks.converged else QualityVerdict.FAIL,
+            detail=f"итераций: {rks.iterations}, стратегии: {', '.join(rks.strategies_used)}",
+        ),
+        QualityCheck(
+            name_key="electron_count",
+            verdict=(
+                QualityVerdict.PASS
+                if abs(float(np.trace(density @ overlap)) - expected) < _ELECTRON_COUNT_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"tr(D·S) = {np.trace(density @ overlap):.8f}, ожидается {expected}",
+        ),
+        QualityCheck(
+            name_key="quadrature_electron_count",
+            verdict=grid_verdict,
+            detail=(
+                f"∫ρ dV по сетке из {rks.grid_points} точек = {grid_electrons:.8f}, "
+                f"ожидается {expected}, расхождение {grid_error:.3e}"
+            ),
+        ),
+        QualityCheck(
+            name_key="energy_decomposition",
+            verdict=(
+                QualityVerdict.PASS
+                if decomposition_error < _ENERGY_DECOMPOSITION_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=(
+                "E = T + V_яд-эл + E_кулон + E_xc + V_яд-яд пересчитано по плотности, "
+                f"E_xc = {rks.xc_energy:.8f} э, расхождение {decomposition_error:.3e} э"
+            ),
+        ),
+        QualityCheck(
+            name_key="fock_density_commutator",
+            verdict=(
+                QualityVerdict.PASS
+                if commutator_error < _FOCK_COMMUTATOR_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"условие стационарности FDS = SDF, max|FDS − SDF| = {commutator_error:.3e}",
+        ),
+        QualityCheck(
+            name_key="density_idempotency",
+            verdict=(
+                QualityVerdict.PASS
+                if idempotency_error < _IDEMPOTENCY_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"max|D′² − 2D′| = {idempotency_error:.3e}",
+        ),
+        QualityCheck(
+            name_key="basis_angular_scheme",
+            verdict=QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING,
+            detail=(
+                "базис опубликован в декартовой схеме — расчёт ей соответствует"
+                if scheme == "cartesian"
+                else (
+                    "базис опубликован в сферической схеме, расчёт идёт в декартовой "
+                    "(6 d-функций вместо 5); энергия ниже табличной примерно на 1e-4 Eh"
+                )
+            ),
+        ),
+    )
+
+
+def _warnings_rks(
+    rks: RksResult,
+    basis: BasisSet,
+    molecule: Molecule,
+    grid: QuadratureGrid,
+    *,
+    pruning_requested: bool = False,
+) -> tuple[str, ...]:
+    """Предупреждения RKS: всё из RHF плюс качество сетки и границы метода."""
+    warnings: list[str] = []
+    if not rks.converged:
+        warnings.append(f"SCF не сошёлся за {rks.iterations} итераций; энергия приведена как есть")
+    scheme = _angular_scheme_warning(basis)
+    if scheme:
+        warnings.append(scheme)
+    dipole = _dipole_origin_warning(molecule)
+    if dipole:
+        warnings.append(dipole)
+    if pruning_requested:
+        warnings.append(
+            "Прореживание угловой сетки (grid.prune) не реализовано: угловая сетка "
+            "полная у каждого атома. Расчёт корректен, но точек больше, чем нужно."
+        )
+    warnings.append(
+        f"XC-интегрирование: {grid.n_points} точек сетки (пресет {grid.preset.value}); "
+        "результат зависит от пресета — сравнение с другими программами корректно "
+        "только при сопоставимой сетке"
+    )
+    return tuple(warnings)
 
 
 def _dipole_origin_warning(molecule: Molecule) -> str | None:

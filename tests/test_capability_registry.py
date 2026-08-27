@@ -76,12 +76,23 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
         for item in registry.list_capabilities(CapabilityKind.METHOD)
         if item.id.startswith("method:")
     ]
-    assert {item.id for item in methods if item.is_usable} == {"method:hf"}
+    assert {item.id for item in methods if item.is_usable} == {"method:hf", "method:dft"}
     for capability in methods:
-        if capability.id == "method:hf":
+        if capability.id in ("method:hf", "method:dft"):
             continue
         assert capability.availability is Availability.NOT_IMPLEMENTED, capability.id
         assert not capability.is_usable, capability.id
+
+    # DFT работает, но только в варианте LDA-функционала SVWN и только для
+    # энергии в точке: «partial» без перечня ограничений выглядел бы как «готово».
+    dft = registry.get("method:dft")
+    assert dft.availability is Availability.PARTIAL
+    assert dft.limitations
+    assert any("SVWN" in text for text in dft.limitations)
+    assert any("градиент" in text for text in dft.limitations)
+    # Реализованный функционал виден в реестре, заявленный без кода — нет.
+    assert registry.is_available("functional:svwn")
+    assert not registry.is_available("functional:pbe0")
     assert not registry.is_available("method:ccsd_t")
     assert not registry.is_available("spin:rohf")
 
