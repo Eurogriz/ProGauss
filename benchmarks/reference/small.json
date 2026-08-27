@@ -1,25 +1,25 @@
 {
   "suite": "small",
-  "measured_at": "2026-08-27T08:16:34+0000",
+  "measured_at": "2026-08-27T14:54:54+0000",
   "hardware": "x86_64, 2 CPU, Linux 6.1.158+",
   "versions": {
     "python": "3.11.2",
     "numpy": "2.4.6",
     "blas": "scipy-openblas 0.3.31.188.0",
-    "git": "a67f3ac"
+    "git": "975cacf"
   },
   "cases": {
     "hydrogen-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 0.295,
+        "value": 0.2653,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.3959,
+        "value": 0.3681,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 48.1,
+        "value": 48.3,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -29,11 +29,11 @@
     },
     "water-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 1.4362,
+        "value": 0.4475,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 1.538,
+        "value": 0.5503,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
@@ -47,11 +47,11 @@
     },
     "water-rhf-sto3g-grad": {
       "wall_s": {
-        "value": 1.6772,
+        "value": 1.4127,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 1.7798,
+        "value": 1.5147,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
@@ -65,15 +65,15 @@
     },
     "water-rhf-631g-sp": {
       "wall_s": {
-        "value": 4.0942,
+        "value": 1.7616,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 4.1956,
+        "value": 1.8633,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 52.1,
+        "value": 49.9,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -83,15 +83,15 @@
     },
     "water-rhf-sto3g-opt": {
       "wall_s": {
-        "value": 16.1919,
+        "value": 12.1281,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 16.2903,
+        "value": 12.2216,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 73.0,
+        "value": 61.4,
         "tolerance": 0.25
       },
       "scf_iterations": {

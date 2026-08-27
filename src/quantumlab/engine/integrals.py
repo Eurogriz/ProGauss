@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Final
 
@@ -552,7 +553,7 @@ def build_electron_repulsion(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     return tensor
 
 
-def _quartet_block(
+def _quartet_block_scalar(
     shell_a: Shell,
     center_a: Point,
     shell_b: Shell,
@@ -562,6 +563,12 @@ def _quartet_block(
     shell_d: Shell,
     center_d: Point,
 ) -> np.ndarray:
+    """Блок ``(ab|cd)``, считанный «в лоб» по примитивным квартетам.
+
+    Рабочий путь — векторизованный :func:`_quartet_block`; эта функция
+    оставлена как читаемая спецификация формул и как оракул для теста на
+    совпадение двух путей.
+    """
     powers_a = cartesian_powers(shell_a.angular_momentum)
     powers_b = cartesian_powers(shell_b.angular_momentum)
     powers_c = cartesian_powers(shell_c.angular_momentum)
@@ -1045,6 +1052,154 @@ def _contract(
                 total + coefficient_bra * coefficient_ket * coulomb[(t1 + t2, u1 + u2, v1 + v2, 0)]
             )
     return total
+
+
+@dataclass(frozen=True, slots=True)
+class _QuartetArrays:
+    """Всё, что зависит от примитивного квартета, но не от угловых моментов.
+
+    Собирается один раз на квартет оболочек и переиспользуется для всех
+    декартовых компонент. Именно повторный расчёт этих величин на каждую
+    компоненту и определял стоимость интегралов: на воде/6-31G было
+    147 тыс. полных проходов ``_eri_primitive`` при 13 базисных функциях.
+    """
+
+    a: np.ndarray
+    b: np.ndarray
+    c: np.ndarray
+    d: np.ndarray
+    coefficients: np.ndarray
+    prefactor: np.ndarray
+    coulomb: dict[tuple[int, int, int, int], np.ndarray]
+    q: tuple[float, float, float]
+    r: tuple[float, float, float]
+
+
+def _quartet_arrays(
+    shell_a: Shell,
+    center_a: Point,
+    shell_b: Shell,
+    center_b: Point,
+    shell_c: Shell,
+    center_c: Point,
+    shell_d: Shell,
+    center_d: Point,
+    *,
+    angular_budget: int,
+) -> _QuartetArrays:
+    """Раскладывает квартет оболочек по всем примитивным квартетам сразу.
+
+    Порядок примитивов — прямое произведение ``(α, β, γ, δ)`` с медленнее всего
+    меняющимся ``α``; массив коэффициентов сжатия строится в том же порядке,
+    поэтому свёртка ``coefficients @ (…)`` корректна.
+
+    ``angular_budget`` — максимальная сумма ``t+u+v`` в таблице ``R``: для
+    энергии это ``l_a+l_b+l_c+l_d``, для производной на единицу больше.
+    """
+    counts = [
+        len(shell_a.exponents),
+        len(shell_b.exponents),
+        len(shell_c.exponents),
+        len(shell_d.exponents),
+    ]
+    a = np.repeat(np.asarray(shell_a.exponents, dtype=float), counts[1] * counts[2] * counts[3])
+    b = np.repeat(
+        np.tile(np.asarray(shell_b.exponents, dtype=float), counts[0]), counts[2] * counts[3]
+    )
+    c = np.repeat(
+        np.tile(np.asarray(shell_c.exponents, dtype=float), counts[0] * counts[1]), counts[3]
+    )
+    d = np.tile(np.asarray(shell_d.exponents, dtype=float), counts[0] * counts[1] * counts[2])
+    coefficients = np.einsum(
+        "i,j,k,l->ijkl",
+        np.asarray(shell_a.coefficients, dtype=float),
+        np.asarray(shell_b.coefficients, dtype=float),
+        np.asarray(shell_c.coefficients, dtype=float),
+        np.asarray(shell_d.coefficients, dtype=float),
+    ).reshape(-1)
+
+    p = a + b
+    q = c + d
+    alpha = p * q / (p + q)
+    pqx = (a * center_a[0] + b * center_b[0]) / p - (c * center_c[0] + d * center_d[0]) / q
+    pqy = (a * center_a[1] + b * center_b[1]) / p - (c * center_c[1] + d * center_d[1]) / q
+    pqz = (a * center_a[2] + b * center_b[2]) / p - (c * center_c[2] + d * center_d[2]) / q
+    x = alpha * (pqx * pqx + pqy * pqy + pqz * pqz)
+
+    return _QuartetArrays(
+        a=a,
+        b=b,
+        c=c,
+        d=d,
+        coefficients=coefficients,
+        prefactor=2.0 * PI_5_2 / (p * q * np.sqrt(p + q)),
+        coulomb=_coulomb_table(angular_budget, alpha, pqx, pqy, pqz, x),
+        q=(center_a[0] - center_b[0], center_a[1] - center_b[1], center_a[2] - center_b[2]),
+        r=(center_c[0] - center_d[0], center_c[1] - center_d[1], center_c[2] - center_d[2]),
+    )
+
+
+def _quartet_block(
+    shell_a: Shell,
+    center_a: Point,
+    shell_b: Shell,
+    center_b: Point,
+    shell_c: Shell,
+    center_c: Point,
+    shell_d: Shell,
+    center_d: Point,
+) -> np.ndarray:
+    """Блок ``(ab|cd)`` сразу по всем примитивным квартетам оболочки.
+
+    Формула та же, что в скалярном :func:`_quartet_block_scalar`; отличается
+    только способ счёта. Кет-сторона и таблица ``R^n_{tuv}`` не зависят от
+    угловых моментов бра-функции, поэтому считаются один раз.
+    """
+    powers_a = cartesian_powers(shell_a.angular_momentum)
+    powers_b = cartesian_powers(shell_b.angular_momentum)
+    powers_c = cartesian_powers(shell_c.angular_momentum)
+    powers_d = cartesian_powers(shell_d.angular_momentum)
+    scales = (
+        shell_a.component_scales,
+        shell_b.component_scales,
+        shell_c.component_scales,
+        shell_d.component_scales,
+    )
+    arrays = _quartet_arrays(
+        shell_a,
+        center_a,
+        shell_b,
+        center_b,
+        shell_c,
+        center_c,
+        shell_d,
+        center_d,
+        angular_budget=(
+            shell_a.angular_momentum
+            + shell_b.angular_momentum
+            + shell_c.angular_momentum
+            + shell_d.angular_momentum
+        ),
+    )
+    qx, qy, qz = arrays.q
+    rx, ry, rz = arrays.r
+
+    block = np.zeros((len(powers_a), len(powers_b), len(powers_c), len(powers_d)))
+    for ib, pb in enumerate(powers_b):
+        for ic, pc in enumerate(powers_c):
+            for idx, pd in enumerate(powers_d):
+                ket = _hermite_product_arrays(
+                    pc, pd, rx, ry, rz, arrays.c, arrays.d, alternating=True
+                )
+                if not ket:
+                    continue
+                for ia, pa in enumerate(powers_a):
+                    bra = _hermite_product_arrays(pa, pb, qx, qy, qz, arrays.a, arrays.b)
+                    values = _contract(bra, ket, arrays.coulomb)
+                    block[ia, ib, ic, idx] = float(
+                        arrays.coefficients @ (arrays.prefactor * values)
+                    ) * (scales[0][ia] * scales[1][ib] * scales[2][ic] * scales[3][idx])
+    return block
 
 
 def _quartet_derivative_block(

@@ -50,8 +50,15 @@ from quantumlab.engine.contracts import EngineRequest, ProgressReporter
 from quantumlab.engine.gradients import rhf_gradient
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
+from quantumlab.engine.scf import (
+    PrecomputedIntegrals,
+    ScfSettings,
+    build_fock,
+    build_integrals,
+    canonical_orthogonalizer,
+    run_rhf,
+)
 from quantumlab.engine.scf import ScfResult as RhfResult
-from quantumlab.engine.scf import ScfSettings, build_fock, canonical_orthogonalizer, run_rhf
 from quantumlab.errors import ScfNotConvergedError
 from quantumlab.version import __version__
 
@@ -183,19 +190,19 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        overlap = integrals.build_overlap(basis, request.molecule)
+        prepared = build_integrals(basis, request.molecule)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 45.0, "integrals")
 
         started = time.perf_counter()
-        rhf = run_rhf(basis, request.molecule, _scf_settings(spec))
+        rhf = run_rhf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=rhf.iterations, converged=rhf.converged)
 
         started = time.perf_counter()
         properties = _properties(rhf, request.molecule, dipole_integrals)
-        checks = _quality_checks(rhf, basis, request.molecule, overlap)
+        checks = _quality_checks(rhf, basis, request.molecule, prepared)
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -262,14 +269,14 @@ class ReferenceEngine:
         final = optimization.molecule
         started = time.perf_counter()
         basis = build_basis(basis_name, final)
-        overlap = integrals.build_overlap(basis, final)
+        prepared = build_integrals(basis, final)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
-        rhf = run_rhf(basis, final, _scf_settings(spec))
+        rhf = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
         timings.append(_timing("final-scf", started))
 
         started = time.perf_counter()
         properties = _properties(rhf, final, dipole_integrals)
-        checks = _quality_checks(rhf, basis, final, overlap) + _optimization_check(optimization)
+        checks = _quality_checks(rhf, basis, final, prepared) + _optimization_check(optimization)
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -488,19 +495,24 @@ def _properties(
 
 
 def _quality_checks(
-    rhf: RhfResult, basis: BasisSet, molecule: Molecule, overlap: np.ndarray
+    rhf: RhfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
 ) -> tuple[QualityCheck, ...]:
     """Проверки, которые движок выполняет над собственным результатом (§26 ТЗ).
 
     Проверки нужны не для отчёта, а чтобы расхождение между математическими
     тождествами и фактическим результатом не прошло незамеченным.
+
+    Тензор ERI берётся из ``prepared``, а не собирается заново: раньше проверка
+    разложения энергии строила его второй раз за расчёт, и на воде/6-31G это
+    стоило столько же, сколько весь SCF вместе с интегралами.
     """
+    overlap = prepared.overlap
     electron_count = float(np.trace(rhf.density @ overlap))
     expected = molecule.n_electrons
 
     kinetic = float(np.sum(rhf.density * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(rhf.density * integrals.build_nuclear_attraction(basis, molecule)))
-    repulsion = integrals.build_electron_repulsion(basis, molecule)
+    repulsion = prepared.eri
     coulomb = float(np.einsum("uv,ls,uvls", rhf.density, rhf.density, repulsion))
     exchange = float(np.einsum("uv,ls,ulvs", rhf.density, rhf.density, repulsion))
     electron_electron = 0.5 * (coulomb - 0.5 * exchange)
@@ -508,8 +520,7 @@ def _quality_checks(
         kinetic + attraction + electron_electron + rhf.nuclear_repulsion - rhf.total_energy
     )
 
-    core = integrals.build_core_hamiltonian(basis, molecule)
-    fock = build_fock(core, rhf.density, repulsion)
+    fock = build_fock(prepared.core, rhf.density, repulsion)
     commutator_error = float(
         np.max(np.abs(fock @ rhf.density @ overlap - overlap @ rhf.density @ fock))
     )

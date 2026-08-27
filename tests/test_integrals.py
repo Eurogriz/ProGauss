@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from quantumlab.domain.molecule import Atom, Molecule
+from quantumlab.engine import integrals
 from quantumlab.engine.basis import (
     BasisNotFoundError,
     BasisSet,
@@ -285,3 +286,78 @@ def test_dipole_is_origin_independent_for_neutral_molecule(water: Molecule) -> N
     overlap = build_overlap(basis, water)
     n_electrons = float(np.trace(result.density @ overlap))
     assert n_electrons == pytest.approx(water.n_electrons, abs=1e-8)
+
+
+@pytest.mark.parametrize("basis_name", ["sto-3g", "6-31g"])
+def test_vectorized_eri_matches_scalar_reference(water: Molecule, basis_name: str) -> None:
+    """Векторизованная сборка ERI совпадает со скалярной спецификацией.
+
+    В ``integrals`` два пути: скалярный ``_quartet_block_scalar`` — медленный,
+    но читаемый, и векторизованный — рабочий. Тест фиксирует, что ускорение не
+    изменило физику. Проверяются ``s``- и ``p``-оболочки: на них работают
+    ветвления рекурсии по угловым моментам.
+    """
+    basis = build_basis(basis_name, water)
+    centers = integrals._shell_centers(basis, water)
+    worst = 0.0
+    checked = 0
+    for i in range(len(basis.shells)):
+        for j in range(i + 1):
+            for k in range(len(basis.shells)):
+                for m in range(k + 1):
+                    if i * (i + 1) + j < k * (k + 1) + m:
+                        continue
+                    arguments = (
+                        basis.shells[i],
+                        centers[i],
+                        basis.shells[j],
+                        centers[j],
+                        basis.shells[k],
+                        centers[k],
+                        basis.shells[m],
+                        centers[m],
+                    )
+                    fast = integrals._quartet_block(*arguments)
+                    slow = integrals._quartet_block_scalar(*arguments)
+                    worst = max(worst, float(np.abs(fast - slow).max()))
+                    checked += 1
+    assert checked > 0
+    assert worst < 1e-13, worst
+
+
+def test_eri_build_is_not_repeated_by_quality_checks(
+    water: Molecule, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Тензор ERI строится один раз за расчёт, а не по разу на проверку.
+
+    Раньше ``_quality_checks`` собирала его заново ради разложения энергии,
+    и на воде/6-31G это удваивало стоимость расчёта. Подменяется связывание
+    в ``scf``, а не в ``integrals``: ``scf`` импортирует функцию по имени,
+    поэтому патч исходного модуля до неё не доходит.
+    """
+    from quantumlab.domain.spec import CalculationSpec, MethodSpec, Task, TheoryFamily
+    from quantumlab.engine.contracts import EngineRequest
+    from quantumlab.engine.reference import ReferenceEngine
+
+    calls: list[int] = []
+    original = build_electron_repulsion
+
+    def counting(target: BasisSet, structure: Molecule) -> np.ndarray:
+        calls.append(1)
+        return original(target, structure)
+
+    # Цель задаётся строкой: ``scf`` не реэкспортирует функцию, и обращение
+    # по атрибуту mypy отвергает как неявный экспорт.
+    monkeypatch.setattr("quantumlab.engine.scf.build_electron_repulsion", counting)
+    basis = build_basis("sto-3g", water)
+    ReferenceEngine().run(
+        EngineRequest(
+            job_id="eri-count",
+            molecule=water,
+            spec=CalculationSpec(
+                task=Task.SINGLE_POINT,
+                method=MethodSpec(theory=TheoryFamily.HF, basis=basis.name),
+            ),
+        )
+    )
+    assert len(calls) == 1, f"ERI собрана {len(calls)} раз вместо одного"

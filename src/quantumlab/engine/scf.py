@@ -153,10 +153,37 @@ def _diis_extrapolate(
     return sum(float(w) * f for w, f in zip(weights, fock_history, strict=True))  # type: ignore[return-value]
 
 
+@dataclass(frozen=True, slots=True)
+class PrecomputedIntegrals:
+    """Одноэлектронные и двухэлектронные интегралы, собранные заранее.
+
+    Нужны, чтобы вызывающая сторона могла отнести стоимость интегралов к своему
+    этапу. Без этого сборка тензора ERI — самая дорогая часть расчёта —
+    попадала в этап ``scf`` и отчёт о временах этапов вводил в заблуждение:
+    на воде/6-31G этап ``integrals`` показывал 0.012 с, тогда как двухэлектронные
+    интегралы стоили около секунды.
+    """
+
+    overlap: np.ndarray
+    core: np.ndarray
+    eri: np.ndarray
+
+
+def build_integrals(basis: BasisSet, molecule: Molecule) -> PrecomputedIntegrals:
+    """Собирает все интегралы, нужные RHF."""
+    return PrecomputedIntegrals(
+        overlap=build_overlap(basis, molecule),
+        core=build_core_hamiltonian(basis, molecule),
+        eri=build_electron_repulsion(basis, molecule),
+    )
+
+
 def run_rhf(
     basis: BasisSet,
     molecule: Molecule,
     settings: ScfSettings | None = None,
+    *,
+    integrals: PrecomputedIntegrals | None = None,
 ) -> ScfResult:
     """Выполняет RHF-расчёт.
 
@@ -167,6 +194,9 @@ def run_rhf(
     На каждой итерации выполняется ровно одна диагонализация: фокиан строится
     по текущей плотности, при необходимости экстраполируется (DIIS) и/или
     сдвигается по уровням, затем диагонализуется в ортогональном базисе.
+
+    Интегралы можно передать готовыми через ``integrals`` — тогда их стоимость
+    относится к этапу вызывающей стороны, а не к ``scf``.
     """
     config = settings or ScfSettings()
     started = time.perf_counter()
@@ -181,9 +211,10 @@ def run_rhf(
         raise ValueError(msg)
     n_occupied = electrons // 2
 
-    overlap = build_overlap(basis, molecule)
-    core = build_core_hamiltonian(basis, molecule)
-    eri = build_electron_repulsion(basis, molecule)
+    prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+    overlap = prepared.overlap
+    core = prepared.core
+    eri = prepared.eri
     v_nuc = nuclear_repulsion(molecule)
     orthogonalizer = canonical_orthogonalizer(overlap)
 
