@@ -152,8 +152,8 @@ def _add_calculation_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _load_molecule(path: Path, *, charge: int, multiplicity: int) -> Molecule:
-    return Molecule.from_xyz(path.read_text(encoding="utf-8"), name=path.stem).model_copy(
-        update={"charge": charge, "multiplicity": multiplicity}
+    return Molecule.from_xyz(path.read_text(encoding="utf-8"), name=path.stem).with_state(
+        charge=charge, multiplicity=multiplicity
     )
 
 

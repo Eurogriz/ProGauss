@@ -348,7 +348,7 @@ def default_registry() -> CapabilityRegistry:
         capabilities.append(
             Capability(
                 id=f"coordinates:{name}",
-                kind=CapabilityKind.METHOD,
+                kind=CapabilityKind.COORDINATES,
                 name=name,
                 availability=availability,
                 since_version=__version__ if availability.is_usable else None,
@@ -368,7 +368,7 @@ def default_registry() -> CapabilityRegistry:
         capabilities.append(
             Capability(
                 id=f"spin:{name}",
-                kind=CapabilityKind.METHOD,
+                kind=CapabilityKind.SPIN,
                 name=name,
                 availability=availability,
                 since_version=__version__ if availability.is_usable else None,

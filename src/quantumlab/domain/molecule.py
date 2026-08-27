@@ -221,6 +221,18 @@ class Molecule(BaseModel):
         self._validate_multiplicity()
         return self
 
+    def with_state(self, *, charge: int, multiplicity: int) -> Molecule:
+        """Возвращает копию с другим зарядом и мультиплетностью.
+
+        Именно копию через валидацию, а не ``model_copy(update=...)``: тот
+        обходит валидатор модели, и на выходе получилась бы молекула, у которой
+        мультиплетность несовместима с числом электронов. Ошибка всплыла бы
+        только внутри расчёта — и не в виде понятной диагностики (§19 ТЗ).
+        """
+        return Molecule.model_validate(
+            {**self.model_dump(), "charge": charge, "multiplicity": multiplicity}
+        )
+
     def allowed_multiplicities(self) -> tuple[int, ...]:
         """Все мультиплетности, совместимые с текущим числом электронов.
 

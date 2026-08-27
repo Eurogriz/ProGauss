@@ -62,6 +62,15 @@ class Catalog:
         """Все ключи каталога — используется тестом паритета локализаций."""
         return frozenset(self._messages)
 
+    def messages(self) -> dict[str, str]:
+        """Копия всех строк каталога.
+
+        Нужна эндпоинту ``GET /i18n/{locale}``: клиент получает словарь целиком
+        и не хранит текстов в собственном коде (§3 ТЗ). Возвращается копия,
+        чтобы вызывающий не мог изменить каталог извне.
+        """
+        return dict(self._messages)
+
     def __contains__(self, key: object) -> bool:
         """Есть ли ключ в каталоге."""
         return key in self._messages

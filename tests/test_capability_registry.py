@@ -190,8 +190,17 @@ def test_snapshot_groups_by_kind(registry: CapabilityRegistry) -> None:
         "format",
         "backend",
         "scheduler",
+        "coordinates",
+        "spin",
     }
     assert snapshot["backend"][0]["availability"] == "not_implemented"
+    # Системы координат и спин — отдельные категории: раздел «База методов» в GUI
+    # строится из этого среза, и координаты в списке методов были бы ошибкой.
+    assert all(str(item["id"]).startswith("coordinates:") for item in snapshot["coordinates"])
+    assert all(str(item["id"]).startswith("spin:") for item in snapshot["spin"])
+    assert not any(
+        str(item["id"]).startswith(("coordinates:", "spin:")) for item in snapshot["method"]
+    )
 
 
 def test_plugin_can_register_new_capability(registry: CapabilityRegistry) -> None:

@@ -40,6 +40,8 @@ class ErrorCode(StrEnum):
     OPTIMIZATION_NOT_CONVERGED = "optimization.not_converged"
     IMAGINARY_FREQUENCIES = "frequencies.imaginary_modes"
     ARTIFACT_MISSING = "storage.artifact_missing"
+    CATALOG_NOT_FOUND = "catalog.not_found"
+    FORMAT_NOT_IMPLEMENTED = "format.not_implemented"
     OUT_OF_MEMORY = "runtime.out_of_memory"
 
 
@@ -180,6 +182,33 @@ class DiagnosisError(QuantumLabError):
 # именно то, что умеет обработать (например, GUI предлагает «найти ТС» только
 # при ImaginaryFrequenciesError).
 # --------------------------------------------------------------------------- #
+class CatalogEntryNotFoundError(QuantumLabError):
+    """Проект или структура с таким идентификатором отсутствует."""
+
+    code = ErrorCode.CATALOG_NOT_FOUND
+
+    def __init__(self, kind: str, identifier: str) -> None:
+        """Создаёт ошибку для сущности ``kind`` с идентификатором ``identifier``."""
+        super().__init__({"kind": kind, "id": identifier})
+        self.kind = kind
+        self.identifier = identifier
+
+
+class UnsupportedStructureFormatError(QuantumLabError):
+    """Формат структуры заявлен в архитектуре, но парсер для него не написан.
+
+    Отклоняется явно, а не молча: принять SMILES и разобрать его как XYZ
+    означало бы выдать пользователю не ту структуру (§54 ТЗ).
+    """
+
+    code = ErrorCode.FORMAT_NOT_IMPLEMENTED
+
+    def __init__(self, name: str) -> None:
+        """Создаёт ошибку для формата ``name``."""
+        super().__init__({"format": name})
+        self.format_name = name
+
+
 class MethodNotAvailableError(QuantumLabError):
     """Метод объявлен в архитектуре, но не реализован (§54 ТЗ).
 

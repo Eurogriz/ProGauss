@@ -4,7 +4,7 @@
 PYTHON ?= .venv/bin/python
 PIP    ?= .venv/bin/pip
 
-.PHONY: help venv install lint fmt typecheck test verify coverage bench check clean
+.PHONY: help venv install lint fmt typecheck test verify coverage bench check serve clean
 
 help: ## Показать список команд
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -41,6 +41,10 @@ bench: ## Бенчмарки (§27 ТЗ): прогон small и сравнени
 	$(PYTHON) benchmarks/run_benchmarks.py --suite small
 
 check: lint typecheck test ## Всё вместе — как в CI
+
+serve: ## Поднять REST API (контракт: api/openapi/v1.yaml)
+	.venv/bin/uvicorn --factory quantumlab.server:create_app --host 0.0.0.0 --port 8000
+
 
 clean: ## Удалить артефакты
 	rm -rf .pytest_cache .mypy_cache .ruff_cache .coverage coverage.xml htmlcov

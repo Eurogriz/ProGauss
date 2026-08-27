@@ -114,12 +114,20 @@ def test_cli_plan_explains_automatic_choices(
     output = capsys.readouterr().out
     assert "Высокая точность" in output
     assert "def2-tzvp" in output
-    assert "pbe0" in output
+    # Профиль предполагает PBE0, но DFT ещё не реализован: рекомендатель обязан
+    # сказать об этом вслух, а не выдать план, который упадёт (§54 ТЗ).
+    assert "ещё не реализован" in output
+    assert "pbe0" not in output
 
 
-def test_cli_run_is_honest_about_missing_engine(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cli_runs_the_recommended_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Автоподобранный план обязан выполняться, а не падать после «Рассчитать».
+
+    Раньше «Рекомендуемые настройки» выдавали DFT-функционал, которого в ядре
+    нет, и расчёт умирал сразу после запуска. Теперь рекомендатель сверяется с
+    реестром, поэтому recommended-план доходит до настоящего результата.
+    Честность про недоступные методы проверяют соседние тесты.
+    """
     code = main(
         [
             "--lang",
@@ -127,19 +135,20 @@ def test_cli_run_is_honest_about_missing_engine(
             "--data-dir",
             str(tmp_path),
             "run",
-            str(WATER),
+            str(HYDROGEN),
             "--task",
-            "optimize",
+            "energy",
             "--profile",
-            "standard",
+            "screening",
         ]
     )
-    assert code == 1
+    assert code == 0
     output = capsys.readouterr().out
-    assert "Задание создано" in output
     assert "Задание поставлено в очередь" in output
-    assert "Расчётное ядро пока не подключено" in output
-    assert "Метод пока недоступен" in output
+    assert "Энергия:" in output
+    assert "Результат сохранён" in output
+    # Никакого выдуманного числа: энергия получена настоящим SCF.
+    assert "э" in output
 
 
 def test_cli_run_executes_single_point_and_saves_result(
@@ -361,8 +370,14 @@ def test_cli_plan_shows_the_coordinate_system_in_expert_mode(
 
 
 def test_cli_job_lifecycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Отмена, повтор и журнал состояний на задании, которое ещё не выполнено.
+
+    Берётся задача без ядра (частоты): такое задание честно остаётся в очереди,
+    и на нём можно проверять переходы состояний. Реализованный расчёт здесь не
+    годится — он выполнился бы и закрыл задание до отмены.
+    """
     base = ["--lang", "ru", "--data-dir", str(tmp_path)]
-    main([*base, "run", str(WATER), "--task", "optimize", "--profile", "standard"])
+    main([*base, "run", str(WATER), "--task", "freq", "--method", "hf", "--basis", "sto-3g"])
     capsys.readouterr()
 
     assert main([*base, "job", "list"]) == 0
@@ -394,6 +409,7 @@ def test_cli_unknown_job_is_reported(tmp_path: Path, capsys: pytest.CaptureFixtu
 
 
 def test_cli_works_in_english(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Те же сообщения по-английски; задача без ядра, чтобы не запускать расчёт."""
     code = main(
         [
             "--lang",
@@ -403,9 +419,11 @@ def test_cli_works_in_english(tmp_path: Path, capsys: pytest.CaptureFixture[str]
             "run",
             str(WATER),
             "--task",
-            "optimize",
-            "--profile",
-            "standard",
+            "freq",
+            "--method",
+            "hf",
+            "--basis",
+            "sto-3g",
         ]
     )
     assert code == 1

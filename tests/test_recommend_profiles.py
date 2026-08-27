@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 
 from quantumlab.domain.molecule import Molecule
-from quantumlab.domain.spec import GridPreset, PrecisionProfile, Task
+from quantumlab.domain.spec import GridPreset, PrecisionProfile, Task, TheoryFamily
+from quantumlab.engine.registry import default_registry
 from quantumlab.recommend.profiles import HardwareContext, resolve_profile
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -29,33 +30,72 @@ def big_system() -> Molecule:
 
 
 @pytest.mark.parametrize(
-    ("profile", "functional", "basis"),
+    ("profile", "basis"),
     [
-        (PrecisionProfile.SCREENING, "pbe", "def2-svp"),
-        (PrecisionProfile.STANDARD, "pbe0", "def2-svp"),
-        (PrecisionProfile.HIGH_ACCURACY, "pbe0", "def2-tzvp"),
-        (PrecisionProfile.RESEARCH, "wb97x-d", "def2-tzvp"),
+        (PrecisionProfile.SCREENING, "def2-svp"),
+        (PrecisionProfile.STANDARD, "def2-svp"),
+        (PrecisionProfile.HIGH_ACCURACY, "def2-tzvp"),
+        (PrecisionProfile.RESEARCH, "def2-tzvp"),
     ],
 )
-def test_profile_selects_expected_method(
-    water: Molecule, profile: PrecisionProfile, functional: str, basis: str
+def test_profile_selects_documented_basis(
+    water: Molecule, profile: PrecisionProfile, basis: str
 ) -> None:
     resolution = resolve_profile(profile, task=Task.SINGLE_POINT, molecule=water)
-    assert resolution.spec.method is not None
-    assert resolution.spec.method.functional == functional
-    assert resolution.spec.method.basis == basis
+    method = resolution.spec.method
+    assert method is not None
+    assert method.basis == basis
     assert resolution.spec.profile is profile
 
 
+def test_plan_only_recommends_what_the_engine_can_run(water: Molecule) -> None:
+    """§54 ТЗ: план не имеет права предлагать то, что не может выполниться.
+
+    Пока DFT не реализован, рекомендатель обязан откатываться на HF и говорить
+    об этом вслух. План с нереализованным функционалом — это расчёт, который
+    гарантированно упадёт уже после нажатия «Рассчитать».
+    """
+    registry = default_registry()
+    assert not registry.is_available("method:dft"), "предполагание теста устарело"
+    for profile in PrecisionProfile:
+        method = resolve_profile(profile, task=Task.SINGLE_POINT, molecule=water).spec.method
+        assert method is not None
+        assert method.theory is TheoryFamily.HF
+        assert method.functional is None
+        assert method.dispersion.value == "none"
+        assert registry.is_available(f"method:{method.theory.value}")
+
+
+def test_hf_fallback_is_explained_not_silent(water: Molecule) -> None:
+    """Откат виден в обоснованиях: профиль обещает точность DFT, а даёт HF."""
+    resolution = resolve_profile(PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water)
+    assert any("не реализован" in line for line in resolution.explain("ru"))
+    assert any(
+        decision.parameter == "functional" and decision.value == "hf"
+        for decision in resolution.decisions
+    )
+
+
 def test_high_accuracy_matches_documented_example(water: Molecule) -> None:
-    """Пример из ТЗ: «Выбран PBE0/def2-TZVP, потому что профиль Высокая точность»."""
+    """Пример из ТЗ: «Выбран PBE0/def2-TZVP, потому что профиль Высокая точность».
+
+    Пример станет буквально верен, когда появится DFT. До тех пор проверяется
+    честное поведение: базис тот же, а вместо недоступного функционала — HF с
+    явным объяснением, а не молчаливая подмена.
+    """
     resolution = resolve_profile(
         PrecisionProfile.HIGH_ACCURACY, task=Task.OPTIMIZATION, molecule=water
     )
     lines = resolution.explain("ru")
     assert "Высокая точность" in lines[0]
-    assert "Выбран функционал pbe0" in lines
     assert "Выбран базисный набор def2-tzvp" in lines
+    method = resolution.spec.method
+    assert method is not None
+    if default_registry().is_available("method:dft"):
+        assert "Выбран функционал pbe0" in lines
+    else:
+        assert method.theory is TheoryFamily.HF
+        assert any("не реализован" in line for line in lines)
 
 
 def test_frequencies_tighten_numerics(water: Molecule) -> None:

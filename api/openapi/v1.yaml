@@ -756,7 +756,7 @@ components:
       type: object
       required: [parameter, value, text]
       properties:
-        parameter: { type: string, description: basis, functional, threads, … }
+        parameter: { type: string, description: "basis, functional, threads, …" }
         value: { type: string }
         text: { type: string, description: Локализованная фраза с обоснованием }
         detail: { type: string }
@@ -1022,7 +1022,7 @@ components:
         title: { type: string, description: Локализованный заголовок }
         status: { type: integer }
         detail: { type: string, description: Раздел «Что произошло» }
-        code: { type: string, description: Код из таксономии, например scf.not_converged }
+        code: { type: string, description: "Код из таксономии, например scf.not_converged" }
         hint: { type: string }
         tried:
           type: array

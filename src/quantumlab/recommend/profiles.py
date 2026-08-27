@@ -32,6 +32,7 @@ from quantumlab.domain.spec import (
     Task,
     TheoryFamily,
 )
+from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.i18n import DEFAULT_LOCALE, t
 
 #: Число базисных функций на атом — грубая оценка для выбора ресурсов.
@@ -138,6 +139,7 @@ def resolve_profile(
     task: Task,
     molecule: Molecule,
     hardware: HardwareContext | None = None,
+    registry: CapabilityRegistry | None = None,
 ) -> Resolution:
     """Подбирает полную спецификацию расчёта по профилю точности.
 
@@ -146,15 +148,33 @@ def resolve_profile(
         task: тип задачи.
         molecule: структура (нужна для оценки размера).
         hardware: доступные ресурсы; если не заданы — берутся консервативные.
+        registry: реестр возможностей; по умолчанию — текущий. План обязан
+            состоять только из того, что система действительно умеет (§54 ТЗ):
+            рекомендовать нереализованный метод значит выдать пользователю
+            расчёт, который гарантированно упадёт.
 
     Returns:
         :class:`Resolution` со спецификацией и списком обоснований.
     """
     hardware = hardware or HardwareContext()
+    capabilities = registry or default_registry()
     decisions: list[Decision] = []
 
+    functional: str | None
+    functional_class: FunctionalClass | None
     functional, functional_class, basis, dispersion = _base_choice(profile)
-    decisions.append(Decision("functional", functional, "profile.decision.functional"))
+    theory = TheoryFamily.DFT
+    if not capabilities.is_available("method:dft"):
+        # Откат на HF с явным объяснением: профиль обещает точность DFT, а ядро
+        # её пока не даёт. Молча подставить HF нельзя — это было бы обманом
+        # про точность; скрыть выбор — нарушением объяснимости (§8 ТЗ).
+        theory = TheoryFamily.HF
+        functional = None
+        functional_class = None
+        dispersion = DispersionCorrection.NONE
+        decisions.append(Decision("functional", "hf", "profile.decision.functional_fallback"))
+    else:
+        decisions.append(Decision("functional", functional, "profile.decision.functional"))
 
     is_large = molecule.n_atoms > _LARGE_SYSTEM_ATOMS
     if is_large and basis != "def2-svp":
@@ -230,7 +250,7 @@ def resolve_profile(
         task=task,
         profile=profile,
         method=MethodSpec(
-            theory=TheoryFamily.DFT,
+            theory=theory,
             functional=functional,
             functional_class=functional_class,
             basis=basis,

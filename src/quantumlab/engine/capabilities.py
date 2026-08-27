@@ -29,6 +29,8 @@ class CapabilityKind(StrEnum):
     FORMAT = "format"
     SCHEDULER = "scheduler"
     PROPERTY = "property"
+    COORDINATES = "coordinates"
+    SPIN = "spin"
 
 
 class Availability(StrEnum):
