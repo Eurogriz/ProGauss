@@ -4,7 +4,7 @@
 PYTHON ?= .venv/bin/python
 PIP    ?= .venv/bin/pip
 
-.PHONY: help venv install lint fmt typecheck test coverage bench check clean
+.PHONY: help venv install lint fmt typecheck test verify coverage bench check clean
 
 help: ## Показать список команд
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -18,12 +18,12 @@ install: ## Установить пакет и dev-зависимости
 	$(PIP) install -e ".[dev]"
 
 lint: ## Линтер (ruff)
-	$(PYTHON) -m ruff check src tests
-	$(PYTHON) -m ruff format --check src tests
+	$(PYTHON) -m ruff check src tests verification
+	$(PYTHON) -m ruff format --check src tests verification
 
 fmt: ## Форматировать код
-	$(PYTHON) -m ruff format src tests
-	$(PYTHON) -m ruff check --fix src tests
+	$(PYTHON) -m ruff format src tests verification
+	$(PYTHON) -m ruff check --fix src tests verification
 
 typecheck: ## Строгая проверка типов
 	$(PYTHON) -m mypy
@@ -31,11 +31,14 @@ typecheck: ## Строгая проверка типов
 test: ## Тесты
 	$(PYTHON) -m pytest
 
+verify: ## Верификационный набор (§26 ТЗ), полный прогон
+	$(PYTHON) verification/run_verification.py
+
 coverage: ## Тесты с покрытием
 	$(PYTHON) -m pytest --cov=quantumlab --cov-report=term-missing
 
-bench: ## Бенчмарки (полный набор появится в Этапе 4)
-	$(PYTHON) -m pytest -m benchmark
+bench: ## Бенчмарки (§27 ТЗ): прогон small и сравнение с эталоном
+	$(PYTHON) benchmarks/run_benchmarks.py --suite small
 
 check: lint typecheck test ## Всё вместе — как в CI
 

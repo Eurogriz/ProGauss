@@ -1,0 +1,28 @@
+id: water-rhf-sto3g-energy
+level: L1
+description: RHF/STO-3G воды в экспериментальной геометрии — базовый эталон ядра.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g }
+expect:
+  energy_hartree:
+    value: -74.9630296563
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu, RHF, порог SCF 1e-10)
+  homo_energy_hartree:
+    value: -0.39124270
+    tol: 1.0e-7
+    source: internal-reference
+  lumo_energy_hartree:
+    value: 0.60516540
+    tol: 1.0e-7
+    source: internal-reference
+  dipole_debye:
+    value: 1.725337
+    tol: 1.0e-5
+    source: internal-reference
+quality:
+  scf_converged: true
+  energy_decomposition: true
+  fock_density_commutator: true

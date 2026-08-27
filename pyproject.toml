@@ -60,7 +60,7 @@ disallow_any_generics = true
 extra_checks = true
 show_error_codes = true
 pretty = true
-files = ["src/quantumlab", "tests"]
+files = ["src/quantumlab", "tests", "verification", "benchmarks"]
 
 [tool.ruff]
 line-length = 100

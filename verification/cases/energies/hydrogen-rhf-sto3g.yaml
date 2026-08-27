@@ -1,0 +1,18 @@
+id: hydrogen-rhf-sto3g-energy
+level: L1
+description: RHF/STO-3G растянутого H₂ (0.95 Å) — наименьшая замкнутая система.
+molecule: tests/fixtures/hydrogen.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g }
+expect:
+  energy_hartree:
+    value: -1.0796369464
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu)
+  dipole_debye:
+    value: 0.0
+    tol: 1.0e-12
+    source: симметрия гомоядерного димера
+quality:
+  scf_converged: true

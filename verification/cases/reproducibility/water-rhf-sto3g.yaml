@@ -1,0 +1,14 @@
+id: water-rhf-sto3g-reproducibility
+level: L9
+description: Повтор того же расчёта даёт тот же отпечаток и ту же энергию.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g }
+expect:
+  energy_hartree:
+    value: -74.9630296563
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu)
+reproducibility:
+  max_energy_deviation_eh: 0.0
