@@ -168,8 +168,12 @@ def resolve_profile(
     # может быть реализован частично (например, есть только LDA), и тогда
     # профиль, обещающий PBE0, обязан откатиться, а не обещать точность,
     # которой в коде нет (§54 ТЗ).
-    if not capabilities.is_available("method:dft") or not capabilities.is_available(
-        f"functional:{functional}"
+    if (
+        not capabilities.is_available("method:dft")
+        or not capabilities.is_available(f"functional:{functional}")
+        # Дисперсия входит в обещание профиля так же, как функционал: профиль
+        # «Скрининг» обещает PBE-D3(BJ), и выполнить его наполовину нельзя.
+        or not capabilities.is_available(f"dispersion:{dispersion.value}")
     ):
         # Откат на HF с явным объяснением: профиль обещает точность DFT, а ядро
         # её пока не даёт. Молча подставить HF нельзя — это было бы обманом

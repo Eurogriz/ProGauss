@@ -158,6 +158,9 @@ def test_implemented_capabilities_match_the_verified_surface(
         "basis:6-31g(d)",
         "basis:6-31g(d,p)",
         "basis:sto-3g",
+        # Единственная доступная «дисперсионная поправка» — её отсутствие.
+        # D3/D4 в реестре есть и помечены как нереализованные.
+        "dispersion:none",
         "format:xyz",
         "task:optimization",
         "task:single_point",
@@ -204,6 +207,7 @@ def test_snapshot_groups_by_kind(registry: CapabilityRegistry) -> None:
         "task",
         "method",
         "functional",
+        "dispersion",
         "basis",
         "format",
         "backend",

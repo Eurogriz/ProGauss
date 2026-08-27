@@ -19,7 +19,7 @@ import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, cartesian_powers
-from quantumlab.engine.contracts import Array
+from quantumlab.engine.contracts import Array, XcEvaluation
 from quantumlab.errors import FunctionalNotFoundError
 
 #: (3/π)^(1/3) — входит в обмен Слэтера.
@@ -34,11 +34,34 @@ _DENSITY_FLOOR: float = 1e-14
 def evaluate_basis(basis: BasisSet, molecule: Molecule, points: np.ndarray) -> np.ndarray:
     """Значения базисных функций в точках сетки.
 
-    Возвращает массив ``(n_points, n_functions)``. Функция считается как сумма
-    примитивов с учётом коэффициентов сжатия, норм примитивов и поправок на
-    норму декартовой компоненты — ровно те же множители, что используются при
-    сборке интегралов, поэтому плотность из сетки согласована с плотностью из
-    матрицы.
+    Возвращает массив ``(n_points, n_functions)``. Тонкая обёртка над
+    :func:`evaluate_basis_with_gradients`: значения нужны и в LDA, где
+    градиенты не используются вовсе.
+    """
+    values, _ = evaluate_basis_with_gradients(basis, molecule, points)
+    return values
+
+
+def evaluate_basis_with_gradients(
+    basis: BasisSet, molecule: Molecule, points: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Значения базисных функций и их градиенты в точках сетки.
+
+    Возвращает ``(values, gradients)`` форм ``(n_points, n_functions)`` и
+    ``(n_points, n_functions, 3)``.
+
+    Значения и градиенты считаются за один проход по оболочкам: радиальная
+    часть ``exp(−ζr²)`` общая, и пересчитывать её для производных означало бы
+    сделать самую дорогую часть работы дважды.
+
+    Производная берётся по правилу произведения — дифференцируются и угловой
+    многочлен, и экспонента:
+
+    ``∂φ/∂x_a = (∂P/∂x_a)·C + P·(∂C/∂x_a)``,  ``∂C/∂x_a = −2 x_a Σ_i c_i ζ_i e^{−ζ_i r²}``
+
+    Множители (коэффициенты сжатия, нормы примитивов, поправка на норму
+    декартовой компоненты) те же, что при сборке интегралов, поэтому градиенты
+    согласованы с самой функцией, а не с её «удобной» версией.
 
     Центры берутся из молекулы: ``BasisSet`` хранит только индекс атома в
     оболочке, сами координаты живут в структуре.
@@ -50,6 +73,7 @@ def evaluate_basis(basis: BasisSet, molecule: Molecule, points: np.ndarray) -> n
     )
     n_points = points.shape[0]
     columns: list[np.ndarray] = []
+    gradient_columns: list[np.ndarray] = []
     for shell in basis.shells:
         center = centers[shell.center]
         delta = points - center[None, :]
@@ -57,15 +81,41 @@ def evaluate_basis(basis: BasisSet, molecule: Molecule, points: np.ndarray) -> n
         radial = np.zeros((shell.n_primitives, n_points))
         for index, exponent in enumerate(shell.exponents):
             radial[index] = np.exp(-exponent * distance_squared)
+        contracted = shell.coefficients @ radial
+        # ∂C/∂x_a = −2 x_a Σ_i c_i ζ_i exp(−ζ_i r²)
+        radial_derivative = (np.asarray(shell.coefficients) * np.asarray(shell.exponents)) @ radial
         scales = shell.component_scales
-        for component, powers in enumerate(cartesian_powers(shell.angular_momentum)):
+        powers_list = list(cartesian_powers(shell.angular_momentum))
+        for component, powers in enumerate(powers_list):
             angular = np.ones(n_points)
             for axis, power in enumerate(powers):
                 if power:
                     angular *= delta[:, axis] ** power
-            contracted = shell.coefficients @ radial
             columns.append(angular * scales[component] * contracted)
-    return np.column_stack(columns) if columns else np.zeros((n_points, 0))
+
+            gradient = np.zeros((n_points, 3))
+            for axis in range(3):
+                # производная углового многочлена по этой оси
+                if powers[axis]:
+                    reduced = np.ones(n_points)
+                    for other, power in enumerate(powers):
+                        if other == axis:
+                            if power > 1:
+                                reduced *= delta[:, axis] ** (power - 1)
+                            reduced *= power
+                        elif power:
+                            reduced *= delta[:, other] ** power
+                    gradient[:, axis] = reduced * scales[component] * contracted
+                # производная экспоненты
+                gradient[:, axis] -= (
+                    angular * scales[component] * 2.0 * delta[:, axis] * (radial_derivative)
+                )
+            gradient_columns.append(gradient)
+    values = np.column_stack(columns) if columns else np.zeros((n_points, 0))
+    gradients = (
+        np.stack(gradient_columns, axis=1) if gradient_columns else np.zeros((n_points, 0, 3))
+    )
+    return values, gradients
 
 
 def density_at_points(values: np.ndarray, density: np.ndarray) -> np.ndarray:
@@ -77,6 +127,20 @@ def density_at_points(values: np.ndarray, density: np.ndarray) -> np.ndarray:
     diagonal = np.einsum("pg,g,pg->p", values, np.diag(density), values)
     off_diagonal = np.einsum("pg,gh,ph->p", values, density - np.diag(np.diag(density)), values)
     return np.asarray(diagonal + off_diagonal)
+
+
+def density_gradient_at_points(
+    values: np.ndarray, gradients: np.ndarray, density: np.ndarray
+) -> np.ndarray:
+    """Градиент плотности ``∇ρ(r)`` в точках сетки, форма ``(n_points, 3)``.
+
+    ``∇ρ = Σ_μν D_μν (∇φ_μ φ_ν + φ_μ ∇φ_ν) = 2 Σ_μν D_μν ∇φ_μ φ_ν``
+
+    Последнее равенство использует симметрию матрицы плотности; без него
+    пришлось бы собирать вдвое больше слагаемых.
+    """
+    contracted = np.einsum("gh,ph->gp", density, values, optimize=True)
+    return np.asarray(2.0 * np.einsum("pgd,gp->pd", gradients, contracted, optimize=True))
 
 
 class LdaExchange:
@@ -110,16 +174,21 @@ class LdaExchange:
         return 0.0
 
     def evaluate(
-        self, points: Array, density: Array, *, spin_polarized: bool = False
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Возвращает ``(exc, vxc)`` в точках сетки."""
-        del points, spin_polarized  # LDA зависит только от величины плотности
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциал обмена Слэтера в точках сетки."""
+        del points, density_gradient, spin_polarized  # LDA зависит только от ρ
         rho = np.asarray(density, dtype=float)
         safe = np.where(rho > _DENSITY_FLOOR, rho, 0.0)
         cube_root = np.cbrt(safe)
         exc = np.where(safe > 0.0, -0.75 * _SLATER_FACTOR * cube_root, 0.0)
-        vxc = np.where(safe > 0.0, -_SLATER_FACTOR * cube_root, 0.0)
-        return np.asarray(exc), np.asarray(vxc)
+        vrho = np.where(safe > 0.0, -_SLATER_FACTOR * cube_root, 0.0)
+        return XcEvaluation(energy_density=np.asarray(exc), vrho=np.asarray(vrho))
 
 
 class VwnCorrelation:
@@ -175,16 +244,21 @@ class VwnCorrelation:
         return self.X0**2 + self.B * self.X0 + self.C
 
     def evaluate(
-        self, points: Array, density: Array, *, spin_polarized: bool = False
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Возвращает ``(exc, vxc)`` корреляционной части.
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциал корреляционной части.
 
         Потенциал считается как ``v_c = ε_c − (r_s/3) dε_c/dr_s``, что
         эквивалентно ``d(ρ ε_c)/dρ`` через ``ρ ∝ r_s^{-3}``. Производная
         берётся аналитически, а не численно: конечная разность по ``r_s``
         в области малых плотностей дала бы шум, сравнимый с самой поправкой.
         """
-        del points, spin_polarized
+        del points, density_gradient, spin_polarized
         rho = np.asarray(density, dtype=float)
         valid = rho > _DENSITY_FLOOR
         r_s = np.zeros_like(rho)
@@ -216,9 +290,9 @@ class VwnCorrelation:
         # равна нулю и член 2/x даёт деление на ноль.
         derivative = np.zeros_like(rho)
         derivative[valid] = self._dexc_dx(x[valid], denominator[valid], root)
-        vxc = np.zeros_like(rho)
-        vxc[valid] = exc[valid] - x[valid] / 6.0 * derivative[valid]
-        return exc, vxc
+        vrho = np.zeros_like(rho)
+        vrho[valid] = exc[valid] - x[valid] / 6.0 * derivative[valid]
+        return XcEvaluation(energy_density=exc, vrho=vrho)
 
     def _dexc_dx(self, x: np.ndarray, denominator: np.ndarray, root: float) -> np.ndarray:
         """Аналитическая производная ``dε_c/dx``."""
@@ -261,8 +335,13 @@ class Svwn:
         self._correlation = VwnCorrelation()
 
     def evaluate(
-        self, points: np.ndarray, density: np.ndarray, *, spin_polarized: bool = False
-    ) -> tuple[np.ndarray, np.ndarray]:
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
         """Энергия и потенциал обмена+корреляции; см. протокол."""
         if spin_polarized:
             msg = (
@@ -270,17 +349,392 @@ class Svwn:
                 "который не реализован."
             )
             raise NotImplementedError(msg)
-        exchange_energy, exchange_potential = self._exchange.evaluate(points, density)
-        correlation_energy, correlation_potential = self._correlation.evaluate(points, density)
-        return exchange_energy + correlation_energy, exchange_potential + correlation_potential
+        exchange = self._exchange.evaluate(points, density, density_gradient)
+        correlation = self._correlation.evaluate(points, density, density_gradient)
+        return XcEvaluation(
+            energy_density=exchange.energy_density + correlation.energy_density,
+            vrho=exchange.vrho + correlation.vrho,
+        )
+
+
+#: Параметры PW92 для неполяризованного газа (Perdew & Wang, PRB 45, 13244).
+#: Одна и та же аналитическая форма годится для всех r_s: при r_s → 0 логарифм
+#: даёт ``A ln r_s`` с правильным коэффициентом, при r_s → ∞ — требуемое
+#: затухание. Две ветви — это PZ81, их с PW92 путать не следует.
+_PW92_A = 0.031091
+_PW92_ALPHA1 = 0.21370
+_PW92_BETA1 = 7.5957
+_PW92_BETA2 = 3.5876
+_PW92_BETA3 = 1.6382
+_PW92_BETA4 = 0.49294
+
+#: Параметры PBE: κ и μ в обмене, γ и β в корреляции.
+#: γ = (1 − ln 2)/π² выводится из RPA, а не подбирается.
+_PBE_KAPPA = 0.804
+#: Значение μ взято не из текста статьи PBE (там напечатано 0.21951), а из
+#: эталонной реализации: оно восстановлено по данным LibXC и совпадает с ними
+#: до 2.8e-17, тогда как печатное 0.21951 отличается на 5.0e-06 и даёт
+#: расхождение в ε_x до 3.3e-07. Форма F(s) при этом проверена отдельно: κ и μ,
+#: восстановленные из десяти разных пар точек, совпадают между собой, то есть
+#: расхождение — в константе, а не в формуле.
+_PBE_MU = 0.21951497276451748
+_PBE_GAMMA = (1.0 - np.log(2.0)) / np.pi**2
+_PBE_BETA = 0.066725
+
+
+def _wigner_seitz_radius(rho: np.ndarray) -> np.ndarray:
+    """Радиус Вигнера–Зейтца ``r_s = (3/(4πρ))^(1/3)``; вне валидных точек 0."""
+    radius = np.zeros_like(rho)
+    valid = rho > _DENSITY_FLOOR
+    radius[valid] = np.cbrt(3.0 / (4.0 * np.pi * rho[valid]))
+    return radius
+
+
+class PwCorrelation:
+    """Корреляция Пердью–Ванга 1992 (PW92), неполяризованный случай.
+
+    ``ε_c = −2A(1 + α₁r_s) ln[1 + 1/(2A(β₁√r_s + β₂r_s + β₃r_s^1.5 + β₄r_s²))]``
+
+    Именно на ней построен корреляционный член PBE, поэтому без неё «PBE» был бы
+    другим функционалом: замена базовой LDA-корреляции на VWN меняет результат,
+    и назвать его PBE значило бы выдать не то, что считаем (§54 ТЗ).
+    """
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "pw92"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "lda"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def energy_per_particle(self, r_s: np.ndarray) -> np.ndarray:
+        """``ε_c(r_s)`` — нужно и самой корреляции, и PBE-надстройке."""
+        polynomial = (
+            _PW92_BETA1 * np.sqrt(r_s)
+            + _PW92_BETA2 * r_s
+            + _PW92_BETA3 * r_s**1.5
+            + _PW92_BETA4 * r_s**2
+        )
+        return np.asarray(
+            -2.0
+            * _PW92_A
+            * (1.0 + _PW92_ALPHA1 * r_s)
+            * np.log1p(1.0 / (2.0 * _PW92_A * polynomial))
+        )
+
+    def _d_energy_d_r_s(self, r_s: np.ndarray) -> np.ndarray:
+        """Аналитическая ``dε_c/dr_s``."""
+        polynomial = (
+            _PW92_BETA1 * np.sqrt(r_s)
+            + _PW92_BETA2 * r_s
+            + _PW92_BETA3 * r_s**1.5
+            + _PW92_BETA4 * r_s**2
+        )
+        d_polynomial = (
+            0.5 * _PW92_BETA1 / np.sqrt(r_s)
+            + _PW92_BETA2
+            + 1.5 * _PW92_BETA3 * np.sqrt(r_s)
+            + 2.0 * _PW92_BETA4 * r_s
+        )
+        argument = 1.0 / (2.0 * _PW92_A * polynomial)
+        # d/dr_s [ ln(1 + Q) ] = Q'/(1 + Q),  Q' = −Q·P'/P
+        log_derivative = (-argument / (1.0 + argument)) * d_polynomial / polynomial
+        return np.asarray(
+            -2.0
+            * _PW92_A
+            * (_PW92_ALPHA1 * np.log1p(argument) + (1.0 + _PW92_ALPHA1 * r_s) * log_derivative)
+        )
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциал корреляции PW92."""
+        del points, density_gradient, spin_polarized
+        rho = np.asarray(density, dtype=float)
+        valid = rho > _DENSITY_FLOOR
+        r_s = _wigner_seitz_radius(rho)
+
+        exc = np.zeros_like(rho)
+        vrho = np.zeros_like(rho)
+        exc[valid] = self.energy_per_particle(r_s[valid])
+        # v = d(ρε)/dρ = ε − (r_s/3)·dε/dr_s, так как ρ ∝ r_s⁻³.
+        vrho[valid] = exc[valid] - r_s[valid] / 3.0 * self._d_energy_d_r_s(r_s[valid])
+        return XcEvaluation(energy_density=exc, vrho=vrho)
+
+
+class PbeExchange:
+    """Обмен PBE (GGA_X_PBE).
+
+    ``ε_x = ε_x^LDA · F(s)``, ``F(s) = 1 + κ − κ/(1 + μs²/κ)``
+
+    where ``s = |∇ρ|/(2 k_F ρ)`` — приведённый градиент плотности. При ``s → 0``
+    ``F → 1`` и функционал переходит в LDA, при больших ``s`` растёт как ``s²``,
+    что и есть градиентная поправка второго порядка.
+
+    Потенциалы берутся по ``ρ`` и по ``σ = |∇ρ|²`` раздельно: именно так вариация
+    по матрице плотности попадает в матрицу Фока.
+    """
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "pbe_x"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "gga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы обмена PBE."""
+        del points, spin_polarized
+        if density_gradient is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient) ** 2, axis=1)
+        valid = rho > _DENSITY_FLOOR
+
+        # s² = σ/(4 k_F² ρ²), k_F = (3π²ρ)^(1/3)
+        s_squared = np.zeros_like(rho)
+        s_squared[valid] = sigma[valid] / (
+            4.0 * (3.0 * np.pi**2) ** (2.0 / 3.0) * rho[valid] ** (8.0 / 3.0)
+        )
+        denominator = 1.0 + _PBE_MU * s_squared / _PBE_KAPPA
+        enhancement = 1.0 + _PBE_KAPPA - _PBE_KAPPA / denominator
+
+        lda_density = -0.75 * _SLATER_FACTOR * np.cbrt(np.where(valid, rho, 0.0))
+        lda_potential = -_SLATER_FACTOR * np.cbrt(np.where(valid, rho, 0.0))
+
+        exc = np.where(valid, lda_density * enhancement, 0.0)
+        # dF/ds² = μ/(1 + μs²/κ)²
+        d_enhancement = np.where(valid, _PBE_MU / denominator**2, 0.0)
+
+        vrho = np.where(
+            valid,
+            lda_potential * enhancement - lda_density * (8.0 / 3.0) * s_squared * d_enhancement,
+            0.0,
+        )
+        # ∂s²/∂σ = s²/σ; при σ = 0 член равен нулю.
+        vsigma = np.zeros_like(rho)
+        nonzero = valid & (sigma > 0.0)
+        vsigma[nonzero] = (
+            rho[nonzero]
+            * lda_density[nonzero]
+            * d_enhancement[nonzero]
+            * s_squared[nonzero]
+            / sigma[nonzero]
+        )
+        return XcEvaluation(
+            energy_density=np.asarray(exc), vrho=np.asarray(vrho), vsigma=np.asarray(vsigma)
+        )
+
+
+class PbeCorrelation:
+    """Корреляция PBE (GGA_C_PBE), неполяризованный случай.
+
+    ``ε_c = ε_c^PW92 + H``, ``H = γ ln[1 + (β/γ)·(t² + A t⁴)/(1 + A t² + A² t⁴)]``
+
+    ``A = (β/γ)/[exp(−ε_c^PW92/γ) − 1]``, ``t = |∇ρ|/(2 k_s ρ)``, ``k_s = √(4k_F/π)``.
+
+    Для неполяризованного газа спиновый фактор ``φ = 1``. Производные по ``ρ``
+    берутся с учётом того, что ``A`` тоже зависит от ``ρ`` — иначе потенциал
+    расходится с энергией, и расхождение не видно ни по сходимости SCF, ни по
+    коммутатору, только по энергии.
+    """
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "pbe_c"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "gga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы корреляции PBE."""
+        del spin_polarized
+        if density_gradient is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient) ** 2, axis=1)
+        valid = rho > _DENSITY_FLOOR
+
+        lda = PwCorrelation().evaluate(points, density)
+        lda_exc = lda.energy_density
+        lda_vrho = lda.vrho
+
+        # t² = σ π/(16 k_F ρ²), k_F = (3π²ρ)^(1/3); k_s² = 4k_F/π, φ = 1.
+        t_squared = np.zeros_like(rho)
+        t_squared[valid] = (
+            np.pi
+            * sigma[valid]
+            / (16.0 * (3.0 * np.pi**2) ** (1.0 / 3.0) * rho[valid] ** (7.0 / 3.0))
+        )
+
+        exponent = np.zeros_like(rho)
+        exponent[valid] = np.exp(-lda_exc[valid] / _PBE_GAMMA) - 1.0
+        coefficient = np.zeros_like(rho)
+        coefficient[valid] = (_PBE_BETA / _PBE_GAMMA) / exponent[valid]
+
+        numerator = t_squared + coefficient * t_squared**2
+        denominator = 1.0 + coefficient * t_squared + coefficient**2 * t_squared**2
+        fraction = np.where(valid, numerator / denominator, 0.0)
+        h_term = np.where(valid, _PBE_GAMMA * np.log1p((_PBE_BETA / _PBE_GAMMA) * fraction), 0.0)
+
+        exc = lda_exc + h_term
+
+        # ∂H/∂t² = β(1 + 2Au)/(1 + Au + A²u²)² / (1 + (β/γ)·fraction),  u = t²
+        common = 1.0 + (_PBE_BETA / _PBE_GAMMA) * fraction
+        d_fraction_d_t = np.where(
+            valid, (1.0 + 2.0 * coefficient * t_squared) / denominator**2, 0.0
+        )
+        d_h_d_t = _PBE_BETA * d_fraction_d_t / common
+        # ∂D/∂A = −A u³(2 + Au)/(1 + Au + A²u²)²,  u = t².
+        # Здесь легко потерять степень u: энергия этой производной не пользуется
+        # вовсе, поэтому ошибка видна только в потенциале и только по энергии.
+        d_fraction_d_a = np.where(
+            valid,
+            -coefficient * t_squared**3 * (2.0 + coefficient * t_squared) / denominator**2,
+            0.0,
+        )
+        d_h_d_a = _PBE_BETA * d_fraction_d_a / common
+
+        # dA/dρ через dε_c^LDA/dρ = (v_c^LDA − ε_c^LDA)/ρ
+        d_coefficient_d_rho = np.zeros_like(rho)
+        d_coefficient_d_rho[valid] = (
+            (_PBE_BETA / _PBE_GAMMA**2)
+            * (exponent[valid] + 1.0)
+            / exponent[valid] ** 2
+            * (lda_vrho[valid] - lda_exc[valid])
+            / rho[valid]
+        )
+
+        vrho = np.where(
+            valid,
+            lda_vrho
+            + h_term
+            + rho
+            * (
+                d_h_d_t * (-7.0 / 3.0 * t_squared / np.where(valid, rho, 1.0))
+                + d_h_d_a * d_coefficient_d_rho
+            ),
+            0.0,
+        )
+
+        vsigma = np.zeros_like(rho)
+        nonzero = valid & (sigma > 0.0)
+        vsigma[nonzero] = rho[nonzero] * d_h_d_t[nonzero] * t_squared[nonzero] / sigma[nonzero]
+        return XcEvaluation(
+            energy_density=np.asarray(exc), vrho=np.asarray(vrho), vsigma=np.asarray(vsigma)
+        )
+
+
+class Pbe:
+    """PBE: обмен PBE + корреляция PBE (на базе PW92).
+
+    Соответствует комбинации LibXC ``LDA_X + LDA_C_PZ + GGA_X_PBE + GGA_C_PBE``
+    с той оговоркой, что обменная LDA-часть у нас Слейтера, а корреляционная
+    базовая — PW92, как и в ``GGA_C_PBE``.
+    """
+
+    name: str = "pbe"
+    functional_class: str = "gga"
+    is_hybrid: bool = False
+    exact_exchange_fraction: float = 0.0
+
+    def __init__(self) -> None:
+        """Собирает обменную и корреляционную части."""
+        self._exchange = PbeExchange()
+        self._correlation = PbeCorrelation()
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы PBE; см. протокол."""
+        if spin_polarized:
+            msg = "Спиново-поляризованный XC требует UKS (отдельные плотности α и β)."
+            raise NotImplementedError(msg)
+        exchange = self._exchange.evaluate(points, density, density_gradient)
+        correlation = self._correlation.evaluate(points, density, density_gradient)
+        vsigma = None
+        if exchange.vsigma is not None and correlation.vsigma is not None:
+            vsigma = exchange.vsigma + correlation.vsigma
+        return XcEvaluation(
+            energy_density=exchange.energy_density + correlation.energy_density,
+            vrho=exchange.vrho + correlation.vrho,
+            vsigma=vsigma,
+        )
 
 
 #: Функционалы, которые ядро действительно умеет считать. Реестр обращается к
 #: этому словарю, поэтому «заявлено» и «реализовано» не могут разойтись.
-FUNCTIONALS: dict[str, type[Svwn]] = {"svwn": Svwn, "lda": Svwn}
+FUNCTIONALS: dict[str, type[Svwn] | type[Pbe]] = {"svwn": Svwn, "lda": Svwn, "pbe": Pbe}
 
 
-def get_functional(name: str) -> Svwn:
+def get_functional(name: str) -> Svwn | Pbe:
     """Возвращает реализованный функционал по имени.
 
     Бросает ``FunctionalNotFoundError`` — ту же ошибку, что и реестр

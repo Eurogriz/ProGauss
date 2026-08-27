@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -194,6 +195,30 @@ class IntegralEngine(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class XcEvaluation:
+    """Обменно-корреляционная энергия и потенциалы в точках квадратурной сетки.
+
+    Возвращаем структуру, а не пару массивов: у LDA потенциал один, у GGA к
+    нему добавляется производная по ``σ = |∇ρ|²``, у meta-GGA — по кинетической
+    плотности ``τ``. Кортеж переменной длины заставил бы каждый решатель
+    угадывать, что именно вернул конкретный функционал, и молча ломаться на
+    следующем классе.
+
+    Attributes:
+        energy_density: ``ε_xc(r)`` — энергия на один электрон в точке.
+        vrho: ``∂(ρ ε_xc)/∂ρ``. Именно производная от ``ρ ε_xc``, а не от
+            ``ε_xc``: в выражение для потенциала входит первая из них.
+        vsigma: ``∂(ρ ε_xc)/∂σ``, ``None`` для LDA.
+        vtau: ``∂(ρ ε_xc)/∂τ``, ``None`` для LDA и GGA.
+    """
+
+    energy_density: Array
+    vrho: Array
+    vsigma: Array | None = None
+    vtau: Array | None = None
+
+
 @runtime_checkable
 class ExchangeCorrelationFunctional(Protocol):
     """Обменно-корреляционный функционал (§5 ТЗ).
@@ -223,9 +248,22 @@ class ExchangeCorrelationFunctional(Protocol):
         ...
 
     def evaluate(
-        self, points: Array, density: Array, *, spin_polarized: bool = False
-    ) -> tuple[Array, Array]:
-        """Возвращает ``(exc, vxc)`` в точках квадратурной сетки."""
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Вычисляет ``ε_xc`` и потенциалы в точках сетки.
+
+        Args:
+            points: координаты точек, ``(n_points, 3)``.
+            density: плотность ``ρ`` в точках, ``(n_points,)``.
+            density_gradient: ``∇ρ`` в точках, ``(n_points, 3)``. Обязателен для
+                GGA и выше; LDA-функционал его игнорирует.
+            spin_polarized: считать ли спиновые каналы раздельно (требует UKS).
+        """
         ...
 
 

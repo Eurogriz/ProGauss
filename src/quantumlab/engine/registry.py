@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from collections.abc import Sequence as Seq
 
-from quantumlab.domain.spec import Task
+from quantumlab.domain.spec import DispersionCorrection, Task
 from quantumlab.engine.basis import basis_angular_scheme
 from quantumlab.engine.capabilities import Availability, Capability, CapabilityKind
 from quantumlab.engine.functional import FUNCTIONALS
@@ -254,8 +254,9 @@ def _method_limitations(name: str) -> tuple[str, ...]:
         )
     if name == "dft":
         return (
-            "Только LDA-функционал SVWN: GGA, meta-GGA, гибриды и "
+            "Реализованы SVWN (LDA) и PBE (GGA); meta-GGA, гибриды и "
             "дальнодействующие гибриды не реализованы.",
+            "Дисперсионные поправки (D3, D4) не реализованы.",
             "Только RKS: UKS для открытой оболочки не реализован.",
             "Только энергия в точке: XC-вклад в аналитический градиент "
             "не реализован, поэтому оптимизация геометрии недоступна.",
@@ -410,6 +411,24 @@ def default_registry() -> CapabilityRegistry:
                     if name == "cartesian"
                     else ()
                 ),
+            )
+        )
+
+    for correction in DispersionCorrection:
+        # Ни одна дисперсионная поправка не реализована: D3/D4 требуют
+        # таблиц коэффициентов и своих параметров. Заявлять их доступными
+        # означало бы выдать энергию без обещанной поправки (§54 ТЗ).
+        capabilities.append(
+            Capability(
+                id=f"dispersion:{correction.value}",
+                kind=CapabilityKind.DISPERSION,
+                name=correction.value,
+                availability=(
+                    Availability.IMPLEMENTED
+                    if correction is DispersionCorrection.NONE
+                    else Availability.NOT_IMPLEMENTED
+                ),
+                since_version=__version__ if correction is DispersionCorrection.NONE else None,
             )
         )
 

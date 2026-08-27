@@ -25,7 +25,11 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import GridPreset
 from quantumlab.engine.basis import BasisSet, nuclear_repulsion
 from quantumlab.engine.contracts import ExchangeCorrelationFunctional
-from quantumlab.engine.functional import density_at_points, evaluate_basis
+from quantumlab.engine.functional import (
+    density_at_points,
+    density_gradient_at_points,
+    evaluate_basis_with_gradients,
+)
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.scf import (
     PrecomputedIntegrals,
@@ -85,22 +89,40 @@ class RksResult:
 
 
 def xc_matrix_and_energy(
-    values: np.ndarray,
     grid: QuadratureGrid,
-    density: np.ndarray,
+    values: np.ndarray,
+    gradients: np.ndarray,
+    rho: np.ndarray,
+    density_gradient: np.ndarray,
     functional: ExchangeCorrelationFunctional,
 ) -> tuple[np.ndarray, float]:
     """Обменно-корреляционная матрица и энергия на текущей плотности.
 
-    Возвращает ``(V_xc, E_xc)``. Энергия считается как ``Σ_g w_g ρ_g ε_xc(ρ_g)``,
+    Возвращает ``(V_xc, E_xc)``. Энергия считается как ``Σ_g w_g ρ_g ε_xc``,
     а не через след ``D·V_xc``: для нелинейного функционала это разные величины,
     и верна именно первая.
+
+    Для LDA достаточно одного слагаемого ``v_ρ φ_μ φ_ν``. GGA зависит ещё и от
+    ``σ = |∇ρ|²``, и вариация по матрице плотности даёт второй член:
+
+    ``V_xc[μν] = Σ_g w_g [ v_ρ φ_μ φ_ν + 2 v_σ ∇ρ·(∇φ_μ φ_ν + φ_μ ∇φ_ν) ]``
+
+    Множитель 2 здесь не «коэффициент двойного счёта», а ``∂σ/∂∇ρ = 2∇ρ``;
+    перепутать их легко, а ошибка не видна ни по сходимости SCF, ни по
+    коммутатору — только по энергии.
     """
-    rho = density_at_points(values, density)
-    exc, vxc = functional.evaluate(grid.points, rho)
-    energy = float(np.sum(grid.weights * rho * exc))
-    scaled = grid.weights * vxc
-    matrix = np.einsum("p,pg,ph->gh", scaled, values, values, optimize=True)
+    xc = functional.evaluate(grid.points, rho, density_gradient)
+    energy = float(np.sum(grid.weights * rho * xc.energy_density))
+
+    scaled_rho = grid.weights * xc.vrho
+    matrix = np.einsum("p,pg,ph->gh", scaled_rho, values, values, optimize=True)
+
+    if xc.vsigma is not None:
+        # ∇φ_μ · ∇ρ в каждой точке: свёртка по декартовой оси.
+        gradient_projection = np.einsum("pgd,pd->pg", gradients, density_gradient, optimize=True)
+        scaled_sigma = 2.0 * grid.weights * xc.vsigma
+        matrix += np.einsum("p,pg,ph->gh", scaled_sigma, gradient_projection, values, optimize=True)
+        matrix += np.einsum("p,pg,ph->gh", scaled_sigma, values, gradient_projection, optimize=True)
     return np.asarray(matrix), energy
 
 
@@ -139,9 +161,17 @@ def run_rks(
     v_nuc = nuclear_repulsion(molecule)
     orthogonalizer = canonical_orthogonalizer(prepared.overlap)
 
-    # Базисные функции в точках сетки не зависят от плотности, поэтому
-    # вычисляются один раз на расчёт, а не на итерацию.
-    values = evaluate_basis(basis, molecule, quadrature.points)
+    # Базисные функции и их градиенты в точках сетки не зависят от плотности,
+    # поэтому вычисляются один раз на расчёт, а не на итерацию. Градиенты нужны
+    # GGA; для LDA они вычисляются всё равно — отдельный путь без них означал бы
+    # две версии одного и того же цикла.
+    values, gradients = evaluate_basis_with_gradients(basis, molecule, quadrature.points)
+
+    def xc_at(current_density: np.ndarray) -> tuple[np.ndarray, float]:
+        """XC-матрица и энергия для текущей плотности."""
+        rho = density_at_points(values, current_density)
+        rho_gradient = density_gradient_at_points(values, gradients, current_density)
+        return xc_matrix_and_energy(quadrature, values, gradients, rho, rho_gradient, functional)
 
     def diagonalize(fock_prime: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         symmetric = 0.5 * (fock_prime + fock_prime.T)
@@ -164,7 +194,7 @@ def run_rks(
 
     for iteration in range(1, config.max_iterations + 1):
         iterations = iteration
-        v_xc, xc_energy = xc_matrix_and_energy(values, quadrature, density, functional)
+        v_xc, xc_energy = xc_at(density)
         coulomb = coulomb_matrix(density, eri)
         fock = core + coulomb + v_xc
         if alpha_exchange > 0.0:
@@ -246,7 +276,7 @@ def run_rks(
             converged = True
             break
 
-    v_xc, xc_energy = xc_matrix_and_energy(values, quadrature, density, functional)
+    v_xc, xc_energy = xc_at(density)
     coulomb = coulomb_matrix(density, eri)
     total = float(np.sum(density * (core + 0.5 * coulomb))) + xc_energy + v_nuc
     return RksResult(

@@ -19,6 +19,7 @@ from quantumlab.recommend.profiles import (
 #: а не переписывается здесь: вторая копия разошлась бы с первой при первом же
 #: изменении профилей, и тест начал бы проверять не то.
 _PROFILE_FUNCTIONAL = {profile: _base_choice(profile)[0] for profile in PrecisionProfile}
+_PROFILE_DISPERSION = {profile: _base_choice(profile)[3] for profile in PrecisionProfile}
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -82,19 +83,28 @@ def test_plan_only_recommends_what_the_engine_can_run(water: Molecule) -> None:
             assert method.dispersion.value == "none"
 
 
-def test_profiles_fall_back_to_hf_while_their_functionals_are_missing(water: Molecule) -> None:
-    """Пока PBE/PBE0/ωB97X-D не реализованы, профили честно дают HF.
+def test_profiles_never_promise_what_the_engine_cannot_do(water: Molecule) -> None:
+    """Профиль разворачивается в HF, если недоступна любая часть его обещания.
 
-    Отдельный тест на текущее состояние: он устареет ровно тогда, когда
-    появится первый функционал профилей, и тогда его нужно переписать — но
-    молча он не начнёт пропускать ошибку.
+    Инвариант сформулирован по правилу, а не по списку нереализованного,
+    поэтому он не устареет при появлении D3 или нового функционала.
+
+    Сейчас у «Скрининга» реализован PBE, но нет D3(BJ), а у
+    «Исследовательского» нет ωB97X-D — и тот и другой обязаны откатиться.
+    Учитывать только функционал было бы ошибкой: план пообещал бы
+    дисперсионную поправку, которой не существует, и расчёт выполнился бы как
+    другой (§54 ТЗ).
     """
     registry = default_registry()
     for profile in PrecisionProfile:
-        assert not registry.is_available(f"functional:{_PROFILE_FUNCTIONAL[profile]}")
+        functional_ok = registry.is_available(f"functional:{_PROFILE_FUNCTIONAL[profile]}")
+        dispersion_ok = registry.is_available(f"dispersion:{_PROFILE_DISPERSION[profile].value}")
         method = resolve_profile(profile, task=Task.SINGLE_POINT, molecule=water).spec.method
         assert method is not None
-        assert method.theory is TheoryFamily.HF
+        if functional_ok and dispersion_ok:
+            assert method.theory is TheoryFamily.DFT, profile
+        else:
+            assert method.theory is TheoryFamily.HF, profile
 
 
 def test_hf_fallback_is_explained_not_silent(water: Molecule) -> None:

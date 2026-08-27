@@ -31,6 +31,7 @@ class CapabilityKind(StrEnum):
     PROPERTY = "property"
     COORDINATES = "coordinates"
     SPIN = "spin"
+    DISPERSION = "dispersion"
 
 
 class Availability(StrEnum):

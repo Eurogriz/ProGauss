@@ -25,6 +25,7 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.result import QualityVerdict
 from quantumlab.domain.spec import (
     CalculationSpec,
+    DispersionCorrection,
     GridPreset,
     GridSpec,
     MethodSpec,
@@ -39,10 +40,14 @@ from quantumlab.engine.dft import run_rks
 from quantumlab.engine.functional import (
     FUNCTIONALS,
     LdaExchange,
+    PbeCorrelation,
+    PbeExchange,
+    PwCorrelation,
     Svwn,
     VwnCorrelation,
     density_at_points,
     evaluate_basis,
+    evaluate_basis_with_gradients,
     get_functional,
 )
 from quantumlab.engine.quadrature import (
@@ -156,8 +161,8 @@ def test_slater_exchange_matches_analytic_formula(water: Molecule) -> None:
     rhf = run_rhf(basis, water)
     grid = build_grid(water, GridPreset.ULTRAFINE)
     rho = density_at_points(evaluate_basis(basis, water, grid.points), rhf.density)
-    exc, _ = LdaExchange().evaluate(grid.points, rho)
-    from_class = float(np.sum(grid.weights * rho * exc))
+    exchange = LdaExchange().evaluate(grid.points, rho)
+    from_class = float(np.sum(grid.weights * rho * exchange.energy_density))
     manual = -0.75 * (3.0 / np.pi) ** (1.0 / 3.0) * float(np.sum(grid.weights * rho ** (4.0 / 3.0)))
     assert from_class == pytest.approx(manual, abs=1e-10)
     assert from_class == pytest.approx(WATER_SLATER_EXCHANGE, abs=1e-6)
@@ -167,9 +172,9 @@ def test_functionals_return_zero_for_zero_density() -> None:
     """Нулевая плотность не должна давать NaN: в хвостах молекулы это обычное дело."""
     points = np.zeros((4, 3))
     for functional in (LdaExchange(), VwnCorrelation(), Svwn()):
-        exc, vxc = functional.evaluate(points, np.zeros(4))
-        assert np.all(exc == 0.0)
-        assert np.all(vxc == 0.0)
+        xc = functional.evaluate(points, np.zeros(4))
+        assert np.all(xc.energy_density == 0.0)
+        assert np.all(xc.vrho == 0.0)
 
 
 def test_lda_exchange_potential_is_numerical_derivative_of_energy() -> None:
@@ -177,9 +182,10 @@ def test_lda_exchange_potential_is_numerical_derivative_of_energy() -> None:
     rho = 0.7
     step = 1e-6
     functional = LdaExchange()
-    _, vxc = functional.evaluate(np.zeros((1, 3)), np.array([rho]))
-    upper, _ = functional.evaluate(np.zeros((1, 3)), np.array([rho + step]))
-    lower, _ = functional.evaluate(np.zeros((1, 3)), np.array([rho - step]))
+    points = np.zeros((1, 3))
+    vxc = functional.evaluate(points, np.array([rho])).vrho
+    upper = functional.evaluate(points, np.array([rho + step])).energy_density
+    lower = functional.evaluate(points, np.array([rho - step])).energy_density
     numerical = ((rho + step) * upper[0] - (rho - step) * lower[0]) / (2.0 * step)
     assert float(vxc[0]) == pytest.approx(numerical, rel=1e-8)
 
@@ -193,6 +199,7 @@ def test_svwn_declines_spin_polarization() -> None:
 def test_get_functional_rejects_unimplemented() -> None:
     """Заявленный в ТЗ функционал без кода отклоняется штатной ошибкой."""
     assert get_functional("svwn").name == "svwn"
+    assert get_functional("pbe").name == "pbe"
     with pytest.raises(FunctionalNotFoundError):
         get_functional("b3lyp")
 
@@ -201,8 +208,10 @@ def test_functional_registry_and_capabilities_agree() -> None:
     """Реестр берёт истину из модуля функционалов — расхождение невозможно."""
     registry = default_registry()
     for name in FUNCTIONALS:
-        assert registry.availability(f"functional:{name}").is_usable
-    assert not registry.availability("functional:pbe").is_usable
+        assert registry.availability(f"functional:{name}").is_usable, name
+    # Заявленное в ТЗ, но не реализованное — по-прежнему честно недоступно.
+    assert not registry.availability("functional:b3lyp").is_usable
+    assert not registry.availability("functional:wb97x-d").is_usable
 
 
 # --------------------------------------------------------------------------- #
@@ -386,15 +395,15 @@ def test_functionals_match_libxc_oracle() -> None:
     densities = np.array([5.0, 1.0, 0.5, 0.1, 0.01, 1e-3])
     points = np.zeros((densities.size, 3))
 
-    exc, vxc = LdaExchange().evaluate(points, densities)
+    exchange = LdaExchange().evaluate(points, densities)
     reference_exc, reference_vxc, _, _ = libxc.eval_xc("LDA_X", (densities,))
-    assert float(np.max(np.abs(exc - reference_exc))) < 1e-12
-    assert float(np.max(np.abs(vxc - reference_vxc))) < 1e-12
+    assert float(np.max(np.abs(exchange.energy_density - reference_exc))) < 1e-12
+    assert float(np.max(np.abs(exchange.vrho - reference_vxc))) < 1e-12
 
-    exc_c, vxc_c = VwnCorrelation().evaluate(points, densities)
+    correlation = VwnCorrelation().evaluate(points, densities)
     ref_exc_c, ref_vxc_c, _, _ = libxc.eval_xc("VWN5", (densities,))
-    assert float(np.max(np.abs(exc_c - ref_exc_c))) < 1e-12
-    assert float(np.max(np.abs(vxc_c - ref_vxc_c))) < 1e-12
+    assert float(np.max(np.abs(correlation.energy_density - ref_exc_c))) < 1e-12
+    assert float(np.max(np.abs(correlation.vrho - ref_vxc_c))) < 1e-12
 
 
 @pytest.mark.parametrize(
@@ -438,3 +447,176 @@ def test_rks_energy_matches_pyscf(
     their_scf.run(conv_tol=1e-12)
     assert float(their_scf.e_tot) == pytest.approx(reference_energy, abs=1e-8)
     assert result.total_energy == pytest.approx(float(their_scf.e_tot), abs=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# GGA: PBE
+# --------------------------------------------------------------------------- #
+@pytest.fixture(name="gradient_points")
+def fixture_gradient_points() -> tuple[np.ndarray, np.ndarray]:
+    """Плотности и их градиенты для проверки GGA-функционалов."""
+    rho = np.array([1.0, 0.5, 0.1, 0.01, 1e-3])
+    grad = np.stack(
+        [
+            np.array([0.4, 0.2, 0.05, 0.01, 1e-3]),
+            np.array([0.3, 0.1, 0.0, 0.0, 0.0]),
+            np.array([0.0, 0.2, 0.02, 0.0, 0.0]),
+        ],
+        axis=1,
+    )
+    return rho, grad
+
+
+def test_basis_gradients_match_finite_differences(water: Molecule) -> None:
+    """Аналитический градиент базисной функции против центральных разностей.
+
+    Проверяется на базисе с p-функциями: у s-гауссиан угловой многочлен тривиален
+    и ошибка в его производной осталась бы незамеченной.
+    """
+    basis = build_basis("6-31g", water)
+    rng = np.random.default_rng(7)
+    points = rng.normal(size=(40, 3)) * 1.5
+    _, gradients = evaluate_basis_with_gradients(basis, water, points)
+    step = 1e-5
+    worst = 0.0
+    for axis in range(3):
+        shifted_up = points.copy()
+        shifted_up[:, axis] += step
+        shifted_down = points.copy()
+        shifted_down[:, axis] -= step
+        up, _ = evaluate_basis_with_gradients(basis, water, shifted_up)
+        down, _ = evaluate_basis_with_gradients(basis, water, shifted_down)
+        finite = (up - down) / (2.0 * step)
+        worst = max(worst, float(np.max(np.abs(finite - gradients[:, :, axis]))))
+    assert worst < 1e-7
+
+
+def test_gga_functional_refuses_to_run_without_gradient(
+    gradient_points: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """GGA без градиента — не «ноль поправки», а ошибка: результат был бы неверным."""
+    rho, _ = gradient_points
+    with pytest.raises(ValueError, match="градиент плотности"):
+        PbeExchange().evaluate(np.zeros((rho.size, 3)), rho, None)
+    with pytest.raises(ValueError, match="градиент плотности"):
+        PbeCorrelation().evaluate(np.zeros((rho.size, 3)), rho, None)
+
+
+def test_pw92_matches_libxc(gradient_points: tuple[np.ndarray, np.ndarray]) -> None:
+    """PW92 совпадает с LibXC до машинной точности."""
+    libxc = pytest.importorskip("pyscf.dft.libxc", reason="LibXC нужен для независимой сверки")
+    rho, _ = gradient_points
+    ours = PwCorrelation().evaluate(np.zeros((rho.size, 3)), rho)
+    reference = libxc.eval_xc("LDA_C_PW", rho.reshape(1, 1, rho.size))
+    assert float(np.max(np.abs(ours.energy_density - reference[0]))) < 1e-14
+    assert float(np.max(np.abs(ours.vrho - reference[1][0]))) < 1e-14
+
+
+def test_pbe_exchange_matches_libxc(gradient_points: tuple[np.ndarray, np.ndarray]) -> None:
+    """Обмен PBE совпадает с LibXC до машинной точности по энергии и потенциалам."""
+    libxc = pytest.importorskip("pyscf.dft.libxc", reason="LibXC нужен для независимой сверки")
+    rho, grad = gradient_points
+    ours = PbeExchange().evaluate(np.zeros((rho.size, 3)), rho, grad)
+    raw = np.stack([np.vstack([rho, grad[:, 0], grad[:, 1], grad[:, 2]])], axis=0)
+    reference_exc, reference_v, _, _ = libxc.eval_xc("GGA_X_PBE", raw)
+    assert float(np.max(np.abs(ours.energy_density - reference_exc))) < 1e-14
+    assert ours.vsigma is not None
+    assert float(np.max(np.abs(ours.vrho - reference_v[0]))) < 1e-14
+    assert float(np.max(np.abs(ours.vsigma - reference_v[1]))) < 1e-13
+
+
+def test_pbe_correlation_potential_is_derivative_of_its_energy(
+    gradient_points: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """v_ρ корреляции PBE совпадает с численной производной её же энергии.
+
+    Регрессия на реальную ошибку: в ∂D/∂A была потеряна степень t², то есть
+    стояло u² вместо u³. Энергия этой производной не использует вовсе, поэтому
+    расчёт «сходился» и выглядел правдоподобно, а потенциал расходился с
+    эталоном на 1.3e-03. Поймать это можно только независимой производной —
+    сверка одной энергии ошибку не показывает.
+    """
+    rho, grad = gradient_points
+    functional = PbeCorrelation()
+    points = np.zeros((rho.size, 3))
+    step = 1e-6
+    ours = functional.evaluate(points, rho, grad).vrho
+    upper = functional.evaluate(points, rho + step, grad).energy_density
+    lower = functional.evaluate(points, rho - step, grad).energy_density
+    numerical = ((rho + step) * upper - (rho - step) * lower) / (2.0 * step)
+    assert float(np.max(np.abs(numerical - ours))) < 1e-6
+
+
+def test_pbe_correlation_matches_libxc(gradient_points: tuple[np.ndarray, np.ndarray]) -> None:
+    """Корреляция PBE против LibXC с измеренным, а не желаемым допуском.
+
+    Энергия сходится до 2.5e-07, а не до машинной точности: перебор β, γ и
+    трёх вариантов базовой LDA-корреляции не дал полного совпадения, и остаток
+    остаётся необъяснённым. Он на три порядка ниже химической точности и
+    учтён в допуске верификации, но выдавать его за ноль было бы неправдой.
+    """
+    libxc = pytest.importorskip("pyscf.dft.libxc", reason="LibXC нужен для независимой сверки")
+    rho, grad = gradient_points
+    ours = PbeCorrelation().evaluate(np.zeros((rho.size, 3)), rho, grad)
+    raw = np.stack([np.vstack([rho, grad[:, 0], grad[:, 1], grad[:, 2]])], axis=0)
+    reference_exc, reference_v = (
+        libxc.eval_xc("GGA_C_PBE", raw)[0],
+        libxc.eval_xc("GGA_C_PBE", raw)[1],
+    )
+    assert float(np.max(np.abs(ours.energy_density - reference_exc))) < 1e-6
+    assert ours.vsigma is not None
+    assert float(np.max(np.abs(ours.vrho - reference_v[0]))) < 1e-6
+    assert float(np.max(np.abs(ours.vsigma - reference_v[1]))) < 1e-4
+
+
+def test_pbe_energy_matches_pyscf(water: Molecule) -> None:
+    """Полная энергия RKS/PBE сверяется с PySCF на воде."""
+    pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
+    pyscf_dft = pytest.importorskip("pyscf.dft", reason="PySCF DFT нужен для независимой сверки")
+    basis = build_basis("sto-3g", water)
+    ours = run_rks(basis, water, get_functional("pbe"), grid_preset=GridPreset.ULTRAFINE)
+
+    theirs = pyscf.gto.M(
+        atom=[
+            ["O", [0.0, 0.0, 0.0]],
+            ["H", [0.7571689334, 0.5865799573, 0.0]],
+            ["H", [-0.7571689334, 0.5865799573, 0.0]],
+        ],
+        basis="sto-3g",
+        cart=True,
+        verbose=0,
+    )
+    their_scf = pyscf_dft.RKS(theirs)
+    their_scf.xc = "PBE"
+    their_scf.grids.atom_grid = (120, 974)
+    their_scf.verbose = 0
+    their_scf.run(conv_tol=1e-12)
+    assert ours.total_energy == pytest.approx(float(their_scf.e_tot), abs=5e-6)
+
+
+def test_engine_refuses_unimplemented_dispersion(water: Molecule) -> None:
+    """План с D3(BJ) не должен выполняться как расчёт без поправки (§54 ТЗ).
+
+    До этой проверки движок дисперсию вообще не смотрел: спецификация с
+    ``d3bj`` молча считалась как расчёт без неё, и пользователь получал другое
+    число под тем же описанием.
+    """
+    spec = CalculationSpec(
+        task=Task.SINGLE_POINT,
+        method=MethodSpec(
+            theory=TheoryFamily.DFT,
+            basis="sto-3g",
+            functional="pbe",
+            dispersion=DispersionCorrection.D3_BJ,
+        ),
+    )
+    with pytest.raises(MethodNotAvailableError):
+        ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1))
+
+
+def test_registry_reports_dispersion_honestly() -> None:
+    """Дисперсионные поправки видны в реестре: ``none`` доступна, остальные нет."""
+    registry = default_registry()
+    assert registry.is_available("dispersion:none")
+    assert not registry.is_available("dispersion:d3bj")
+    assert not registry.is_available("dispersion:d4")

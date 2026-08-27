@@ -589,6 +589,10 @@ class ReferenceEngine:
             self._registry.assert_available(f"method:{method.theory.value}")
         if method.functional is not None:
             self._registry.assert_available(f"functional:{method.functional}")
+        # Дисперсионная поправка проверяется так же строго, как функционал:
+        # без этой проверки план с D3-BJ выполнялся бы как расчёт без поправки,
+        # то есть выдавал бы другое число под тем же описанием (§54 ТЗ).
+        self._registry.assert_available(f"dispersion:{method.dispersion.value}")
         if method.spin is not SpinTreatment.RHF:
             self._registry.assert_available(f"spin:{method.spin.value}")
         self._registry.assert_available(f"basis:{method.basis}")
