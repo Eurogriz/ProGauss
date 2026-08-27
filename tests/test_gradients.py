@@ -204,6 +204,58 @@ def test_energy_weighted_density_is_symmetric_and_trace_matches() -> None:
     del basis_name
 
 
+@pytest.mark.parametrize("basis_name", ["sto-3g", "6-31g"])
+def test_vectorized_eri_derivative_matches_scalar_reference(basis_name: str) -> None:
+    """Векторизованный блок производной ERI совпадает со скалярной спецификацией.
+
+    В ``integrals`` живут два пути: скалярный (``_scalar``) — медленный, но
+    читаемый, и векторизованный — рабочий. Тест фиксирует, что ускорение не
+    изменило физику: расхождение должно оставаться на уровне машинной точности.
+    Проверяются и ``s``-, и ``p``-оболочки — именно на них работают ветвления
+    рекурсии по угловым моментам.
+    """
+    molecule = _water()
+    basis = build_basis(basis_name, molecule)
+    centers = integrals._shell_centers(basis, molecule)
+    worst = 0.0
+    checked = 0
+    for axis in range(3):
+        for i in range(len(basis.shells)):
+            for j in range(len(basis.shells)):
+                for k in range(len(basis.shells)):
+                    for m in range(k + 1):
+                        arguments = (
+                            axis,
+                            basis.shells[i],
+                            centers[i],
+                            basis.shells[j],
+                            centers[j],
+                            basis.shells[k],
+                            centers[k],
+                            basis.shells[m],
+                            centers[m],
+                        )
+                        fast = integrals._quartet_derivative_block(*arguments)
+                        slow = integrals._quartet_derivative_block_scalar(*arguments)
+                        worst = max(worst, float(np.abs(fast - slow).max()))
+                        checked += 1
+    assert checked > 0
+    assert worst < 1e-13, worst
+
+
+def test_boys_array_matches_scalar_boys() -> None:
+    """Векторизованная функция Бойса совпадает со скалярной на обоих ветвях.
+
+    Ряд Тейлора (x < 6) и рекурсия от erf (x ≥ 6) — разные ветви, поэтому
+    проверяются обе: векторизация не должна менять ни одну из них.
+    """
+    arguments = np.array([0.0, 1e-9, 0.3, 2.5, 5.9, 6.0, 6.1, 12.0, 40.0, 250.0])
+    for order in range(5):
+        expected = np.array([integrals._boys(order, float(x)) for x in arguments])
+        obtained = integrals._boys_array(order, arguments)
+        assert np.abs(obtained - expected).max() < 1e-13, order
+
+
 def test_gradient_requires_converged_scf_by_construction() -> None:
     """Документированное требование: на несошедшейся плотности градиент неверен.
 

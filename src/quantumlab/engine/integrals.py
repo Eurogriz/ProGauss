@@ -17,6 +17,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from functools import lru_cache
+from typing import Final
 
 import numpy as np
 
@@ -28,6 +29,12 @@ from quantumlab.engine.constants import PI_5_2, angstrom_to_bohr
 _BOYS_SERIES_LIMIT = 6.0
 
 #: Число членов ряда (с запасом для x ≤ 6).
+#: Верхняя граница кеша функции Бойса. Достаточно велика, чтобы обычный
+#: расчёт не вытеснял свои же значения, и достаточно мала, чтобы не
+#: расходовать память на больших системах (~25 МБ).
+_BOYS_CACHE_SIZE: Final = 1 << 18
+
+
 _BOYS_SERIES_TERMS = 25
 
 #: Сигнатура примитивного интеграла: (a, la, A, b, lb, B) → значение.
@@ -94,12 +101,20 @@ def _hermite_coefficient(i: int, j: int, t: int, q: float, a: float, b: float) -
     )
 
 
+@lru_cache(maxsize=_BOYS_CACHE_SIZE)
 def _boys(n: int, x: float) -> float:
     """Функция Бойса ``F_n(x) = ∫₀¹ t^{2n} e^{-x t²} dt``.
 
     Для малых ``x`` — ряд Тейлора (устойчив, пока члены не начинают
     сокращаться), для больших — рекурсия вверх от
     ``F_0 = ½√(π/x)·erf(√x)``, которая устойчива при ``x ≫ n``.
+
+    Результат кешируется. ``x = α·R²_PQ`` определяется одним примитивным
+    квартетом и не зависит от угловых моментов, поэтому при сборке
+    производных одно и то же значение запрашивается сотни раз: на воде/STO-3G
+    было 1.34 млн вычислений ряда при ~30 тыс. различных аргументов.
+    Кеш ограничен по размеру, потому что число различных квартетов растёт
+    как четвёртая степень размера системы.
     """
     if x < 1e-12:
         return 1.0 / (2 * n + 1)
@@ -853,6 +868,185 @@ def build_electron_repulsion_derivative(
     return tensor
 
 
+# --------------------------------------------------------------------------- #
+# Векторизованная сборка производных ERI
+# --------------------------------------------------------------------------- #
+# Скалярный путь (_quartet_derivative_block_scalar) остаётся в коде как читаемая
+# спецификация формул и как оракул для теста: он медленный, но его правильность
+# видна из записи. Рабочий путь ниже считает то же самое, но сразу по всем
+# примитивным квартетам оболочки — иначе стоимость градиента определяется
+# накладными расходами интерпретатора, а не арифметикой.
+
+
+def _erf_array(values: np.ndarray) -> np.ndarray:
+    """``erf`` для массива.
+
+    В NumPy функции ошибок нет, а рациональные аппроксимации дают ~1e-7 —
+    для квантовой химии этого мало. Поэтому используется точный ``math.erf``;
+    вызовов немного: только элементы с большим аргументом.
+    """
+    flat = values.ravel()
+    return np.array([math.erf(float(value)) for value in flat]).reshape(values.shape)
+
+
+def _boys_array(order: int, x: np.ndarray) -> np.ndarray:
+    r"""``F_n(x)`` сразу для массива аргументов.
+
+    Тот же алгоритм, что и в скалярном :func:`_boys`: ряд Тейлора при ``x < 6``
+    (векторизуется целиком) и рекурсия вверх от ``F_0 = ½√(π/x)·erf(√x)`` при
+    больших ``x``. Совпадение двух путей проверяется тестом.
+    """
+    result = np.empty_like(x)
+    small = x < _BOYS_SERIES_LIMIT
+    if np.any(small):
+        xs = x[small]
+        total = np.zeros_like(xs)
+        term = np.ones_like(xs)
+        for k in range(_BOYS_SERIES_TERMS):
+            if k:
+                term = term * (-xs / k)
+            total = total + term / (2 * order + 2 * k + 1)
+        result[small] = total
+    large = ~small
+    if np.any(large):
+        xl = x[large]
+        value = 0.5 * np.sqrt(math.pi / xl) * _erf_array(np.sqrt(xl))
+        exponent = np.exp(-xl)
+        for step in range(order):
+            value = ((2 * step + 1) * value - exponent) / (2.0 * xl)
+        result[large] = value
+    return result
+
+
+def _hermite_1d(i: int, j: int, q: float, a: np.ndarray, b: np.ndarray) -> list[np.ndarray]:
+    r"""``E^{ij}_t`` для одной декартовой оси как список массивов по квартетам.
+
+    Та же рекурсия, что в :func:`_hermite_coefficient`, но ``a`` и ``b`` —
+    массивы, поэтому за один проход получаются коэффициенты всех примитивных
+    квартетов оболочки::
+
+        E^{i+1,j}_t = E^{i,j}_{t−1}/(2p) + (t+1)·E^{i,j}_{t+1} − (bQ/p)·E^{i,j}_t
+        E^{i,j+1}_t = E^{i,j}_{t−1}/(2p) + (t+1)·E^{i,j}_{t+1} + (aQ/p)·E^{i,j}_t
+        E^{00}_0    = exp(−μQ²),  μ = ab/p
+    """
+    p = a + b
+    table: dict[tuple[int, int], list[np.ndarray]] = {(0, 0): [np.exp(-(a * b / p) * q * q)]}
+    for total in range(1, i + j + 1):
+        for first in range(total + 1):
+            second = total - first
+            if first > 0:
+                previous = table[(first - 1, second)]
+                shift = b * q / p
+                sign = -1.0
+            else:
+                previous = table[(first, second - 1)]
+                shift = a * q / p
+                sign = 1.0
+            highest = len(previous) - 1
+            values: list[np.ndarray] = []
+            for t in range(total + 1):
+                # E^{ij}_t = 0 при t > i + j, то есть вне границ предыдущего
+                # уровня рекурсии; верхний индекс t = total как раз такой.
+                lower = previous[t - 1] / (2.0 * p) if t >= 1 else 0.0
+                same = previous[t] if t <= highest else 0.0
+                upper = (t + 1) * previous[t + 1] if t + 1 <= highest else 0.0
+                values.append(lower + sign * shift * same + upper)
+            table[(first, second)] = values
+    return table[(i, j)]
+
+
+def _coulomb_table(
+    limit: int,
+    alpha: np.ndarray,
+    pqx: np.ndarray,
+    pqy: np.ndarray,
+    pqz: np.ndarray,
+    x: np.ndarray,
+) -> dict[tuple[int, int, int, int], np.ndarray]:
+    r"""``R^n_{tuv}`` для всех ``t+u+v+n ≤ limit`` как массивы по квартетам.
+
+    Рекурсия Хельгакера (9.9.15–9.9.18)::
+
+        R^n_{000}  = (−2α)^n F_n(α R²)
+        R^n_{tuv}  = PQ_x R^{n+1}_{t−1,u,v} + (t−1) R^{n+1}_{t−2,u,v}   (t > 0)
+
+    и циклически по ``u``, ``v``. Индекс ``n`` растёт на единицу на каждом шаге
+    рекурсии, поэтому при ``t+u+v = k`` довольно ``n ≤ limit − k``: обход по
+    возрастающему ``k`` гарантирует, что нужные значения уже готовы.
+    """
+    table: dict[tuple[int, int, int, int], np.ndarray] = {}
+    for n in range(limit + 1):
+        table[(0, 0, 0, n)] = (-2.0 * alpha) ** n * _boys_array(n, x)
+    for k in range(1, limit + 1):
+        for t in range(k + 1):
+            for u in range(k - t + 1):
+                v = k - t - u
+                for n in range(limit - k + 1):
+                    if t > 0:
+                        value = pqx * table[(t - 1, u, v, n + 1)]
+                        if t > 1:
+                            value = value + (t - 1) * table[(t - 2, u, v, n + 1)]
+                    elif u > 0:
+                        value = pqy * table[(t, u - 1, v, n + 1)]
+                        if u > 1:
+                            value = value + (u - 1) * table[(t, u - 2, v, n + 1)]
+                    else:
+                        value = pqz * table[(t, u, v - 1, n + 1)]
+                        if v > 1:
+                            value = value + (v - 1) * table[(t, u, v - 2, n + 1)]
+                    table[(t, u, v, n)] = value
+    return table
+
+
+def _hermite_product_arrays(
+    powers_a: Powers,
+    powers_b: Powers,
+    qx: float,
+    qy: float,
+    qz: float,
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    alternating: bool = False,
+) -> dict[Powers, np.ndarray]:
+    """``E^{ab}_{tuv} = E_x·E_y·E_z`` как словарь по ``(t, u, v)``.
+
+    При ``alternating=True`` коэффициент умножается на ``(−1)^{t+u+v}`` — это
+    кет-сторона кулоновского интеграла.
+    """
+    axes = (
+        _hermite_1d(powers_a[0], powers_b[0], qx, a, b),
+        _hermite_1d(powers_a[1], powers_b[1], qy, a, b),
+        _hermite_1d(powers_a[2], powers_b[2], qz, a, b),
+    )
+    result: dict[Powers, np.ndarray] = {}
+    for t, ex in enumerate(axes[0]):
+        for u, ey in enumerate(axes[1]):
+            for v, ez in enumerate(axes[2]):
+                product = ex * ey * ez
+                if alternating and (t + u + v) % 2:
+                    product = -product
+                if not np.any(product):
+                    continue
+                result[(t, u, v)] = product
+    return result
+
+
+def _contract(
+    bra: dict[Powers, np.ndarray],
+    ket: dict[Powers, np.ndarray],
+    coulomb: dict[tuple[int, int, int, int], np.ndarray],
+) -> np.ndarray:
+    """``Σ E^{ab}_{tuv}·E^{cd}_{t'u'v'}·R^0_{t+t',u+u',v+v'}`` по квартетам."""
+    total = np.zeros_like(coulomb[(0, 0, 0, 0)])
+    for (t1, u1, v1), coefficient_bra in bra.items():
+        for (t2, u2, v2), coefficient_ket in ket.items():
+            total = (
+                total + coefficient_bra * coefficient_ket * coulomb[(t1 + t2, u1 + u2, v1 + v2, 0)]
+            )
+    return total
+
+
 def _quartet_derivative_block(
     axis: int,
     shell_a: Shell,
@@ -864,7 +1058,120 @@ def _quartet_derivative_block(
     shell_d: Shell,
     center_d: Point,
 ) -> np.ndarray:
-    """Блок производной тензора ERI по центру первой оболочки квартета."""
+    """Блок ``∂(ab|cd)/∂A_x`` сразу по всем примитивным квартетам оболочки.
+
+    Формула та же, что в скалярном пути::
+
+        ∂(ab|cd)/∂A_x = 2a·(a+e_x, b|c,d) − l_a,x·(a−e_x, b|c,d)
+
+    Отличается только способ счёта: геометрия квартета, эрмитовы коэффициенты
+    кет-стороны и таблица ``R^n_{tuv}`` вычисляются один раз на квартет, а не
+    заново для каждой угловой компоненты. Повторный расчёт этих величин и давал
+    основную стоимость градиента.
+    """
+    powers_a = cartesian_powers(shell_a.angular_momentum)
+    powers_b = cartesian_powers(shell_b.angular_momentum)
+    powers_c = cartesian_powers(shell_c.angular_momentum)
+    powers_d = cartesian_powers(shell_d.angular_momentum)
+    scales = (
+        shell_a.component_scales,
+        shell_b.component_scales,
+        shell_c.component_scales,
+        shell_d.component_scales,
+    )
+    counts = [
+        len(shell_a.exponents),
+        len(shell_b.exponents),
+        len(shell_c.exponents),
+        len(shell_d.exponents),
+    ]
+    a = np.repeat(np.asarray(shell_a.exponents, dtype=float), counts[1] * counts[2] * counts[3])
+    b = np.repeat(
+        np.tile(np.asarray(shell_b.exponents, dtype=float), counts[0]), counts[2] * counts[3]
+    )
+    c = np.repeat(
+        np.tile(np.asarray(shell_c.exponents, dtype=float), counts[0] * counts[1]), counts[3]
+    )
+    d = np.tile(np.asarray(shell_d.exponents, dtype=float), counts[0] * counts[1] * counts[2])
+    coefficients = np.einsum(
+        "i,j,k,l->ijkl",
+        np.asarray(shell_a.coefficients, dtype=float),
+        np.asarray(shell_b.coefficients, dtype=float),
+        np.asarray(shell_c.coefficients, dtype=float),
+        np.asarray(shell_d.coefficients, dtype=float),
+    ).reshape(-1)
+
+    p = a + b
+    q = c + d
+    alpha = p * q / (p + q)
+    pqx = (a * center_a[0] + b * center_b[0]) / p - (c * center_c[0] + d * center_d[0]) / q
+    pqy = (a * center_a[1] + b * center_b[1]) / p - (c * center_c[1] + d * center_d[1]) / q
+    pqz = (a * center_a[2] + b * center_b[2]) / p - (c * center_c[2] + d * center_d[2]) / q
+    x = alpha * (pqx * pqx + pqy * pqy + pqz * pqz)
+    prefactor = 2.0 * PI_5_2 / (p * q * np.sqrt(p + q))
+
+    qx = center_a[0] - center_b[0]
+    qy = center_a[1] - center_b[1]
+    qz = center_a[2] - center_b[2]
+    rx = center_c[0] - center_d[0]
+    ry = center_c[1] - center_d[1]
+    rz = center_c[2] - center_d[2]
+
+    highest = (
+        shell_a.angular_momentum
+        + shell_b.angular_momentum
+        + 1
+        + shell_c.angular_momentum
+        + shell_d.angular_momentum
+    )
+    coulomb = _coulomb_table(highest, alpha, pqx, pqy, pqz, x)
+
+    block = np.zeros((len(powers_a), len(powers_b), len(powers_c), len(powers_d)))
+    for ib, pb in enumerate(powers_b):
+        for ic, pc in enumerate(powers_c):
+            for idx, pd in enumerate(powers_d):
+                # Кет-сторона от угловых моментов бра-функции не зависит,
+                # поэтому её коэффициенты считаются один раз на (ib, ic, idx).
+                ket = _hermite_product_arrays(pc, pd, rx, ry, rz, c, d, alternating=True)
+                if not ket:
+                    continue
+                for ia, pa in enumerate(powers_a):
+                    raised = list(pa)
+                    raised[axis] += 1
+                    bra = _hermite_product_arrays(
+                        (raised[0], raised[1], raised[2]), pb, qx, qy, qz, a, b
+                    )
+                    values = 2.0 * a * _contract(bra, ket, coulomb)
+                    if pa[axis] > 0:
+                        lowered = list(pa)
+                        lowered[axis] -= 1
+                        bra_lower = _hermite_product_arrays(
+                            (lowered[0], lowered[1], lowered[2]), pb, qx, qy, qz, a, b
+                        )
+                        values = values - float(pa[axis]) * _contract(bra_lower, ket, coulomb)
+                    block[ia, ib, ic, idx] = float(coefficients @ (prefactor * values)) * (
+                        scales[0][ia] * scales[1][ib] * scales[2][ic] * scales[3][idx]
+                    )
+    return block
+
+
+def _quartet_derivative_block_scalar(
+    axis: int,
+    shell_a: Shell,
+    center_a: Point,
+    shell_b: Shell,
+    center_b: Point,
+    shell_c: Shell,
+    center_c: Point,
+    shell_d: Shell,
+    center_d: Point,
+) -> np.ndarray:
+    """Блок производной ERI, считанный «в лоб» по примитивным квартетам.
+
+    Рабочий путь — векторизованный :func:`_quartet_derivative_block`; эта
+    функция оставлена как читаемая спецификация формул и как оракул для
+    теста на совпадение двух путей.
+    """
     powers_a = cartesian_powers(shell_a.angular_momentum)
     powers_b = cartesian_powers(shell_b.angular_momentum)
     powers_c = cartesian_powers(shell_c.angular_momentum)
