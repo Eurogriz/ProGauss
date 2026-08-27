@@ -47,9 +47,12 @@ from quantumlab.domain.spec import CalculationSpec, SpinTreatment, Task, TheoryF
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet, basis_angular_scheme, build_basis
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
+from quantumlab.engine.gradients import rhf_gradient
+from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import ScfResult as RhfResult
-from quantumlab.engine.scf import ScfSettings, canonical_orthogonalizer, run_rhf
+from quantumlab.engine.scf import ScfSettings, build_fock, canonical_orthogonalizer, run_rhf
+from quantumlab.errors import ScfNotConvergedError
 from quantumlab.version import __version__
 
 #: Имя ядра — попадает в отпечаток расчёта и в журнал.
@@ -61,10 +64,11 @@ ENGINE_BACKEND = "numpy-dense-cpu"
 #: Точность, с которой tr(D·S) должен равняться числу электронов.
 _ELECTRON_COUNT_TOLERANCE = 1e-6
 
-#: Отклонение −V/T от 2, при котором теорема вириала считается выполненной.
-#: На неоптимизированной геометрии отклонение ожидаемо, поэтому превышение
-#: порога даёт ``warn``, а не ``fail``.
-_VIRIAL_TOLERANCE = 0.02
+#: Точность выполнения E = T + V_яд-эл + V_эл-эл + V_яд-яд на сошедшейся плотности.
+_ENERGY_DECOMPOSITION_TOLERANCE = 1e-8
+
+#: Точность условия стационарности ``FDS = SDF`` (следствие уравнений Рутана).
+_FOCK_COMMUTATOR_TOLERANCE = 1e-6
 
 #: Точность выполнения D′² = 2D′ в ортогональном базисе.
 _IDEMPOTENCY_TOLERANCE = 1e-6
@@ -142,7 +146,7 @@ class ReferenceEngine:
 
     def supported_tasks(self) -> Sequence[str]:
         """Задачи, которые ядро действительно умеет выполнять."""
-        return (Task.SINGLE_POINT.value,)
+        return (Task.SINGLE_POINT.value, Task.OPTIMIZATION.value)
 
     # ------------------------------------------------------------------ #
     # Основной вход
@@ -150,15 +154,27 @@ class ReferenceEngine:
     def run(
         self, request: EngineRequest, *, progress: ProgressReporter | None = None
     ) -> CalculationResult:
-        """Выполняет расчёт в точке и возвращает результат с проверками качества.
+        """Выполняет расчёт и возвращает результат с проверками качества.
 
-        Любая неподдерживаемая комбинация (задача, метод, спин, базис)
-        отклоняется штатной ошибкой до начала вычислений — пользователь
-        получает «этот метод пока недоступен», а не правдоподобное число.
+        Любая неподдерживаемая комбинация (задача, метод, спин, базис, система
+        координат оптимизации) отклоняется штатной ошибкой до начала вычислений
+        — пользователь получает «этот метод пока недоступен», а не
+        правдоподобное число (§54 ТЗ).
         """
         spec = request.spec
         basis_name = self.assert_supported(spec)
+        if spec.task is Task.OPTIMIZATION:
+            return self._run_optimization(request, basis_name, progress=progress)
+        return self._run_single_point(request, basis_name, progress=progress)
 
+    # ------------------------------------------------------------------ #
+    # Одноточечный расчёт
+    # ------------------------------------------------------------------ #
+    def _run_single_point(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """RHF в фиксированной геометрии."""
+        spec = request.spec
         timings: list[TimingRecord] = []
 
         started = time.perf_counter()
@@ -168,8 +184,6 @@ class ReferenceEngine:
 
         started = time.perf_counter()
         overlap = integrals.build_overlap(basis, request.molecule)
-        core = integrals.build_core_hamiltonian(basis, request.molecule)
-        integrals.build_electron_repulsion(basis, request.molecule)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 45.0, "integrals")
@@ -185,22 +199,137 @@ class ReferenceEngine:
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
+        return self._result(
+            request,
+            molecule=request.molecule,
+            basis=basis,
+            rhf=rhf,
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings(rhf, basis),
+            final_molecule=None,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Оптимизация геометрии
+    # ------------------------------------------------------------------ #
+    def _run_optimization(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """Оптимизация геометрии: градиент → квазиньютоновские шаги → свойства.
+
+        Числа в результате (энергия, орбитали, диполь) относятся к
+        **оптимизированной** геометрии, а не к исходной. Поэтому в конце
+        выполняется отдельный SCF на найденной структуре: брать энергию из
+        последней итерации оптимизатора и приписывать её другой геометрии —
+        ровно тот класс ошибок, который делает результат непригодным.
+        """
+        spec = request.spec
+        options = spec.optimization
+        budget = max(options.max_steps, 1)
+        timings: list[TimingRecord] = []
+
+        def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
+            basis = build_basis(basis_name, molecule)
+            scf = run_rhf(basis, molecule, _scf_settings(spec))
+            if not scf.converged:
+                # Градиент по несошедшейся плотности неверен, а оптимизация по
+                # неверному градиенту уходит в случайную точку. Прерываем явно.
+                raise ScfNotConvergedError(
+                    iterations=scf.iterations,
+                    residual=max(scf.history[-1].energy_change, 0.0) if scf.history else 0.0,
+                    attempts=scf.strategies_used,
+                )
+            gradient = rhf_gradient(basis, molecule, scf).gradient
+            done.append(1)
+            _report(
+                progress,
+                min(5.0 + 80.0 * len(done) / (budget + 1), 85.0),
+                "optimization",
+                step=len(done),
+            )
+            return scf.total_energy, gradient
+
+        done: list[int] = []
+        started = time.perf_counter()
+        optimization = optimize_geometry(
+            request.molecule, energy_and_gradient, _optimization_settings(spec)
+        )
+        timings.append(_timing("optimization", started))
+        _report(progress, 90.0, "optimization", steps=optimization.steps)
+
+        final = optimization.molecule
+        started = time.perf_counter()
+        basis = build_basis(basis_name, final)
+        overlap = integrals.build_overlap(basis, final)
+        dipole_integrals = integrals.build_dipole_integrals(basis, final)
+        rhf = run_rhf(basis, final, _scf_settings(spec))
+        timings.append(_timing("final-scf", started))
+
+        started = time.perf_counter()
+        properties = _properties(rhf, final, dipole_integrals)
+        checks = _quality_checks(rhf, basis, final, overlap) + _optimization_check(optimization)
+        timings.append(_timing("properties", started))
+        _report(progress, 100.0, "properties")
+
+        return self._result(
+            request,
+            molecule=final,
+            basis=basis,
+            rhf=rhf,
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings(rhf, basis) + _optimization_warnings(optimization),
+            final_molecule=final,
+            initial_molecule=request.molecule,
+            converged=rhf.converged and optimization.converged,
+            optimization_steps=optimization.steps,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Сборка результата
+    # ------------------------------------------------------------------ #
+    def _result(
+        self,
+        request: EngineRequest,
+        *,
+        molecule: Molecule,
+        basis: BasisSet,
+        rhf: RhfResult,
+        properties: _Properties,
+        checks: tuple[QualityCheck, ...],
+        timings: list[TimingRecord],
+        warnings: tuple[str, ...],
+        final_molecule: Molecule | None,
+        initial_molecule: Molecule | None = None,
+        converged: bool | None = None,
+        optimization_steps: int | None = None,
+    ) -> CalculationResult:
+        """Собирает ``CalculationResult``: отпечаток, проверки, окружение.
+
+        ``initial_molecule`` задаётся только для расчётов, меняющих геометрию:
+        отпечаток обязан различать исходную и конечную структуры, иначе две
+        разные оптимизации из разных стартов выглядели бы одинаково.
+        """
+        spec = request.spec
         fingerprint = build_fingerprint(
             spec=spec,
-            molecule=request.molecule,
+            molecule=initial_molecule or molecule,
             software_version=__version__,
             engine_version=self.version,
             hardware={"backend": ENGINE_BACKEND, "threads": str(request.threads)},
+            final_molecule=final_molecule,
         )
-        del core  # построен для полноты протокола; в RHF используется внутри SCF
-
+        del basis  # используется вызывающим кодом для проверок качества
         return CalculationResult(
             job_id=request.job_id,
             spec=spec,
             fingerprint=fingerprint,
             energy_hartree=rhf.total_energy,
             scf_iterations=rhf.iterations,
-            converged=rhf.converged,
+            converged=rhf.converged if converged is None else converged,
             homo_energy_hartree=properties.homo,
             lumo_energy_hartree=properties.lumo,
             gap_hartree=properties.gap,
@@ -208,8 +337,10 @@ class ReferenceEngine:
             orbitals=properties.orbitals,
             quality_checks=checks,
             timings=tuple(timings),
-            warnings=_warnings(rhf, basis),
+            warnings=warnings,
             environment=_environment(),
+            final_molecule=final_molecule,
+            optimization_steps=optimization_steps,
         )
 
     # ------------------------------------------------------------------ #
@@ -225,8 +356,11 @@ class ReferenceEngine:
         Возвращает имя базиса: оно нужно и для расчёта, и для сообщения
         об ошибке, поэтому извлекается здесь же.
         """
-        if spec.task is not Task.SINGLE_POINT:
+        if spec.task not in (Task.SINGLE_POINT, Task.OPTIMIZATION):
             self._registry.assert_available(f"task:{spec.task.value}")
+        if spec.task is Task.OPTIMIZATION:
+            coordinates = spec.optimization.coordinates
+            self._registry.assert_available(f"coordinates:{coordinates}")
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -264,6 +398,50 @@ def _scf_settings(spec: CalculationSpec) -> ScfSettings:
         damping_factor=scf.damping if scf.damping > 0 else 0.5,
         damping_rounds=2 if scf.damping > 0 else 0,
         level_shift=scf.level_shift if scf.level_shift > 0 else 0.25,
+    )
+
+
+def _optimization_settings(spec: CalculationSpec) -> OptimizationSettings:
+    """Переносит параметры оптимизации из спецификации в настройки решателя."""
+    options = spec.optimization
+    return OptimizationSettings(
+        max_steps=options.max_steps,
+        max_force=options.max_force,
+        rms_force=options.rms_force,
+        max_displacement=options.max_displacement,
+        rms_displacement=options.rms_displacement,
+        trust_radius=options.trust_radius,
+        frozen_atoms=options.frozen_atoms,
+    )
+
+
+def _optimization_check(optimization: object) -> tuple[QualityCheck, ...]:
+    """Проверка качества по итогам оптимизации геометрии."""
+    from quantumlab.engine.optimizer import OptimizationResult
+
+    assert isinstance(optimization, OptimizationResult)
+    forces = f"шагов: {optimization.steps}, max|F| = {optimization.max_force:.3e} э/бор"
+    detail = forces if optimization.converged else f"{forces} — пороги спецификации не достигнуты"
+    return (
+        QualityCheck(
+            name_key="optimization_converged",
+            verdict=QualityVerdict.PASS if optimization.converged else QualityVerdict.FAIL,
+            detail=detail,
+        ),
+    )
+
+
+def _optimization_warnings(optimization: object) -> tuple[str, ...]:
+    """Предупреждения оптимизации — пользователь обязан увидеть несходимость."""
+    from quantumlab.engine.optimizer import OptimizationResult
+
+    assert isinstance(optimization, OptimizationResult)
+    if optimization.converged:
+        return ()
+    return (
+        f"Оптимизация геометрии не сошлась за {optimization.steps} шагов: "
+        f"max|F| = {optimization.max_force:.3e} э/бор. Приведённая геометрия — "
+        "последняя достигнутая точка, а не равновесная структура.",
     )
 
 
@@ -321,7 +499,20 @@ def _quality_checks(
     expected = molecule.n_electrons
 
     kinetic = float(np.sum(rhf.density * integrals.build_kinetic(basis, molecule)))
-    virial_ratio = (kinetic - rhf.total_energy) / kinetic if kinetic != 0.0 else float("nan")
+    attraction = float(np.sum(rhf.density * integrals.build_nuclear_attraction(basis, molecule)))
+    repulsion = integrals.build_electron_repulsion(basis, molecule)
+    coulomb = float(np.einsum("uv,ls,uvls", rhf.density, rhf.density, repulsion))
+    exchange = float(np.einsum("uv,ls,ulvs", rhf.density, rhf.density, repulsion))
+    electron_electron = 0.5 * (coulomb - 0.5 * exchange)
+    decomposition_error = abs(
+        kinetic + attraction + electron_electron + rhf.nuclear_repulsion - rhf.total_energy
+    )
+
+    core = integrals.build_core_hamiltonian(basis, molecule)
+    fock = build_fock(core, rhf.density, repulsion)
+    commutator_error = float(
+        np.max(np.abs(fock @ rhf.density @ overlap - overlap @ rhf.density @ fock))
+    )
 
     orthogonalizer = canonical_orthogonalizer(overlap)
     inverse = np.linalg.inv(orthogonalizer)
@@ -345,16 +536,25 @@ def _quality_checks(
             detail=f"tr(D·S) = {electron_count:.8f}, ожидается {expected}",
         ),
         QualityCheck(
-            name_key="virial_ratio",
+            name_key="energy_decomposition",
             verdict=(
                 QualityVerdict.PASS
-                if abs(virial_ratio - 2.0) < _VIRIAL_TOLERANCE
-                else QualityVerdict.WARNING
+                if decomposition_error < _ENERGY_DECOMPOSITION_TOLERANCE
+                else QualityVerdict.FAIL
             ),
             detail=(
-                f"−V/T = {virial_ratio:.6f} (в равновесной геометрии равно 2); "
-                "отклонение ожидаемо, если геометрия не оптимизирована"
+                "E = T + V_яд-эл + V_эл-эл + V_яд-яд пересчитано по плотности, "
+                f"расхождение {decomposition_error:.3e} э"
             ),
+        ),
+        QualityCheck(
+            name_key="fock_density_commutator",
+            verdict=(
+                QualityVerdict.PASS
+                if commutator_error < _FOCK_COMMUTATOR_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=(f"условие стационарности FDS = SDF, max|FDS − SDF| = {commutator_error:.3e}"),
         ),
         QualityCheck(
             name_key="density_idempotency",

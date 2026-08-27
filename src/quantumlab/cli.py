@@ -27,6 +27,7 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import (
     CalculationSpec,
     MethodSpec,
+    OptimizationSpec,
     PrecisionProfile,
     Task,
     TheoryFamily,
@@ -50,6 +51,10 @@ _PROFILE_BY_CLI_NAME: dict[str, PrecisionProfile] = {
     "high": PrecisionProfile.HIGH_ACCURACY,
     "research": PrecisionProfile.RESEARCH,
 }
+
+#: Система координат оптимизации в экспертном режиме CLI: единственная
+#: реализованная. Совпадает с выбором автоподбора (``recommend/profiles.py``).
+_CLI_COORDINATES = "cartesian"
 
 _TASK_BY_CLI_NAME: dict[str, Task] = {
     "energy": Task.SINGLE_POINT,
@@ -168,7 +173,16 @@ def _build_spec(args: argparse.Namespace, registry: CapabilityRegistry) -> Calcu
         registry.assert_available(f"basis:{method.basis}")
         if method.functional:
             registry.assert_available(f"functional:{method.functional}")
-        return CalculationSpec(task=task, profile=None, method=method)
+        # В экспертном режиме система координат задаётся явно. Дефолт
+        # спецификации — избыточные внутренние координаты, которых в ядре нет;
+        # оставлять его значило бы отклонять расчёт из-за выбора, которого
+        # пользователь не делал. Выбранный вариант показывается в plan.
+        return CalculationSpec(
+            task=task,
+            profile=None,
+            method=method,
+            optimization=OptimizationSpec(coordinates=_CLI_COORDINATES),
+        )
 
     profile = _PROFILE_BY_CLI_NAME.get(args.profile.lower())
     if profile is None:
@@ -288,6 +302,15 @@ def _command_plan(args: argparse.Namespace, registry: CapabilityRegistry, locale
         print(f"  {t('profile.decision.basis', locale, value=spec.method.basis)}")
         if spec.method.functional:
             print(f"  {t('profile.decision.functional', locale, value=spec.method.functional)}")
+        if spec.task is Task.OPTIMIZATION:
+            print(
+                "  "
+                + t(
+                    "profile.decision.coordinates",
+                    locale,
+                    value=spec.optimization.coordinates,
+                )
+            )
     return 0
 
 
@@ -352,12 +375,28 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
         return 1
 
     result_path = store.save_result(job.id, result.model_dump_json(indent=2))
+    if result.final_molecule is not None:
+        geometry_path = store.save_geometry(job.id, result.final_molecule.to_xyz())
+        geometry_note: str | None = t("cli.run.geometry_saved", locale, path=geometry_path)
+    else:
+        geometry_note = None
     final = JobStatus.COMPLETED_WITH_WARNINGS if result.warnings else JobStatus.COMPLETED
     uri = f"file://{result_path}"
     store.update(job.id, lambda item: _mark_finished(item, uri, final))
 
     key = "cli.run.iterations" if result.converged else "cli.run.not_converged"
     print(f"  {t(key, locale, iterations=result.scf_iterations)}")
+    if result.optimization_steps is not None:
+        print(
+            "  "
+            + t(
+                "cli.run.optimization_converged"
+                if result.converged
+                else "cli.run.optimization_stalled",
+                locale,
+                steps=result.optimization_steps,
+            )
+        )
     print(
         "  "
         + t(
@@ -374,6 +413,8 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
         for warning in result.warnings:
             print(f"    ! {warning}")
     print(f"  {t('cli.run.result_saved', locale, path=result_path)}")
+    if geometry_note is not None:
+        print(f"  {geometry_note}")
     return 0 if result.converged else 1
 
 

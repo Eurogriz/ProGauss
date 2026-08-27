@@ -14,6 +14,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field
 
 from quantumlab.domain.fingerprint import Fingerprint
+from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import CalculationSpec
 
 
@@ -126,6 +127,22 @@ class CalculationResult(BaseModel):
     frequencies_cm1: tuple[float, ...] = ()
     zero_point_energy_hartree: float | None = None
     orbitals: tuple[OrbitalInfo, ...] = ()
+    optimization_steps: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Число шагов оптимизации геометрии. Пусто для расчётов, которые структуру не меняют."
+        ),
+    )
+    final_molecule: Molecule | None = Field(
+        default=None,
+        description=(
+            "Итоговая геометрия, к которой относятся приведённые числа. "
+            "Заполняется расчётами, меняющими структуру (оптимизация); для "
+            "одноточечного расчёта остаётся пустым — дублировать исходную "
+            "структуру смысла нет."
+        ),
+    )
     quality_checks: tuple[QualityCheck, ...] = ()
     timings: tuple[TimingRecord, ...] = ()
     artifacts: tuple[ArtifactRef, ...] = ()

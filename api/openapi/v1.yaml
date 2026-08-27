@@ -904,6 +904,16 @@ components:
           type: array
           items: { type: number }
         zeroPointEnergyHartree: { type: [number, 'null'] }
+        optimizationSteps:
+          type: [integer, 'null']
+          description: Число шагов оптимизации геометрии; пусто у расчёта в точке.
+        finalMolecule:
+          description: >-
+            Итоговая геометрия для расчётов, меняющих структуру (оптимизация).
+            Отсутствует у одноточечного расчёта: там она совпадает с исходной.
+          oneOf:
+            - $ref: '#/components/schemas/Molecule'
+            - type: 'null'
         quality:
           type: array
           items: { $ref: '#/components/schemas/QualityCheck' }

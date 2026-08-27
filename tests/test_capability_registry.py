@@ -62,15 +62,23 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
     """Все методы, кроме HF, остаются недоступными: кода для них нет.
 
     HF — единственное исключение, и он помечен ``partial``, а не
-    ``implemented``: реализован только RHF и только для single_point.
+    ``implemented``: реализован только RHF и только для двух задач.
     """
     hf = registry.get("method:hf")
     assert hf.availability is Availability.PARTIAL
     assert hf.is_usable
-    assert len(hf.limitations) >= 2  # ограничение по спину и по задаче
+    # Ограничения перечислены явно: по спину, по набору задач и по координатам.
+    assert len(hf.limitations) >= 3
+    assert any("RHF" in text for text in hf.limitations)
 
-    for capability in registry.list_capabilities(CapabilityKind.METHOD):
-        if capability.id in {"method:hf", "spin:rhf"}:
+    methods = [
+        item
+        for item in registry.list_capabilities(CapabilityKind.METHOD)
+        if item.id.startswith("method:")
+    ]
+    assert {item.id for item in methods if item.is_usable} == {"method:hf"}
+    for capability in methods:
+        if capability.id == "method:hf":
             continue
         assert capability.availability is Availability.NOT_IMPLEMENTED, capability.id
         assert not capability.is_usable, capability.id
@@ -93,8 +101,10 @@ def test_assert_available_distinguishes_error_types(registry: CapabilityRegistry
         registry.assert_available("basis:unobtainium-qzvp")
     with pytest.raises(FunctionalNotFoundError):
         registry.assert_available("functional:pbe0")
+    # optimization реализована, поэтому примером недоступной задачи служат
+    # частоты: для них нужен гессиан, которого нет.
     with pytest.raises(MethodNotAvailableError):
-        registry.assert_available("task:optimization")
+        registry.assert_available("task:frequencies")
 
 
 def test_unknown_capability_is_treated_as_unavailable(registry: CapabilityRegistry) -> None:
@@ -131,8 +141,14 @@ def test_implemented_capabilities_match_the_verified_surface(
         "basis:6-31g(d,p)",
         "basis:sto-3g",
         "format:xyz",
+        "task:optimization",
         "task:single_point",
     ]
+    # Оптимизация реализована, но только в декартовых координатах — поэтому
+    # coordinates:cartesian partial, а внутренние координаты не реализованы.
+    assert registry.get("coordinates:cartesian").availability is Availability.PARTIAL
+    assert not registry.is_available("coordinates:redundant_internal")
+    assert not registry.is_available("task:frequencies")
     assert registry.get("format:xyz").describe("ru") == (
         "Референсная реализация: проверена на верификационном наборе."
     )

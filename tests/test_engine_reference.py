@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from quantumlab.domain.molecule import Atom, Molecule
@@ -19,12 +20,15 @@ from quantumlab.domain.result import CalculationResult, QualityVerdict
 from quantumlab.domain.spec import (
     CalculationSpec,
     MethodSpec,
+    OptimizationSpec,
     SpinTreatment,
     Task,
     TheoryFamily,
 )
+from quantumlab.engine.basis import build_basis
 from quantumlab.engine.contracts import EngineRequest
 from quantumlab.engine.reference import ENGINE_BACKEND, ENGINE_NAME, ReferenceEngine
+from quantumlab.engine.scf import ScfSettings, run_rhf
 from quantumlab.errors import BasisNotFoundError, MethodNotAvailableError
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
@@ -78,10 +82,22 @@ def _run(
 # --------------------------------------------------------------------------- #
 # Числа
 # --------------------------------------------------------------------------- #
-def test_supported_tasks_is_single_point_only() -> None:
-    """Ядро заявляет ровно то, что умеет: только расчёт в точке."""
-    assert list(ReferenceEngine().supported_tasks()) == ["single_point"]
+def test_supported_tasks_list_only_implemented_ones() -> None:
+    """Ядро заявляет ровно то, что умеет: расчёт в точке и оптимизацию."""
+    assert list(ReferenceEngine().supported_tasks()) == ["single_point", "optimization"]
     assert ReferenceEngine().name == ENGINE_NAME
+
+
+def test_frequencies_are_not_claimed() -> None:
+    """Частоты требуют гессиана, которого нет, — в списке задач их быть не должно."""
+    assert "frequencies" not in list(ReferenceEngine().supported_tasks())
+    with pytest.raises(MethodNotAvailableError):
+        ReferenceEngine().assert_supported(
+            CalculationSpec(
+                task=Task.FREQUENCIES,
+                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+            )
+        )
 
 
 def test_water_sto3g_energy_matches_the_verified_value() -> None:
@@ -122,8 +138,10 @@ def test_quality_checks_pass_on_a_cartesian_basis() -> None:
     assert verdicts["electron_count"] is QualityVerdict.PASS
     assert verdicts["density_idempotency"] is QualityVerdict.PASS
     assert verdicts["basis_angular_scheme"] is QualityVerdict.PASS
-    # Теорема вириала на неоптимизированной геометрии выполняется приближённо.
-    assert verdicts["virial_ratio"] in (QualityVerdict.PASS, QualityVerdict.WARNING)
+    # Оба — точные тождества, а не приближённые критерии (см. test_scf.py:
+    # отношение −V/T критерием быть не может в конечном базисе).
+    assert verdicts["energy_decomposition"] is QualityVerdict.PASS
+    assert verdicts["fock_density_commutator"] is QualityVerdict.PASS
     assert not result.warnings
 
 
@@ -273,6 +291,148 @@ def test_unknown_basis_is_reported_as_missing_not_as_unavailable() -> None:
                 method=MethodSpec(theory=TheoryFamily.HF, basis="unobtainium-qzvp"),
             )
         )
+
+
+def _h2(distance: float) -> Molecule:
+    return Molecule(
+        name="h2",
+        atoms=(
+            Atom(symbol="H", position=(0.0, 0.0, 0.0)),
+            Atom(symbol="H", position=(0.0, 0.0, distance)),
+        ),
+    )
+
+
+def _optimization_spec(
+    *, max_steps: int = 30, frozen_atoms: tuple[int, ...] = ()
+) -> CalculationSpec:
+    """Спецификация оптимизации в единственной реализованной системе координат."""
+    return CalculationSpec(
+        task=Task.OPTIMIZATION,
+        method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+        optimization=OptimizationSpec(
+            coordinates="cartesian", max_steps=max_steps, frozen_atoms=frozen_atoms
+        ),
+    )
+
+
+def test_optimization_returns_the_geometry_its_numbers_belong_to() -> None:
+    """Числа в результате относятся к возвращённой геометрии, а не к исходной.
+
+    Это главное требование к оптимизации: энергия из последней итерации
+    оптимизатора, приписанная другой структуре, выглядит правдоподобно и
+    делает результат непригодным.
+    """
+    engine = ReferenceEngine()
+    result = engine.run(
+        EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=_optimization_spec())
+    )
+    assert result.converged
+    assert result.final_molecule is not None
+
+    first = np.array(result.final_molecule.atoms[0].position)
+    second = np.array(result.final_molecule.atoms[1].position)
+    assert float(np.linalg.norm(second - first)) == pytest.approx(0.71223, abs=2e-3)
+
+    # Независимая перепроверка: SCF на возвращённой геометрии даёт ту же энергию.
+    basis = build_basis("sto-3g", result.final_molecule)
+    assert run_rhf(basis, result.final_molecule, ScfSettings()).total_energy == pytest.approx(
+        result.energy_hartree, rel=1e-10
+    )
+
+
+def test_optimization_lowers_the_energy() -> None:
+    """Оптимизация из растянутой геометрии понижает энергию."""
+    engine = ReferenceEngine()
+    start_energy = engine.run(
+        EngineRequest(
+            job_id="job-sp",
+            molecule=_h2(0.95),
+            spec=CalculationSpec(
+                task=Task.SINGLE_POINT,
+                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+            ),
+        )
+    ).energy_hartree
+    result = engine.run(
+        EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=_optimization_spec())
+    )
+    assert result.energy_hartree < start_energy
+
+
+def test_optimization_reports_its_own_quality_check() -> None:
+    """Сходимость оптимизации — отдельная проверка качества."""
+    engine = ReferenceEngine()
+    result = engine.run(
+        EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=_optimization_spec())
+    )
+    checks = result.checks_by_name()
+    assert checks["optimization_converged"].verdict is QualityVerdict.PASS
+    assert checks["energy_decomposition"].verdict is QualityVerdict.PASS
+    assert checks["fock_density_commutator"].verdict is QualityVerdict.PASS
+    assert [record.stage for record in result.timings] == [
+        "optimization",
+        "final-scf",
+        "properties",
+    ]
+
+
+def test_exhausted_optimization_is_reported_not_hidden() -> None:
+    """Не сошлось за отведённое число шагов — результат с предупреждением.
+
+    Статус ``converged`` обязан это отражать: молча вернуть несошедшуюся
+    геометрию как равновесную — ровно тот обман, который запрещён §54 ТЗ.
+    """
+    engine = ReferenceEngine()
+    result = engine.run(
+        EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=_optimization_spec(max_steps=1))
+    )
+    assert not result.converged
+    assert result.final_molecule is not None
+    assert any("не сошлась" in warning for warning in result.warnings)
+    assert result.checks_by_name()["optimization_converged"].verdict is QualityVerdict.FAIL
+
+
+def test_frozen_atom_survives_the_engine_round_trip() -> None:
+    """Замороженный атом остаётся на месте и после прохода через движок."""
+    engine = ReferenceEngine()
+    start = _h2(0.95)
+    result = engine.run(
+        EngineRequest(
+            job_id="job-opt",
+            molecule=start,
+            spec=_optimization_spec(frozen_atoms=(0,)),
+        )
+    )
+    assert result.final_molecule is not None
+    assert result.final_molecule.atoms[0].position == start.atoms[0].position
+
+
+def test_redundant_internal_coordinates_are_rejected_honestly() -> None:
+    """Дефолт спецификации — избыточные внутренние координаты, которых нет.
+
+    Подменять их декартовыми молча нельзя: это другая система координат и
+    другая скорость сходимости, пользователь должен знать, что именно считается.
+    """
+    engine = ReferenceEngine()
+    spec = CalculationSpec(
+        task=Task.OPTIMIZATION,
+        method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+        optimization=OptimizationSpec(coordinates="redundant_internal"),
+    )
+    with pytest.raises(MethodNotAvailableError):
+        engine.run(EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=spec))
+
+
+def test_fingerprint_distinguishes_initial_and_final_structure() -> None:
+    """Отпечаток учитывает итоговую геометрию, иначе две оптимизации сливаются."""
+    engine = ReferenceEngine()
+    result = engine.run(
+        EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=_optimization_spec())
+    )
+    components = result.fingerprint.components
+    assert components["final_structure"]
+    assert components["final_structure"] != components["initial_structure"]
 
 
 def test_assert_supported_returns_the_basis_it_validated() -> None:

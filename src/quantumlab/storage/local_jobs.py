@@ -43,11 +43,13 @@ class LocalJobStore:
         self.molecules_dir = self.root / "molecules"
         self.checkpoints_dir = self.root / "checkpoints"
         self.results_dir = self.root / "results"
+        self.geometries_dir = self.root / "geometries"
         for directory in (
             self.jobs_dir,
             self.molecules_dir,
             self.checkpoints_dir,
             self.results_dir,
+            self.geometries_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -83,6 +85,18 @@ class LocalJobStore:
         он на порядки больше и нужен не каждому читателю списка заданий.
         """
         return self.results_dir / f"{job_id}.json"
+
+    def geometry_path(self, job_id: str) -> Path:
+        """Путь к итоговой геометрии расчёта, меняющего структуру."""
+        return self.geometries_dir / f"{job_id}.xyz"
+
+    def save_geometry(self, job_id: str, xyz_text: str) -> Path:
+        """Атомарно сохраняет итоговую геометрию (например, после оптимизации)."""
+        target = self.geometry_path(job_id)
+        temporary = target.with_suffix(f".tmp-{os.getpid()}")
+        temporary.write_text(xyz_text, encoding="utf-8")
+        temporary.replace(target)
+        return target
 
     def save_result(self, job_id: str, payload: str) -> Path:
         """Атомарно сохраняет результат расчёта.

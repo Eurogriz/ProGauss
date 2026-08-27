@@ -49,6 +49,10 @@ _BASIS_FUNCTIONS_PER_ATOM: Final[dict[str, int]] = {
 #: Порог «крупная молекула», после которого точность обменивается на время.
 _LARGE_SYSTEM_ATOMS: Final = 80
 
+#: Единственная реализованная система координат оптимизации. Реестр
+#: возможностей сообщает о том же (``coordinates:cartesian`` = partial).
+_COORDINATES: Final = "cartesian"
+
 
 @dataclass(frozen=True, slots=True)
 class Decision:
@@ -204,6 +208,24 @@ def resolve_profile(
         )
     )
 
+    if task in (Task.OPTIMIZATION, Task.TS_OPTIMIZATION):
+        # Координаты оптимизации выбираются явно и с объяснением: дефолт
+        # спецификации — избыточные внутренние координаты, которых в ядре пока
+        # нет. Молча подставить декартовы нельзя (§8 ТЗ): у них другая скорость
+        # сходимости, и пользователь должен это видеть.
+        decisions.append(
+            Decision(
+                "coordinates",
+                _COORDINATES,
+                "profile.decision.coordinates",
+                detail=(
+                    "избыточные внутренние координаты ещё не реализованы, "
+                    "поэтому расчёт идёт в декартовых — сходимость может "
+                    "потребовать больше шагов"
+                ),
+            )
+        )
+
     spec = CalculationSpec(
         task=task,
         profile=profile,
@@ -311,10 +333,11 @@ def _optimization(task: Task) -> OptimizationSpec:
     """
     if task is Task.TS_OPTIMIZATION:
         return OptimizationSpec(
+            coordinates=_COORDINATES,
             trust_radius=0.15,
             hessian_update="bofill",
             max_steps=150,
             max_force=3.0e-4,
             rms_force=2.0e-4,
         )
-    return OptimizationSpec()
+    return OptimizationSpec(coordinates=_COORDINATES)

@@ -199,6 +199,14 @@ _SPINS: tuple[tuple[str, Availability], ...] = (
     ("rohf", Availability.NOT_IMPLEMENTED),
 )
 
+#: Системы координат оптимизации. Реализованы только декартовы: избыточные
+#: внутренние требуют матрицы Вильсона и её псевдообращения — отдельная задача.
+_COORDINATES: tuple[tuple[str, Availability], ...] = (
+    ("cartesian", Availability.PARTIAL),
+    ("internal", Availability.NOT_IMPLEMENTED),
+    ("redundant_internal", Availability.NOT_IMPLEMENTED),
+)
+
 _BACKENDS: tuple[tuple[str, Availability], ...] = (
     ("reference-cpu", Availability.IMPLEMENTED),
     ("optimized-cpu", Availability.NOT_IMPLEMENTED),
@@ -234,9 +242,10 @@ def default_registry() -> CapabilityRegistry:
     capabilities: list[Capability] = []
 
     for task in Task:
-        # single_point реализован и проверен (RHF, сверка с PySCF до 1e-6 Eh).
-        # Остальные задачи требуют градиентов и гессианов, которых пока нет.
-        implemented = task is Task.SINGLE_POINT
+        # single_point проверен сверкой с PySCF (до 1e-6 Eh), optimization —
+        # сверкой аналитического градиента с конечными разностями (до 1e-6 э/бор).
+        # Остальные задачи требуют гессиана и производных высших порядков.
+        implemented = task in (Task.SINGLE_POINT, Task.OPTIMIZATION)
         capabilities.append(
             Capability(
                 id=f"task:{task.value}",
@@ -250,13 +259,15 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for name, label in _METHODS:
-        # hf реализован, но только в варианте RHF и только для single_point —
+        # hf реализован, но только в варианте RHF и только для двух задач —
         # поэтому partial с явным перечнем ограничений, а не implemented.
         availability = Availability.PARTIAL if name == "hf" else Availability.NOT_IMPLEMENTED
         limitations = (
             (
                 "Только RHF: нечётное число электронов отклоняется.",
-                "Только задача single_point: градиентов и оптимизации нет.",
+                "Задачи: только энергия в точке и оптимизация геометрии "
+                "(частоты, переходные состояния и сканирования требуют гессиана).",
+                "Оптимизация — только в декартовых координатах.",
             )
             if name == "hf"
             else ()
@@ -328,6 +339,26 @@ def default_registry() -> CapabilityRegistry:
                 limitations=(
                     ("Один поток, dense float64, O(N⁴) без скрининга.",)
                     if name == "reference-cpu"
+                    else ()
+                ),
+            )
+        )
+
+    for name, availability in _COORDINATES:
+        capabilities.append(
+            Capability(
+                id=f"coordinates:{name}",
+                kind=CapabilityKind.METHOD,
+                name=name,
+                availability=availability,
+                since_version=__version__ if availability.is_usable else None,
+                limitations=(
+                    (
+                        "Сходимость медленнее, чем в избыточных внутренних "
+                        "координатах: шесть нулевых мод (поступательные и "
+                        "вращательные) ухудшают приближение гессиана.",
+                    )
+                    if name == "cartesian"
                     else ()
                 ),
             )

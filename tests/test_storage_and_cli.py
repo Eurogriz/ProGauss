@@ -21,6 +21,7 @@ from quantumlab.storage.local_jobs import LocalJobStore
 
 FIXTURES = Path(__file__).parent / "fixtures"
 WATER = FIXTURES / "water.xyz"
+HYDROGEN = FIXTURES / "hydrogen.xyz"
 
 
 def make_job(name: str = "water-opt") -> Job:
@@ -279,6 +280,84 @@ def test_cli_run_rejects_unimplemented_functional(
     assert "Функционал не найден" in output.err
     # Никакого выдуманного числа в выводе быть не должно.
     assert "Энергия" not in output.out
+
+
+def test_cli_run_optimization_saves_geometry_and_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Оптимизация выполняется по-настоящему и сохраняет обе сущности.
+
+    Молекула — растянутый H₂: оптимизация обязана укоротить связь и сообщить
+    число шагов. Результат и геометрия сохраняются раздельно: это разные
+    артефакты, и у задания, меняющего структуру, должны быть оба.
+    """
+    code = main(
+        [
+            "--lang",
+            "ru",
+            "--data-dir",
+            str(tmp_path),
+            "run",
+            str(HYDROGEN),
+            "--task",
+            "optimize",
+            "--method",
+            "hf",
+            "--basis",
+            "sto-3g",
+        ]
+    )
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "Оптимизация геометрии сошлась" in output
+    assert "Оптимизированная геометрия сохранена" in output
+
+    store = LocalJobStore(tmp_path)
+    job = store.list()[0]
+    assert job.status is JobStatus.COMPLETED
+
+    result = json.loads(store.result_path(job.id).read_text(encoding="utf-8"))
+    assert result["optimization_steps"] >= 1
+    assert result["final_molecule"] is not None
+
+    saved = store.geometry_path(job.id).read_text(encoding="utf-8").splitlines()
+    assert saved[0].strip() == "2"
+    # Связь — расстояние между атомами, а не координата второго: в декартовой
+    # оптимизации без закреплённого центра масс молекула свободно смещается,
+    # поэтому отдельные координаты «плывут», хотя энергия от этого не зависит.
+    first = [float(value) for value in saved[2].split()[1:4]]
+    second = [float(value) for value in saved[3].split()[1:4]]
+    bond = sum((a - b) ** 2 for a, b in zip(first, second, strict=True)) ** 0.5
+    assert bond < 0.95  # связь укоротилась
+    assert bond == pytest.approx(0.7122, abs=2e-3)
+
+
+def test_cli_plan_shows_the_coordinate_system_in_expert_mode(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Экспертный режим показывает систему координат — молчаливого выбора нет.
+
+    Дефолт спецификации — избыточные внутренние координаты, которых в ядре
+    нет; CLI подставляет декартовы и обязан это показать (§8 ТЗ).
+    """
+    code = main(
+        [
+            "--lang",
+            "ru",
+            "--data-dir",
+            str(tmp_path),
+            "plan",
+            str(HYDROGEN),
+            "--task",
+            "optimize",
+            "--method",
+            "hf",
+            "--basis",
+            "sto-3g",
+        ]
+    )
+    assert code == 0
+    assert "Система координат оптимизации: cartesian" in capsys.readouterr().out
 
 
 def test_cli_job_lifecycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
