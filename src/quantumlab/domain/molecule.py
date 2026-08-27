@@ -353,8 +353,16 @@ class Molecule(BaseModel):
         return "\n".join(lines) + "\n"
 
     @classmethod
-    def from_xyz(cls, text: str, *, name: str = "molecule") -> Molecule:
-        """Разбирает XYZ-файл. Связи восстанавливаются из геометрии."""
+    def from_xyz(
+        cls, text: str, *, name: str = "molecule", charge: int = 0, multiplicity: int = 1
+    ) -> Molecule:
+        """Разбирает XYZ-файл. Связи восстанавливаются из геометрии.
+
+        Заряд и мультиплетность задаются сразу, а не через ``with_state`` после
+        разбора: валидатор модели проверяет их совместимость с числом электронов
+        при создании, и у радикала конструктор с мультиплетностью 1 упал бы ещё
+        до того, как вызывающая сторона успела бы её исправить.
+        """
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if len(lines) < 2:
             raise EmptyMoleculeError
@@ -380,7 +388,7 @@ class Molecule(BaseModel):
                     position=(float(tokens[1]), float(tokens[2]), float(tokens[3])),
                 )
             )
-        molecule = cls(name=name, atoms=tuple(atoms))
+        molecule = cls(name=name, atoms=tuple(atoms), charge=charge, multiplicity=multiplicity)
         return molecule.perceive_bonds()
 
     @classmethod

@@ -258,7 +258,7 @@ def test_unimplemented_theory_is_rejected() -> None:
 
 
 def test_unsupported_spin_treatment_is_rejected() -> None:
-    """UHF/ROHF не реализованы: нечётная система не должна «считаться» как RHF."""
+    """ROHF не реализован: нечётная система не должна «считаться» неизвестно как."""
     hydrogen = Molecule(
         name="h", atoms=(Atom(symbol="H", position=(0.0, 0.0, 0.0)),), multiplicity=2
     )
@@ -267,6 +267,62 @@ def test_unsupported_spin_treatment_is_rejected() -> None:
             molecule=hydrogen,
             spec=CalculationSpec(
                 task=Task.SINGLE_POINT,
+                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.ROHF),
+            ),
+        )
+
+
+def test_uhf_computes_open_shell_single_point() -> None:
+    """Атом водорода: UHF считает открытую оболочку и сообщает <S^2>."""
+    hydrogen = Molecule(
+        name="h", atoms=(Atom(symbol="H", position=(0.0, 0.0, 0.0)),), multiplicity=2
+    )
+    result = _run(
+        molecule=hydrogen,
+        spec=CalculationSpec(
+            task=Task.SINGLE_POINT,
+            method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF),
+        ),
+    )
+    assert result.converged
+    # Дублет: <S^2> = S(S+1) = 0.75 без загрязнения.
+    assert result.spin_squared is not None
+    assert abs(result.spin_squared - 0.75) < 1e-8
+    # Канал β пуст, поэтому его границы не сообщаются — выдумывать их нельзя.
+    assert result.beta_homo_energy_hartree is None
+    assert result.beta_lumo_energy_hartree is not None
+
+
+def test_uhf_reproduces_rhf_on_closed_shell() -> None:
+    """Для замкнутой оболочки UHF обязан дать ровно RHF-решение."""
+    water = Molecule.from_xyz(
+        (Path(__file__).parent / "fixtures" / "water.xyz").read_text(encoding="utf-8"),
+        name="water",
+    )
+    rhf = MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.RHF)
+    uhf = MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF)
+    restricted = _run(molecule=water, spec=CalculationSpec(task=Task.SINGLE_POINT, method=rhf))
+    unrestricted = _run(molecule=water, spec=CalculationSpec(task=Task.SINGLE_POINT, method=uhf))
+    assert unrestricted.energy_hartree == pytest.approx(restricted.energy_hartree, abs=1e-12)
+    assert unrestricted.spin_squared == pytest.approx(0.0, abs=1e-10)
+
+
+def test_uhf_optimization_is_rejected_honestly() -> None:
+    """Градиентов UHF нет: оптимизация отклоняется, а не считается по RHF-силам."""
+    hydrogen = Molecule(
+        name="h2",
+        atoms=(
+            Atom(symbol="H", position=(0.0, 0.0, 0.0)),
+            Atom(symbol="H", position=(0.0, 0.0, 1.4)),
+        ),
+        multiplicity=2,
+        charge=1,
+    )
+    with pytest.raises(MethodNotAvailableError):
+        _run(
+            molecule=hydrogen,
+            spec=CalculationSpec(
+                task=Task.OPTIMIZATION,
                 method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF),
             ),
         )

@@ -191,12 +191,25 @@ _FORMATS: tuple[tuple[str, Availability], ...] = (
     ("inchi", Availability.NOT_IMPLEMENTED),
 )
 
-#: Обработка спина. Реализован только RHF, поэтому статус partial: метод hf
-#: работает, но не во всех спиновых вариантах.
-_SPINS: tuple[tuple[str, Availability], ...] = (
-    ("rhf", Availability.PARTIAL),
-    ("uhf", Availability.NOT_IMPLEMENTED),
-    ("rohf", Availability.NOT_IMPLEMENTED),
+#: Обработка спина и её ограничения. Статус partial означает «считает, но не
+#: всё»: ограничения видны и в реестре, и в предупреждениях результата (§54 ТЗ).
+_SPINS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
+    (
+        "rhf",
+        Availability.PARTIAL,
+        ("Только замкнутая оболочка: нечётное число электронов требует UHF или ROHF.",),
+    ),
+    (
+        "uhf",
+        Availability.PARTIAL,
+        (
+            "Только одноточечный расчёт: аналитические градиенты UHF не реализованы, "
+            "поэтому оптимизация геометрии для открытой оболочки отклоняется.",
+            "Однодетерминантное описание: при заметном спиновом загрязнении "
+            "(<S^2> заметно выше S(S+1)) результат требует проверки.",
+        ),
+    ),
+    ("rohf", Availability.NOT_IMPLEMENTED, ()),
 )
 
 #: Системы координат оптимизации. Реализованы только декартовы: избыточные
@@ -364,14 +377,15 @@ def default_registry() -> CapabilityRegistry:
             )
         )
 
-    for name, availability in _SPINS:
+    for spin_name, spin_availability, spin_limitations in _SPINS:
         capabilities.append(
             Capability(
-                id=f"spin:{name}",
+                id=f"spin:{spin_name}",
                 kind=CapabilityKind.SPIN,
-                name=name,
-                availability=availability,
-                since_version=__version__ if availability.is_usable else None,
+                name=spin_name,
+                availability=spin_availability,
+                since_version=__version__ if spin_availability.is_usable else None,
+                limitations=spin_limitations,
             )
         )
 

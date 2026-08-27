@@ -120,9 +120,32 @@ class CalculationResult(BaseModel):
     energy_hartree: float
     scf_iterations: int = Field(default=0, ge=0)
     converged: bool = False
-    homo_energy_hartree: float | None = None
-    lumo_energy_hartree: float | None = None
+    homo_energy_hartree: float | None = Field(
+        default=None,
+        description=(
+            "Энергия ВЗМО. Для UHF — канал α (β вынесен в отдельные поля: "
+            "у открытой оболочки две независимые системы орбиталей)."
+        ),
+    )
+    lumo_energy_hartree: float | None = Field(
+        default=None, description="Энергия НСМО; для UHF — канал α."
+    )
     gap_hartree: float | None = None
+    beta_homo_energy_hartree: float | None = Field(
+        default=None,
+        description="Энергия ВЗМО канала β. Заполняется только для UHF.",
+    )
+    beta_lumo_energy_hartree: float | None = Field(
+        default=None,
+        description="Энергия НСМО канала β. Заполняется только для UHF.",
+    )
+    spin_squared: float | None = Field(
+        default=None,
+        description=(
+            "Ожидание <S^2>. Заполняется только для UHF: там возможно спиновое "
+            "загрязнение, и скрывать его нельзя. Для чистого состояния равно S(S+1)."
+        ),
+    )
     dipole_debye: float | None = None
     frequencies_cm1: tuple[float, ...] = ()
     zero_point_energy_hartree: float | None = None

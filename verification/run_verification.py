@@ -123,6 +123,10 @@ class Case(BaseModel):
         ),
     )
     molecule: str
+    charge: int = Field(
+        default=0, description="Суммарный заряд системы; нужен для открытых оболочек."
+    )
+    multiplicity: int = Field(default=1, ge=1, description="Спиновая мультиплетность 2S+1.")
     spec: dict[str, Any]
     expect: dict[str, Expectation] = Field(default_factory=dict)
     bond_lengths_angstrom: tuple[GeometryProbe, ...] = ()
@@ -161,7 +165,12 @@ def _build_spec(raw: dict[str, Any]) -> CalculationSpec:
 
 def _load_molecule(case: Case) -> Molecule:
     path = REPO_ROOT / case.molecule
-    return Molecule.from_xyz(path.read_text(encoding="utf-8"), name=path.stem)
+    return Molecule.from_xyz(
+        path.read_text(encoding="utf-8"),
+        name=path.stem,
+        charge=case.charge,
+        multiplicity=case.multiplicity,
+    )
 
 
 def _run(case: Case, molecule: Molecule | None = None) -> CalculationResult:

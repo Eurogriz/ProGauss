@@ -1,0 +1,31 @@
+id: ch-uhf-sto3g-energy
+level: L1
+description: >-
+  UHF/STO-3G радикала CH (дублет) — открытая оболочка. Проверяет построение
+  фокиана UHF: обмен по своему каналу, кулон по полной плотности.
+molecule: tests/fixtures/ch-radical.xyz
+multiplicity: 2
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g, spin: uhf }
+expect:
+  energy_hartree:
+    value: -37.7697682041
+    tol: 1.0e-8
+    source: >-
+      internal-reference (reference-cpu); независимо сверено с PySCF 2.14
+      UHF/STO-3G, расхождение 9.8e-09 э
+  spin_squared:
+    value: 0.753182
+    tol: 1.0e-5
+    source: >-
+      <S^2> = S_z(S_z+1) + n_beta - sum|<phi_a|phi_b>|^2; для чистого дублета
+      0.75, избыток — спиновое загрязнение. Сверено с PySCF spin_square()
+      до 1e-6
+quality:
+  scf_converged: true
+  electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  spin_contamination: true

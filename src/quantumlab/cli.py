@@ -29,6 +29,7 @@ from quantumlab.domain.spec import (
     MethodSpec,
     OptimizationSpec,
     PrecisionProfile,
+    SpinTreatment,
     Task,
     TheoryFamily,
 )
@@ -146,14 +147,23 @@ def _add_calculation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--basis", default=None, help="явный базис, например def2-tzvp")
     parser.add_argument("--charge", type=int, default=0)
     parser.add_argument("--multiplicity", type=int, default=1)
+    parser.add_argument(
+        "--spin",
+        choices=("rhf", "uhf", "rohf"),
+        default="rhf",
+        help="обработка спина: rhf (замкнутая оболочка), uhf (неограниченная), rohf",
+    )
     parser.add_argument("--cores", type=int, default=8, help="доступное число ядер")
     parser.add_argument("--memory-mb", type=int, default=16384, help="доступная память, МБ")
     parser.add_argument("--gpus", type=int, default=0, help="число доступных GPU")
 
 
 def _load_molecule(path: Path, *, charge: int, multiplicity: int) -> Molecule:
-    return Molecule.from_xyz(path.read_text(encoding="utf-8"), name=path.stem).with_state(
-        charge=charge, multiplicity=multiplicity
+    return Molecule.from_xyz(
+        path.read_text(encoding="utf-8"),
+        name=path.stem,
+        charge=charge,
+        multiplicity=multiplicity,
     )
 
 
@@ -169,6 +179,7 @@ def _build_spec(args: argparse.Namespace, registry: CapabilityRegistry) -> Calcu
             theory=TheoryFamily((args.method or "dft").lower()),
             functional=args.functional,
             basis=args.basis or "def2-svp",
+            spin=SpinTreatment(getattr(args, "spin", "rhf")),
         )
         registry.assert_available(f"basis:{method.basis}")
         if method.functional:

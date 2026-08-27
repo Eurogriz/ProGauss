@@ -178,3 +178,24 @@ def test_duplicate_bonds_are_rejected(water: Molecule) -> None:
             atoms=water.atoms,
             bonds=(Bond(i=0, j=1), Bond(i=1, j=0)),
         )
+
+
+def test_with_state_validates_instead_of_bypassing() -> None:
+    """``with_state`` проходит валидацию, а ``model_copy`` — нет.
+
+    Смена заряда у уже загруженной структуры нужна редактору: пользователь
+    меняет заряд после импорта. Если делать это через ``model_copy(update=...)``,
+    валидатор модели не запускается, и мультиплетность, несовместимая с числом
+    электронов, молча уйдёт в расчёт.
+    """
+    water = Molecule.from_xyz((FIXTURES / "water.xyz").read_text(encoding="utf-8"), name="water")
+    anion = water.with_state(charge=-1, multiplicity=2)
+    assert anion.n_electrons == water.n_electrons + 1
+    assert anion.multiplicity == 2
+    # Связи и геометрия сохраняются: меняется только спиновое состояние.
+    assert anion.bonds == water.bonds
+    assert anion.atoms == water.atoms
+
+    # Невозможное сочетание отклоняется, а не принимается молча.
+    with pytest.raises(InvalidMultiplicityError):
+        water.with_state(charge=0, multiplicity=2)

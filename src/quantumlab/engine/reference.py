@@ -53,13 +53,18 @@ from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import (
     PrecomputedIntegrals,
     ScfSettings,
+    UhfResult,
     build_fock,
     build_integrals,
     canonical_orthogonalizer,
+    coulomb_matrix,
+    exchange_matrix,
     run_rhf,
+    run_uhf,
+    spin_population,
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
-from quantumlab.errors import ScfNotConvergedError
+from quantumlab.errors import MethodNotAvailableError, ScfNotConvergedError
 from quantumlab.version import __version__
 
 #: Имя ядра — попадает в отпечаток расчёта и в журнал.
@@ -79,6 +84,13 @@ _FOCK_COMMUTATOR_TOLERANCE = 1e-6
 
 #: Точность выполнения D′² = 2D′ в ортогональном базисе.
 _IDEMPOTENCY_TOLERANCE = 1e-6
+
+#: Избыток <S^2> над S(S+1), при котором сообщается о спиновом загрязнении.
+#: Это порог **сообщения**, а не корректности: само значение <S^2> всегда
+#: попадает в результат, поэтому пользователь видит величину в любом случае.
+#: Умеренное загрязнение у радикалов физично (CH/STO-3G даёт избыток ~3e-3),
+#: заметное — признак того, что однодетерминантное описание не годится.
+_SPIN_CONTAMINATION_TOLERANCE = 0.05
 
 
 def _total_memory_mb() -> int:
@@ -114,6 +126,22 @@ def _environment() -> EnvironmentInfo:
 
 
 @dataclass(frozen=True)
+class _ScfSummary:
+    """Сводка SCF, общая для RHF и UHF.
+
+    ``_result`` не должен знать, каким методом получена энергия: иначе каждая
+    новая спиновая схема тянула бы правку сборки результата и отпечатка.
+    """
+
+    total_energy: float
+    iterations: int
+    converged: bool
+    spin_squared: float | None = None
+    beta_homo: float | None = None
+    beta_lumo: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _Properties:
     """Производные величины, вычисляемые после сходимости SCF.
 
@@ -127,6 +155,8 @@ class _Properties:
     lumo: float | None
     gap: float | None
     dipole_debye: float
+    beta_homo: float | None = None
+    beta_lumo: float | None = None
 
 
 class ReferenceEngine:
@@ -180,6 +210,14 @@ class ReferenceEngine:
     def _run_single_point(
         self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
     ) -> CalculationResult:
+        """Одноточечный расчёт в фиксированной геометрии."""
+        if request.spec.method is not None and request.spec.method.spin is SpinTreatment.UHF:
+            return self._run_single_point_uhf(request, basis_name, progress=progress)
+        return self._run_single_point_rhf(request, basis_name, progress=progress)
+
+    def _run_single_point_rhf(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
         """RHF в фиксированной геометрии."""
         spec = request.spec
         timings: list[TimingRecord] = []
@@ -210,11 +248,68 @@ class ReferenceEngine:
             request,
             molecule=request.molecule,
             basis=basis,
-            rhf=rhf,
+            scf=_ScfSummary(
+                total_energy=rhf.total_energy,
+                iterations=rhf.iterations,
+                converged=rhf.converged,
+            ),
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings(rhf, basis),
+            warnings=_warnings(rhf, basis, request.molecule),
+            final_molecule=None,
+        )
+
+    def _run_single_point_uhf(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """UHF в фиксированной геометрии.
+
+        Интегралы ровно те же, что и в RHF: UHF отличается только построением
+        фокиана и наличием двух плотностей. Градиенты UHF не реализованы,
+        поэтому оптимизация геометрии для открытой оболочки отклоняется выше.
+        """
+        spec = request.spec
+        timings: list[TimingRecord] = []
+
+        started = time.perf_counter()
+        basis = build_basis(basis_name, request.molecule)
+        timings.append(_timing("basis", started))
+        _report(progress, 5.0, "basis", functions=basis.n_functions)
+
+        started = time.perf_counter()
+        prepared = build_integrals(basis, request.molecule)
+        dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
+        timings.append(_timing("integrals", started))
+        _report(progress, 45.0, "integrals")
+
+        started = time.perf_counter()
+        uhf = run_uhf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
+        timings.append(_timing("scf", started))
+        _report(progress, 85.0, "scf", iterations=uhf.iterations, converged=uhf.converged)
+
+        started = time.perf_counter()
+        properties = _properties_uhf(uhf, request.molecule, dipole_integrals)
+        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared)
+        timings.append(_timing("properties", started))
+        _report(progress, 100.0, "properties")
+
+        return self._result(
+            request,
+            molecule=request.molecule,
+            basis=basis,
+            scf=_ScfSummary(
+                total_energy=uhf.total_energy,
+                iterations=uhf.iterations,
+                converged=uhf.converged,
+                spin_squared=uhf.s_squared,
+                beta_homo=properties.beta_homo,
+                beta_lumo=properties.beta_lumo,
+            ),
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings_uhf(uhf, basis, request.molecule),
             final_molecule=None,
         )
 
@@ -284,11 +379,15 @@ class ReferenceEngine:
             request,
             molecule=final,
             basis=basis,
-            rhf=rhf,
+            scf=_ScfSummary(
+                total_energy=rhf.total_energy,
+                iterations=rhf.iterations,
+                converged=rhf.converged,
+            ),
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings(rhf, basis) + _optimization_warnings(optimization),
+            warnings=_warnings(rhf, basis, request.molecule) + _optimization_warnings(optimization),
             final_molecule=final,
             initial_molecule=request.molecule,
             converged=rhf.converged and optimization.converged,
@@ -304,7 +403,7 @@ class ReferenceEngine:
         *,
         molecule: Molecule,
         basis: BasisSet,
-        rhf: RhfResult,
+        scf: _ScfSummary,
         properties: _Properties,
         checks: tuple[QualityCheck, ...],
         timings: list[TimingRecord],
@@ -334,9 +433,12 @@ class ReferenceEngine:
             job_id=request.job_id,
             spec=spec,
             fingerprint=fingerprint,
-            energy_hartree=rhf.total_energy,
-            scf_iterations=rhf.iterations,
-            converged=rhf.converged if converged is None else converged,
+            energy_hartree=scf.total_energy,
+            scf_iterations=scf.iterations,
+            converged=scf.converged if converged is None else converged,
+            beta_homo_energy_hartree=scf.beta_homo,
+            beta_lumo_energy_hartree=scf.beta_lumo,
+            spin_squared=scf.spin_squared,
             homo_energy_hartree=properties.homo,
             lumo_energy_hartree=properties.lumo,
             gap_hartree=properties.gap,
@@ -368,6 +470,11 @@ class ReferenceEngine:
         if spec.task is Task.OPTIMIZATION:
             coordinates = spec.optimization.coordinates
             self._registry.assert_available(f"coordinates:{coordinates}")
+            if spec.method is not None and spec.method.spin is SpinTreatment.UHF:
+                # UHF-энергия есть, а аналитических градиентов UHF нет. Считать
+                # градиент по RHF-формулам для открытой оболочки означало бы
+                # выдать неверные силы под видом результата (§54 ТЗ).
+                raise MethodNotAvailableError("uhf-optimization")
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -494,6 +601,191 @@ def _properties(
     )
 
 
+def _properties_uhf(
+    uhf: UhfResult,
+    molecule: Molecule,
+    dipole_integrals: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> _Properties:
+    """Орбитали и диполь для открытой оболочки.
+
+    В списке орбиталей — канал α: у UHF две независимые системы орбиталей, и
+    смешивать их в один список означало бы выдать две разные величины под одним
+    именем. Границы канала β возвращаются отдельными полями. Диполь считается
+    по полной плотности (α + β) — это физически полная зарядовая плотность.
+    """
+    from quantumlab.engine.constants import AU_TO_DEBYE, angstrom_to_bohr
+
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    orbitals = tuple(
+        OrbitalInfo(
+            index=index,
+            energy_hartree=energy,
+            occupation=1.0 if index < n_alpha else 0.0,
+        )
+        for index, energy in enumerate(uhf.alpha_energies)
+    )
+    homo = uhf.alpha_energies[n_alpha - 1] if n_alpha > 0 else None
+    lumo = uhf.alpha_energies[n_alpha] if n_alpha < len(uhf.alpha_energies) else None
+    beta_homo = uhf.beta_energies[n_beta - 1] if n_beta > 0 else None
+    beta_lumo = uhf.beta_energies[n_beta] if n_beta < len(uhf.beta_energies) else None
+    gap = lumo - homo if homo is not None and lumo is not None else None
+
+    density_total = uhf.density_alpha + uhf.density_beta
+    nuclear = sum(
+        atom.z * np.array([angstrom_to_bohr(value) for value in atom.position])
+        for atom in molecule.atoms
+    )
+    electronic = np.array([float(np.sum(density_total * axis)) for axis in dipole_integrals])
+    return _Properties(
+        orbitals=orbitals,
+        homo=homo,
+        lumo=lumo,
+        beta_homo=beta_homo,
+        beta_lumo=beta_lumo,
+        gap=gap,
+        dipole_debye=float(np.linalg.norm(nuclear - electronic) * AU_TO_DEBYE),
+    )
+
+
+def _quality_checks_uhf(
+    uhf: UhfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
+) -> tuple[QualityCheck, ...]:
+    """Проверки качества для UHF.
+
+    RHF-проверки здесь неприменимы дословно: разложение энергии и условие
+    стационарности у открытой оболочки строятся по каждому каналу отдельно, а
+    полная плотность входит только в кулоновский член. Кроме того, добавлена
+    проверка ⟨Ŝ²⟩ — у UHF возможно спиновое загрязнение, и оно должно быть
+    видно в результате, а не оставаться внутри движка.
+    """
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    overlap = prepared.overlap
+    repulsion = prepared.eri
+    density_total = uhf.density_alpha + uhf.density_beta
+
+    electron_count = float(np.trace(density_total @ overlap))
+
+    kinetic = float(np.sum(density_total * integrals.build_kinetic(basis, molecule)))
+    attraction = float(np.sum(density_total * integrals.build_nuclear_attraction(basis, molecule)))
+    coulomb = float(np.einsum("uv,ls,uvls", density_total, density_total, repulsion))
+    exchange_alpha = float(np.einsum("uv,ls,ulvs", uhf.density_alpha, uhf.density_alpha, repulsion))
+    exchange_beta = float(np.einsum("uv,ls,ulvs", uhf.density_beta, uhf.density_beta, repulsion))
+    # Обмен в UHF строится по плотности канала с занятием 1, поэтому перед
+    # суммой обменов стоит ½, а не ¼ как в RHF. Проверка: для замкнутой
+    # оболочки D^α = D^β = D_зан и D_полн = 2D_зан, тогда
+    # ½(D^α·K^α + D^β·K^β) = ¼ D_полн·K(D_полн) — в точности множитель RHF.
+    electron_electron = 0.5 * coulomb - 0.5 * (exchange_alpha + exchange_beta)
+    decomposition_error = abs(
+        kinetic + attraction + electron_electron + uhf.nuclear_repulsion - uhf.total_energy
+    )
+
+    commutator_error = 0.0
+    idempotency_error = 0.0
+    orthogonalizer = canonical_orthogonalizer(overlap)
+    inverse = np.linalg.inv(orthogonalizer)
+    for density, n_occupied in ((uhf.density_alpha, n_alpha), (uhf.density_beta, n_beta)):
+        fock = (
+            prepared.core
+            + coulomb_matrix(density_total, repulsion)
+            - exchange_matrix(density, repulsion)
+        )
+        commutator_error = max(
+            commutator_error,
+            float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock))),
+        )
+        density_prime = inverse @ density @ inverse.T
+        # Занятие канала равно 1, поэтому идемпотентность D'^2 = D' (без множителя 2).
+        idempotency_error = max(
+            idempotency_error,
+            float(np.max(np.abs(density_prime @ density_prime - density_prime))),
+        )
+        del n_occupied  # число занятых нужно только для построения плотности
+
+    s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
+    scheme = basis_angular_scheme(basis.name)
+    return (
+        QualityCheck(
+            name_key="scf_converged",
+            verdict=QualityVerdict.PASS if uhf.converged else QualityVerdict.FAIL,
+            detail=f"итераций: {uhf.iterations}, стратегии: {', '.join(uhf.strategies_used)}",
+        ),
+        QualityCheck(
+            name_key="electron_count",
+            verdict=(
+                QualityVerdict.PASS
+                if abs(electron_count - molecule.n_electrons) < _ELECTRON_COUNT_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"tr(D·S) = {electron_count:.8f}, ожидается {molecule.n_electrons}",
+        ),
+        QualityCheck(
+            name_key="energy_decomposition",
+            verdict=(
+                QualityVerdict.PASS
+                if decomposition_error < _ENERGY_DECOMPOSITION_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=(
+                "E = T + V_яд-эл + V_эл-эл + V_яд-яд пересчитано по плотностям обоих каналов, "
+                f"расхождение {decomposition_error:.3e} э"
+            ),
+        ),
+        QualityCheck(
+            name_key="fock_density_commutator",
+            verdict=(
+                QualityVerdict.PASS
+                if commutator_error < _FOCK_COMMUTATOR_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"худший из каналов: max|FDS − SDF| = {commutator_error:.3e}",
+        ),
+        QualityCheck(
+            name_key="density_idempotency",
+            verdict=(
+                QualityVerdict.PASS
+                if idempotency_error < _IDEMPOTENCY_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"max|D'² − D'| = {idempotency_error:.3e} (занятие канала 1)",
+        ),
+        QualityCheck(
+            name_key="spin_contamination",
+            verdict=(
+                QualityVerdict.PASS
+                if uhf.s_squared <= s_exact + _SPIN_CONTAMINATION_TOLERANCE
+                else QualityVerdict.WARNING
+            ),
+            detail=(
+                f"<S^2> = {uhf.s_squared:.6f}, для чистого состояния {s_exact:.6f}; "
+                f"избыток {uhf.s_squared - s_exact:+.6f}"
+            ),
+        ),
+        QualityCheck(
+            name_key="basis_angular_scheme",
+            verdict=(QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING),
+            detail=(
+                "расчёт в декартовой схеме"
+                if scheme == "cartesian"
+                else f"базис {basis.name} опубликован в сферической схеме"
+            ),
+        ),
+    )
+
+
+def _warnings_uhf(uhf: UhfResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
+    """Предупреждения UHF: несошедшийся SCF, схема базиса, начало отсчёта диполя."""
+    warnings: list[str] = []
+    if not uhf.converged:
+        warnings.append(f"SCF не сошёлся за {uhf.iterations} итераций; энергия приведена как есть")
+    warning = _angular_scheme_warning(basis)
+    if warning:
+        warnings.append(warning)
+    dipole_warning = _dipole_origin_warning(molecule)
+    if dipole_warning:
+        warnings.append(dipole_warning)
+    return tuple(warnings)
+
+
 def _quality_checks(
     rhf: RhfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
 ) -> tuple[QualityCheck, ...]:
@@ -591,14 +883,45 @@ def _quality_checks(
     )
 
 
-def _warnings(rhf: RhfResult, basis: BasisSet) -> tuple[str, ...]:
+def _dipole_origin_warning(molecule: Molecule) -> str | None:
+    """Предупреждение о начале отсчёта диполя у заряженной системы.
+
+    Дипольный момент нейтральной системы от начала отсчёта не зависит, а у
+    заряженной — зависит линейно. Мы считаем его от начала координат, поэтому
+    для иона число воспроизводимо, но физический смысл имеет только вместе с
+    указанием этой точки. Молча выдать его как «дипольный момент» нельзя.
+    """
+    if molecule.charge == 0:
+        return None
+    return (
+        f"Система заряжена (q = {molecule.charge:+d}): дипольный момент зависит от "
+        "начала отсчёта и приведён относительно начала координат."
+    )
+
+
+def _angular_scheme_warning(basis: BasisSet) -> str | None:
+    """Предупреждение о декартовой схеме, если базис опубликован в сферической.
+
+    Общая для RHF и UHF: текст один, и расхождение в формулировках означало бы,
+    что пользователь видит разное предупреждение для одного и того же базиса.
+    """
+    if basis_angular_scheme(basis.name) == "cartesian":
+        return None
+    return (
+        f"Базис {basis.name} опубликован в сферической схеме, расчёт выполнен в "
+        "декартовой. Энергия отличается от табличных значений примерно на 1e-4 Eh."
+    )
+
+
+def _warnings(rhf: RhfResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
     """Предупреждения, которые обязан увидеть пользователь."""
     warnings: list[str] = []
     if not rhf.converged:
         warnings.append(f"SCF не сошёлся за {rhf.iterations} итераций; энергия приведена как есть")
-    if basis_angular_scheme(basis.name) != "cartesian":
-        warnings.append(
-            f"Базис {basis.name} опубликован в сферической схеме, расчёт выполнен в "
-            "декартовой. Энергия отличается от табличных значений примерно на 1e-4 Eh."
-        )
+    warning = _angular_scheme_warning(basis)
+    if warning:
+        warnings.append(warning)
+    dipole_warning = _dipole_origin_warning(molecule)
+    if dipole_warning:
+        warnings.append(dipole_warning)
     return tuple(warnings)

@@ -113,8 +113,8 @@ class LocalCatalog:
         # Заряд и мультиплетность обязаны попасть в саму структуру: число
         # электронов считается от неё, и если оставить их только в записи,
         # расчёт пойдёт по нейтральной молекуле молча.
-        molecule = Molecule.from_xyz(content, name=name or "molecule").with_state(
-            charge=charge, multiplicity=multiplicity
+        molecule = Molecule.from_xyz(
+            content, name=name or "molecule", charge=charge, multiplicity=multiplicity
         )
         record = MoleculeRecord(
             id=str(uuid.uuid4()),

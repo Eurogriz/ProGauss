@@ -83,8 +83,15 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
         assert capability.availability is Availability.NOT_IMPLEMENTED, capability.id
         assert not capability.is_usable, capability.id
     assert not registry.is_available("method:ccsd_t")
-    assert not registry.is_available("spin:uhf")
     assert not registry.is_available("spin:rohf")
+
+    # UHF реализован, но не целиком: ограничения обязаны быть перечислены,
+    # иначе «partial» выглядело бы как «готово» (§54 ТЗ).
+    uhf = registry.get("spin:uhf")
+    assert uhf.availability is Availability.PARTIAL
+    assert uhf.is_usable
+    assert uhf.limitations
+    assert any("градиент" in text for text in uhf.limitations)
 
 
 def test_assert_available_raises_localized_error(registry: CapabilityRegistry) -> None:

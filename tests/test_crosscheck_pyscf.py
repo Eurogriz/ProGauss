@@ -31,7 +31,7 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import build_basis
 from quantumlab.engine.constants import angstrom_to_bohr
 from quantumlab.engine.integrals import build_dipole_integrals, build_overlap
-from quantumlab.engine.scf import ScfSettings, run_rhf
+from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
 
 pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
 
@@ -156,3 +156,105 @@ def test_overlap_matrix_matches_pyscf_elementwise_for_sto3g() -> None:
     theirs = reference.intor("int1e_ovlp")
     assert ours.shape == theirs.shape
     assert np.allclose(ours, theirs, atol=1e-7)
+
+
+# --------------------------------------------------------------------------- #
+# UHF: открытая оболочка
+# --------------------------------------------------------------------------- #
+#: Системы с открытой оболочкой: (имя, атомы, заряд, мультиплетность).
+#: Подобраны так, чтобы покрыть разные случаи: один электрон, катион-радикал,
+#: многоэлектронный радикал и растянутая связь.
+OPEN_SHELL_CASES = [
+    ("hydrogen-atom", [("H", (0.0, 0.0, 0.0))], 0, 2),
+    ("hydrogen-cation", [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.7414))], 1, 2),
+    ("ch-radical", [("C", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.117))], 0, 2),
+]
+
+
+@pytest.mark.parametrize(("name", "atoms", "charge", "multiplicity"), OPEN_SHELL_CASES)
+def test_uhf_energy_matches_pyscf(
+    name: str, atoms: list[tuple[str, tuple[float, float, float]]], charge: int, multiplicity: int
+) -> None:
+    """Энергия UHF совпадает с PySCF — независимое подтверждение фокиана.
+
+    Формулы UHF отличаются от RHF только построением фокиана (обмен по своему
+    каналу, кулон по полной плотности), поэтому сверка энергии проверяет именно
+    их, а не интегралы: те уже подтверждены RHF-тестами выше.
+    """
+    molecule = Molecule.from_atoms(
+        [symbol for symbol, _ in atoms],
+        [position for _, position in atoms],
+        charge=charge,
+        multiplicity=multiplicity,
+        name=name,
+    )
+    basis = build_basis("sto-3g", molecule)
+    ours = run_uhf(basis, molecule, TIGHT)
+    assert ours.converged
+
+    mol = pyscf.gto.M(
+        atom=[[symbol, list(position)] for symbol, position in atoms],
+        basis="sto-3g",
+        spin=multiplicity - 1,
+        charge=charge,
+        cart=True,
+        verbose=0,
+    )
+    reference = pyscf.scf.UHF(mol).run(conv_tol=1e-12)
+    assert ours.total_energy == pytest.approx(reference.e_tot, abs=1e-7)
+
+
+@pytest.mark.parametrize(("name", "atoms", "charge", "multiplicity"), OPEN_SHELL_CASES)
+def test_uhf_spin_expectation_matches_pyscf(
+    name: str, atoms: list[tuple[str, tuple[float, float, float]]], charge: int, multiplicity: int
+) -> None:
+    """⟨Ŝ²⟩ совпадает с PySCF, включая ненулевое спиновое загрязнение.
+
+    Проверка важна именно на радикалах: у CH загрязнение не равно нулю, и
+    совпадение такого значения подтверждает, что формула учитывает перекрытия
+    орбиталей разных каналов, а не считает их ортогональными.
+    """
+    molecule = Molecule.from_atoms(
+        [symbol for symbol, _ in atoms],
+        [position for _, position in atoms],
+        charge=charge,
+        multiplicity=multiplicity,
+        name=name,
+    )
+    basis = build_basis("sto-3g", molecule)
+    ours = run_uhf(basis, molecule, TIGHT)
+
+    mol = pyscf.gto.M(
+        atom=[[symbol, list(position)] for symbol, position in atoms],
+        basis="sto-3g",
+        spin=multiplicity - 1,
+        charge=charge,
+        cart=True,
+        verbose=0,
+    )
+    reference = pyscf.scf.UHF(mol).run(conv_tol=1e-12)
+    assert ours.s_squared == pytest.approx(reference.spin_square()[0], abs=1e-6)
+
+
+def test_uhf_orbital_energies_match_pyscf() -> None:
+    """Энергии орбиталей обоих каналов совпадают с PySCF."""
+    molecule = Molecule.from_atoms(
+        ["C", "H"], [(0.0, 0.0, 0.0), (0.0, 0.0, 1.117)], multiplicity=2, name="ch"
+    )
+    basis = build_basis("sto-3g", molecule)
+    ours = run_uhf(basis, molecule, TIGHT)
+
+    mol = pyscf.gto.M(
+        atom=[["C", [0.0, 0.0, 0.0]], ["H", [0.0, 0.0, 1.117]]],
+        basis="sto-3g",
+        spin=1,
+        cart=True,
+        verbose=0,
+    )
+    reference = pyscf.scf.UHF(mol).run(conv_tol=1e-12)
+    np.testing.assert_allclose(
+        np.sort(ours.alpha_energies), np.sort(reference.mo_energy[0]), atol=1e-6
+    )
+    np.testing.assert_allclose(
+        np.sort(ours.beta_energies), np.sort(reference.mo_energy[1]), atol=1e-6
+    )
