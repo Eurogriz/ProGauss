@@ -292,19 +292,32 @@ def test_unimplemented_theory_is_rejected() -> None:
         )
 
 
-def test_unsupported_spin_treatment_is_rejected() -> None:
-    """ROHF не реализован: нечётная система не должна «считаться» неизвестно как."""
+def test_rohf_handles_a_single_unpaired_electron() -> None:
+    """ROHF считает предельный случай открытой оболочки — атом водорода.
+
+    Прежняя версия этого теста утверждала, что ROHF не реализован и обязан
+    отклоняться. Метод реализован, поэтому проверяется содержательное: при
+    ``n_beta = 0`` ограничение ROHF вырождается, и энергия обязана совпасть с
+    UHF — двух детерминантных степеней свободы, которые можно было бы
+    ограничить, просто нет.
+    """
     hydrogen = Molecule(
         name="h", atoms=(Atom(symbol="H", position=(0.0, 0.0, 0.0)),), multiplicity=2
     )
-    with pytest.raises(MethodNotAvailableError):
-        _run(
+
+    def energy(spin: SpinTreatment) -> float:
+        outcome = _run(
             molecule=hydrogen,
             spec=CalculationSpec(
                 task=Task.SINGLE_POINT,
-                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.ROHF),
+                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=spin),
             ),
         )
+        assert outcome.converged
+        assert outcome.spin_squared == pytest.approx(0.75, abs=1e-10)
+        return float(outcome.energy_hartree)
+
+    assert energy(SpinTreatment.ROHF) == pytest.approx(energy(SpinTreatment.UHF), abs=1e-10)
 
 
 def test_uhf_computes_open_shell_single_point() -> None:
@@ -676,3 +689,25 @@ def test_fallback_strategies_actually_whitelist_the_strategies() -> None:
 
     no_diis = _scf_settings(_option_spec(scf=ScfSpec(fallback_strategies=("damping",))))
     assert no_diis.diis_start > no_diis.max_iterations, "DIIS должен быть выключен"
+
+
+def test_rohf_single_point_reports_exact_spin() -> None:
+    """ROHF доходит до результата через движок и несёт ⟨S²⟩ = S(S+1).
+
+    Проверка сквозного пути: реестр пропускает ``spin:rohf``, движок выбирает
+    ROHF-ветку, а в результате видно главное отличие метода от UHF — отсутствие
+    спинового загрязнения.
+    """
+    radical = Molecule.from_xyz(
+        (Path(__file__).parent / "fixtures" / "ch-radical.xyz").read_text(encoding="utf-8"),
+        multiplicity=2,
+    )
+    result = _run(
+        molecule=radical,
+        spec=CalculationSpec(
+            task=Task.SINGLE_POINT,
+            method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.ROHF),
+        ),
+    )
+    assert result.converged
+    assert result.spin_squared == pytest.approx(0.75, abs=1e-10)

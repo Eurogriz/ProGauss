@@ -96,7 +96,10 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
     assert registry.is_available("functional:pbe0")
     assert not registry.is_available("functional:b3lyp")
     assert not registry.is_available("method:ccsd_t")
-    assert not registry.is_available("spin:rohf")
+    # ROHF реализован, но только в одной точке: градиентов нет, поэтому
+    # partial, а не implemented.
+    assert registry.get("spin:rohf").availability is Availability.PARTIAL
+    assert registry.is_available("spin:rohf")
 
     # UHF реализован, но не целиком: ограничения обязаны быть перечислены,
     # иначе «partial» выглядело бы как «готово» (§54 ТЗ). Аналитические

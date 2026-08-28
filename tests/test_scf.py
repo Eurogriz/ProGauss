@@ -15,6 +15,8 @@ from quantumlab.engine.scf import (
     ScfSettings,
     canonical_orthogonalizer,
     run_rhf,
+    run_rohf,
+    run_uhf,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -131,3 +133,65 @@ def test_virial_ratio_is_not_a_correctness_criterion(water: Molecule) -> None:
     water_kinetic = float(np.sum(water_scf.density * build_kinetic(water_basis, water)))
     water_potential = water_scf.total_energy - water_kinetic
     assert -water_potential / water_kinetic == pytest.approx(2.0, abs=0.02)
+
+
+def test_rohf_closed_shell_reduces_exactly_to_rhf(water: Molecule) -> None:
+    """ROHF замкнутой оболочки совпадает с RHF.
+
+    Не приближённо, а точно: при ``n_alpha = n_beta`` открытый проектор
+    зануляется, ``Fc = Fα = Fβ``, и поскольку ``Pc + Pv = I``, эффективный
+    фокиан сворачивается в ``Fc``. Расхождение означало бы ошибку в
+    проекторах, а не численный шум.
+    """
+    basis = build_basis("sto-3g", water)
+    rohf = run_rohf(basis, water, TIGHT)
+    rhf = run_rhf(basis, water, TIGHT)
+    assert rohf.converged
+    assert abs(rohf.total_energy - rhf.total_energy) < 1e-11
+
+
+def test_rohf_is_a_spin_eigenfunction() -> None:
+    """⟨S²⟩ = S(S+1) точно — определяющее свойство ROHF.
+
+    В UHF та же система даёт спиновое загрязнение (⟨S²⟩ выше S(S+1)). Ровное
+    равенство — следствие общих орбиталей: замкнутая часть совпадает в обоих
+    каналах, и сумма квадратов перекрытий сокращает ``n_beta``. Проверка
+    независима от эталонной энергии и ловит подмену ROHF на UHF.
+    """
+    molecule = Molecule.from_xyz(
+        (FIXTURES / "ch-radical.xyz").read_text(encoding="utf-8"), multiplicity=2
+    )
+    basis = build_basis("sto-3g", molecule)
+    rohf = run_rohf(basis, molecule, TIGHT)
+    exact = 0.5 * 1.5
+    assert rohf.converged
+    assert rohf.s_squared == pytest.approx(exact, abs=1e-10)
+
+    uhf = run_uhf(basis, molecule, TIGHT)
+    assert uhf.s_squared > exact + 1e-4, "UHF обязан давать загрязнение"
+
+
+def test_rohf_energy_is_above_uhf_and_matches_pyscf() -> None:
+    """Энергия ROHF выше UHF (метод более ограничен) и совпадает с оракулом.
+
+    Вариационный принцип: ROHF допускает меньшее множество плотностей, чем UHF,
+    поэтому его энергия не может быть ниже. Совпадение с независимой реализацией
+    подтверждает, что выше не потому, что расчёт неверен.
+    """
+    pyscf = pytest.importorskip("pyscf")
+    molecule = Molecule.from_xyz(
+        (FIXTURES / "ch-radical.xyz").read_text(encoding="utf-8"), multiplicity=2
+    )
+    basis = build_basis("sto-3g", molecule)
+    ours = run_rohf(basis, molecule, TIGHT).total_energy
+    uhf_energy = run_uhf(basis, molecule, TIGHT).total_energy
+    assert ours > uhf_energy
+
+    atom_string = "; ".join(
+        f"{atom.symbol} {atom.position[0]} {atom.position[1]} {atom.position[2]}"
+        for atom in molecule.atoms
+    )
+    reference = pyscf.scf.ROHF(
+        pyscf.gto.M(atom=atom_string, basis="sto-3g", cart=True, spin=1, verbose=0)
+    ).run(conv_tol=1e-12)
+    assert ours == pytest.approx(float(reference.e_tot), abs=1e-7)

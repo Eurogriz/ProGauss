@@ -680,3 +680,251 @@ def run_uhf(
         strategies_used=tuple(strategies),
         elapsed_seconds=time.perf_counter() - started,
     )
+
+
+@dataclass(frozen=True)
+class RohfResult:
+    """Результат ROHF — ограниченный открытый оболочечный метод.
+
+    В отличие от UHF орбитали α и β общие: различаются только занятия
+    (``n_alpha`` и ``n_beta`` первых столбцов одного и того же ``C``). Поэтому
+    волновая функция остаётся собственной функцией Ŝ², и ``s_squared`` обязан
+    равняться ``S(S+1)`` точно — без спинового загрязнения, возможного в UHF.
+    """
+
+    total_energy: float
+    electronic_energy: float
+    nuclear_repulsion: float
+    orbital_energies: tuple[float, ...]
+    coefficients: np.ndarray
+    density_alpha: np.ndarray
+    density_beta: np.ndarray
+    s_squared: float
+    converged: bool
+    iterations: int
+    history: list[ScfHistory] = field(default_factory=list)
+    strategies_used: tuple[str, ...] = ()
+    elapsed_seconds: float = 0.0
+
+    @property
+    def alpha_energies(self) -> tuple[float, ...]:
+        """Собственные значения эффективного фокиана Рутаана.
+
+        У ROHF орбитали общие, поэтому набор один, и каналы α/β дают одинаковые
+        числа. Отдельных «орбитальных энергий α и β» здесь нет: эффективный
+        оператор не воспроизводит их по отдельности, и выдавать один набор под
+        двумя именами было бы неправдой.
+        """
+        return self.orbital_energies
+
+    @property
+    def beta_energies(self) -> tuple[float, ...]:
+        """Тот же набор, что и :attr:`alpha_energies` — орбитали общие."""
+        return self.orbital_energies
+
+
+def roothaan_effective_fock(
+    fock_alpha: np.ndarray,
+    fock_beta: np.ndarray,
+    density_alpha: np.ndarray,
+    density_beta: np.ndarray,
+    overlap: np.ndarray,
+) -> np.ndarray:
+    """Эффективный фокиан Рутаана (Roothaan, 1960).
+
+    Обычные спиновые фокианы ``Fα`` и ``Fβ`` нельзя диагонализировать одним
+    преобразованием: у открытой оболочки разные блоки требуют разного оператора.
+    Рутаан строит один эрмитов оператор, блочная структура которого такова:
+
+    ============  ========  ======  =========
+    пространство  closed    open    virtual
+    ============  ========  ======  =========
+    closed        Fc        Fb      Fc
+    open          Fb        Fc      Fa
+    virtual       Fc        Fa      Fc
+    ============  ========  ======  =========
+
+    где ``Fc = (Fα + Fβ)/2``. Проекторы строятся по плотностям: ``Dβ`` — это
+    плотность замкнутой оболочки, ``Dα − Dβ`` — открытой, ``I − Dα`` —
+    виртуального пространства.
+
+    Проверка предельного перехода: при ``n_α = n_β`` открытый проектор зануляется,
+    ``Fc = Fα = Fβ``, и поскольку ``Pc + Pv = I``, выражение сворачивается ровно
+    в ``Fc`` — то есть ROHF замкнутой оболочки совпадает с RHF.
+    """
+    fock_closed = 0.5 * (fock_alpha + fock_beta)
+    projector_closed = density_beta @ overlap
+    projector_open = (density_alpha - density_beta) @ overlap
+    projector_virtual = np.eye(overlap.shape[0]) - density_alpha @ overlap
+
+    fock: np.ndarray = 0.5 * (projector_closed.T @ fock_closed @ projector_closed)
+    fock += 0.5 * (projector_open.T @ fock_closed @ projector_open)
+    fock += 0.5 * (projector_virtual.T @ fock_closed @ projector_virtual)
+    fock += projector_open.T @ fock_beta @ projector_closed
+    fock += projector_open.T @ fock_alpha @ projector_virtual
+    fock += projector_virtual.T @ fock_closed @ projector_closed
+    # Складываем с транспонированной: перечисленные слагаемые заполняют только
+    # половину блоков, а оператор обязан быть эрмитовым.
+    return np.asarray(fock + fock.T)
+
+
+def run_rohf(
+    basis: BasisSet,
+    molecule: Molecule,
+    settings: ScfSettings | None = None,
+    *,
+    integrals: PrecomputedIntegrals | None = None,
+) -> RohfResult:
+    """Выполняет ROHF-расчёт.
+
+    Энергия выражается той же формулой, что и в UHF, — различие не в функционале
+    энергии, а в допустимых плотностях: ROHF требует общих орбиталей для обоих
+    каналов. Поэтому α- и β-плотности строятся из одного ``C`` с разным числом
+    занятых столбцов.
+
+    Диагонализуется эффективный фокиан Рутаана, а не ``Fα``: собственные значения
+    ``Fα`` не соответствуют орбитальным энергиям открытой оболочки.
+    """
+    config = settings or ScfSettings()
+    started = time.perf_counter()
+    strategies: list[str] = ["core-hamiltonian-guess"]
+
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+
+    prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+    overlap, core, eri = prepared.overlap, prepared.core, prepared.eri
+    v_nuc = nuclear_repulsion(molecule)
+    orthogonalizer = canonical_orthogonalizer(overlap)
+
+    def diagonalize(fock_prime: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        symmetric = 0.5 * (fock_prime + fock_prime.T)
+        energies, coefficients_prime = np.linalg.eigh(symmetric)
+        return energies, orthogonalizer @ coefficients_prime, coefficients_prime
+
+    energies, coefficients, coefficients_prime = diagonalize(
+        orthogonalizer.T @ core @ orthogonalizer
+    )
+    density_alpha = density_from_coefficients(coefficients, n_alpha, occupation=1.0)
+    density_beta = density_from_coefficients(coefficients, n_beta, occupation=1.0)
+
+    diis_focks: list[np.ndarray] = []
+    diis_errors: list[np.ndarray] = []
+    history: list[ScfHistory] = []
+    previous_energy = 0.0
+    converged = False
+    iterations = 0
+    level_shift_active = False
+
+    for iteration in range(1, config.max_iterations + 1):
+        iterations = iteration
+        density_total = density_alpha + density_beta
+        coulomb = coulomb_matrix(density_total, eri)
+        fock_alpha = core + coulomb - exchange_matrix(density_alpha, eri)
+        fock_beta = core + coulomb - exchange_matrix(density_beta, eri)
+        energy = (
+            float(
+                0.5
+                * (
+                    np.sum(density_total * core)
+                    + np.sum(density_alpha * fock_alpha)
+                    + np.sum(density_beta * fock_beta)
+                )
+            )
+            + v_nuc
+        )
+        energy_change = energy - previous_energy
+
+        effective = roothaan_effective_fock(
+            fock_alpha, fock_beta, density_alpha, density_beta, overlap
+        )
+        effective_prime = orthogonalizer.T @ effective @ orthogonalizer
+
+        # Занятое пространство в ROHF одно на оба канала: это первые n_alpha
+        # столбцов общего C, то есть проектор Dα в ортогональном базисе.
+        occupied = coefficients_prime[:, :n_alpha]
+        occupied_projector = occupied @ occupied.T
+        residual = occupied_projector @ effective_prime - effective_prime @ occupied_projector
+        diis_error = float(np.max(np.abs(residual)))
+
+        strategy = "plain"
+        effective_used = effective_prime
+        if iteration >= config.diis_start:
+            diis_focks.append(effective_prime)
+            diis_errors.append(residual)
+            if len(diis_focks) > config.diis_space:
+                diis_focks.pop(0)
+                diis_errors.pop(0)
+            extrapolated = _diis_extrapolate(diis_focks, diis_errors)
+            if extrapolated is not None:
+                effective_used = extrapolated
+                strategy = "diis"
+                if "diis" not in strategies:
+                    strategies.append("diis")
+
+        if level_shift_active and diis_error < config.level_shift_release:
+            level_shift_active = False
+            diis_focks.clear()
+            diis_errors.clear()
+            strategies.append("level-shift-released")
+
+        stalled = (
+            len(history) >= config.diis_space + config.diis_start
+            and diis_error > config.stall_ratio * history[-config.diis_space].diis_error
+            and diis_error > config.density_tolerance
+        )
+        if stalled and not level_shift_active:
+            level_shift_active = True
+            strategies.append("level-shift")
+        if level_shift_active:
+            identity = np.eye(effective_prime.shape[0])
+            effective_used = effective_used + config.level_shift * (identity - occupied_projector)
+
+        energies, coefficients, coefficients_prime = diagonalize(effective_used)
+        density_alpha = density_from_coefficients(coefficients, n_alpha, occupation=1.0)
+        density_beta = density_from_coefficients(coefficients, n_beta, occupation=1.0)
+
+        history.append(
+            ScfHistory(
+                iteration=iteration,
+                energy=energy,
+                energy_change=energy_change,
+                density_change=0.0,
+                diis_error=diis_error,
+                strategy=strategy,
+            )
+        )
+        previous_energy = energy
+        if abs(energy_change) < config.energy_tolerance and diis_error < config.density_tolerance:
+            converged = True
+            break
+
+    density_total = density_alpha + density_beta
+    coulomb = coulomb_matrix(density_total, eri)
+    fock_alpha = core + coulomb - exchange_matrix(density_alpha, eri)
+    fock_beta = core + coulomb - exchange_matrix(density_beta, eri)
+    electronic = float(
+        0.5
+        * (
+            np.sum(density_total * core)
+            + np.sum(density_alpha * fock_alpha)
+            + np.sum(density_beta * fock_beta)
+        )
+    )
+    return RohfResult(
+        total_energy=electronic + v_nuc,
+        electronic_energy=electronic,
+        nuclear_repulsion=v_nuc,
+        orbital_energies=tuple(float(value) for value in energies),
+        coefficients=coefficients,
+        density_alpha=density_alpha,
+        density_beta=density_beta,
+        # Тот же общий определитель, что и в UHF. Для ROHF он обязан дать ровно
+        # S(S+1): замкнутые орбитали совпадают в обоих каналах, и сумма квадратов
+        # перекрытий в точности сокращает n_beta.
+        s_squared=spin_contamination(coefficients, coefficients, n_alpha, n_beta, overlap),
+        converged=converged,
+        iterations=iterations,
+        history=history,
+        strategies_used=tuple(strategies),
+        elapsed_seconds=time.perf_counter() - started,
+    )

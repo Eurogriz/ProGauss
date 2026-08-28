@@ -67,6 +67,7 @@ from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import (
     PrecomputedIntegrals,
+    RohfResult,
     ScfSettings,
     UhfResult,
     build_fock,
@@ -75,6 +76,7 @@ from quantumlab.engine.scf import (
     coulomb_matrix,
     exchange_matrix,
     run_rhf,
+    run_rohf,
     run_uhf,
     spin_population,
 )
@@ -241,6 +243,8 @@ class ReferenceEngine:
             return self._run_single_point_rks(request, basis_name, progress=progress)
         if method is not None and method.spin is SpinTreatment.UHF:
             return self._run_single_point_uhf(request, basis_name, progress=progress)
+        if method is not None and method.spin is SpinTreatment.ROHF:
+            return self._run_single_point_rohf(request, basis_name, progress=progress)
         return self._run_single_point_rhf(request, basis_name, progress=progress)
 
     def _run_single_point_rks(
@@ -417,6 +421,63 @@ class ReferenceEngine:
             checks=checks,
             timings=timings,
             warnings=_warnings_uhf(uhf, basis, request.molecule),
+            final_molecule=None,
+        )
+
+    def _run_single_point_rohf(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """ROHF в фиксированной геометрии.
+
+        Интегралы и выражение для энергии те же, что и в UHF: различие только в
+        допустимых плотностях — орбитали обоих каналов общие. Проверки качества
+        и предупреждения переиспользуются от UHF, потому что физика та же;
+        расходиться они не должны.
+
+        Градиентов ROHF нет, поэтому оптимизация и частоты для него отклоняются
+        на уровне реестра, а не считаются по силам другого метода.
+        """
+        spec = request.spec
+        timings: list[TimingRecord] = []
+
+        started = time.perf_counter()
+        basis = build_basis(basis_name, request.molecule)
+        timings.append(_timing("basis", started))
+        _report(progress, 5.0, "basis", functions=basis.n_functions)
+
+        started = time.perf_counter()
+        prepared = build_integrals(basis, request.molecule)
+        dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
+        timings.append(_timing("integrals", started))
+        _report(progress, 45.0, "integrals")
+
+        started = time.perf_counter()
+        rohf = run_rohf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
+        timings.append(_timing("scf", started))
+        _report(progress, 85.0, "scf", iterations=rohf.iterations, converged=rohf.converged)
+
+        started = time.perf_counter()
+        properties = _properties_uhf(rohf, request.molecule, dipole_integrals)
+        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared)
+        timings.append(_timing("properties", started))
+        _report(progress, 100.0, "properties")
+
+        return self._result(
+            request,
+            molecule=request.molecule,
+            basis=basis,
+            scf=_ScfSummary(
+                total_energy=rohf.total_energy,
+                iterations=rohf.iterations,
+                converged=rohf.converged,
+                spin_squared=rohf.s_squared,
+                beta_homo=properties.beta_homo,
+                beta_lumo=properties.beta_lumo,
+            ),
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings_uhf(rohf, basis, request.molecule),
             final_molecule=None,
         )
 
@@ -925,7 +986,7 @@ def _properties(
 
 
 def _properties_uhf(
-    uhf: UhfResult,
+    uhf: UhfResult | RohfResult,
     molecule: Molecule,
     dipole_integrals: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> _Properties:
@@ -971,7 +1032,7 @@ def _properties_uhf(
 
 
 def _quality_checks_uhf(
-    uhf: UhfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
+    uhf: UhfResult | RohfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
 ) -> tuple[QualityCheck, ...]:
     """Проверки качества для UHF.
 
@@ -1096,7 +1157,7 @@ def _quality_checks_uhf(
 
 
 def _warnings_uhf(
-    uhf: UhfResult, basis: BasisSet, molecule: Molecule
+    uhf: UhfResult | RohfResult, basis: BasisSet, molecule: Molecule
 ) -> tuple[CalculationWarning, ...]:
     """Предупреждения UHF: несошедшийся SCF, схема базиса, начало отсчёта диполя."""
     warnings: list[CalculationWarning] = []
