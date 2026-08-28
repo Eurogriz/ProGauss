@@ -44,7 +44,14 @@ from quantumlab.domain.result import (
     QualityVerdict,
     TimingRecord,
 )
-from quantumlab.domain.spec import CalculationSpec, SpinTreatment, Task, TheoryFamily
+from quantumlab.domain.spec import (
+    CalculationSpec,
+    OptimizationSpec,
+    ScfSpec,
+    SpinTreatment,
+    Task,
+    TheoryFamily,
+)
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet, basis_angular_scheme, build_basis
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
@@ -663,6 +670,31 @@ class ReferenceEngine:
     # ------------------------------------------------------------------ #
     # Проверки допустимости запроса
     # ------------------------------------------------------------------ #
+    def _assert_scf_is_honoured(self, scf: ScfSpec) -> None:
+        """Отклоняет параметры SCF, которых движок всё равно не выполнил бы.
+
+        Без этой проверки запрос «EDIIS + SOSCF» дошёл бы до расчёта и вернулся
+        успешным — с DIIS внутри. Пользователь получил бы число, посчитанное не
+        тем методом, который он выбрал, и узнать об этом было бы неоткуда (§54 ТЗ).
+        """
+        for strategy in scf.fallback_strategies:
+            self._registry.assert_available(f"scf:{strategy}")
+        if scf.stability_analysis:
+            self._registry.assert_available("scf:stability_analysis")
+        if scf.fractional_occupations:
+            self._registry.assert_available("scf:fractional_occupations")
+
+    def _assert_optimization_is_honoured(self, optimization: OptimizationSpec) -> None:
+        """То же для оптимизации: схема обновления гессиана и ограничения.
+
+        Движок всегда применяет BFGS и не читает ``constraints``, поэтому оба
+        параметра обязаны отклоняться явно: молча проигнорированное ограничение
+        выдаёт геометрию, которую пользователь сочтёт удовлетворяющей условию.
+        """
+        self._registry.assert_available(f"optimizer:hessian_update:{optimization.hessian_update}")
+        if optimization.constraints:
+            self._registry.assert_available("optimizer:constraints")
+
     def assert_supported(self, spec: CalculationSpec) -> str:
         """Отклоняет запрос, который ядро не может выполнить корректно.
 
@@ -673,11 +705,14 @@ class ReferenceEngine:
         Возвращает имя базиса: оно нужно и для расчёта, и для сообщения
         об ошибке, поэтому извлекается здесь же.
         """
-        if spec.task not in (Task.SINGLE_POINT, Task.OPTIMIZATION):
+        implemented_tasks = (Task.SINGLE_POINT, Task.OPTIMIZATION, Task.FREQUENCIES)
+        if spec.task not in implemented_tasks:
             self._registry.assert_available(f"task:{spec.task.value}")
+        self._assert_scf_is_honoured(spec.scf)
         if spec.task is Task.OPTIMIZATION:
             coordinates = spec.optimization.coordinates
             self._registry.assert_available(f"coordinates:{coordinates}")
+            self._assert_optimization_is_honoured(spec.optimization)
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -778,15 +813,24 @@ def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:
 def _scf_settings(spec: CalculationSpec) -> ScfSettings:
     """Переносит параметры SCF из спецификации в настройки решателя."""
     scf = spec.scf
+    # ``fallback_strategies`` — белый список, а не пожелание: стратегия, которой
+    # в нём нет, не применяется. Иначе пользователь, убравший из списка сдвиг
+    # уровней, получил бы расчёт со сдвигом и не узнал бы об этом.
+    allowed = set(scf.fallback_strategies)
+    use_damping = "damping" in allowed and scf.damping > 0
+    use_level_shift = "level_shift" in allowed and scf.level_shift > 0
     return ScfSettings(
         max_iterations=scf.max_iterations,
         energy_tolerance=scf.energy_threshold,
         density_tolerance=scf.density_threshold,
         # DIIS нужен хотя бы из двух векторов — раньше экстраполировать нечего.
-        diis_start=max(scf.diis_start, 2),
-        damping_factor=scf.damping if scf.damping > 0 else 0.5,
-        damping_rounds=2 if scf.damping > 0 else 0,
-        level_shift=scf.level_shift if scf.level_shift > 0 else 0.25,
+        # Выключается стартом позже последней итерации: отдельного флага у
+        # решателя нет, а заводить второй способ отключить DIIS значило бы
+        # держать два мнения об одном и том же.
+        diis_start=max(scf.diis_start, 2) if "diis" in allowed else scf.max_iterations + 1,
+        damping_factor=scf.damping if use_damping else 0.5,
+        damping_rounds=2 if use_damping else 0,
+        level_shift=scf.level_shift if use_level_shift else 0.25,
     )
 
 

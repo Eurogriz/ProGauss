@@ -143,9 +143,12 @@ class MethodSpec(BaseModel):
 class ScfSpec(BaseModel):
     """Параметры SCF-движка (§10 ТЗ).
 
-    ``fallback_strategies`` — упорядоченный список стратегий, которые движок
-    применяет при отсутствии сходимости. Порядок важен: от дешёвых к дорогим.
-    Каждая применённая стратегия попадает в журнал и в диагноз ошибки.
+    ``fallback_strategies`` — белый список стратегий, которые движок вправе
+    применить при отсутствии сходимости. Порядок в списке не задаёт порядок
+    применения: лестница «сдвиг уровней → DIIS → гашение» фиксирована в решателе, потому
+    что он выбирает стратегию по поведению невязки, а не по очереди. Фактически
+    применённые стратегии возвращаются в ``strategies_used``.
+    Стратегия, не реализованная в движке, отклоняется при валидации.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -166,7 +169,11 @@ class ScfSpec(BaseModel):
     fractional_occupations: bool = Field(
         default=False, description="Дробные заселённости (smearing)"
     )
-    fallback_strategies: tuple[str, ...] = ("ediis", "damping", "level_shift", "soscf")
+    #: По умолчанию перечислены только те стратегии, которые движок фактически
+    #: применяет. EDIIS и SOSCF заявлены в реестре как нереализованные и
+    #: отклоняются при валидации: обещать их по умолчанию значило бы начинать
+    #: каждый расчёт с неправды о самом себе.
+    fallback_strategies: tuple[str, ...] = ("diis", "damping", "level_shift")
 
 
 class GridSpec(BaseModel):
@@ -197,8 +204,11 @@ class OptimizationSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    #: По умолчанию — декартовы координаты: это единственная реализованная схема.
+    #: Прежний дефолт ``redundant_internal`` обещал то, чего в движке нет, и любой
+    #: запрос со спецификацией по умолчанию отклонялся.
     coordinates: str = Field(
-        default="redundant_internal", pattern="^(cartesian|internal|redundant_internal)$"
+        default="cartesian", pattern="^(cartesian|internal|redundant_internal)$"
     )
     max_steps: int = Field(default=100, ge=1)
     max_force: float = Field(default=4.5e-4, gt=0.0, description="Eh/Bohr")

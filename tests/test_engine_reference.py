@@ -19,15 +19,23 @@ from quantumlab.domain.molecule import Atom, Molecule
 from quantumlab.domain.result import CalculationResult, QualityVerdict
 from quantumlab.domain.spec import (
     CalculationSpec,
+    CoordinateConstraint,
     MethodSpec,
     OptimizationSpec,
+    ScfSpec,
     SpinTreatment,
     Task,
     TheoryFamily,
 )
 from quantumlab.engine.basis import build_basis
 from quantumlab.engine.contracts import EngineRequest
-from quantumlab.engine.reference import ENGINE_BACKEND, ENGINE_NAME, ReferenceEngine
+from quantumlab.engine.reference import (
+    ENGINE_BACKEND,
+    ENGINE_NAME,
+    ReferenceEngine,
+    _scf_settings,
+)
+from quantumlab.engine.registry import default_registry
 from quantumlab.engine.scf import ScfSettings, run_rhf
 from quantumlab.errors import (
     BasisNotFoundError,
@@ -243,11 +251,17 @@ def test_spherical_basis_runs_but_warns_about_the_scheme() -> None:
 
 
 def test_unsupported_task_is_rejected_before_any_computation() -> None:
-    """Оптимизация требует градиентов, которых нет — задача отклоняется."""
+    """Задача без ядра отклоняется до начала вычислений.
+
+    Прежде этот тест проверял отклонение **оптимизации** и проходил лишь потому,
+    что ``OptimizationSpec`` по умолчанию просил ``redundant_internal``. Градиенты
+    и оптимизация давно реализованы, поэтому примером служит IRC — для него нет
+    ни гессиана вдоль пути, ни самого пути.
+    """
     with pytest.raises(MethodNotAvailableError):
         _run(
             spec=CalculationSpec(
-                task=Task.OPTIMIZATION,
+                task=Task.IRC,
                 method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
             )
         )
@@ -359,8 +373,13 @@ def test_uhf_reproduces_rhf_on_closed_shell() -> None:
     assert unrestricted.spin_squared == pytest.approx(0.0, abs=1e-10)
 
 
-def test_uhf_optimization_is_rejected_honestly() -> None:
-    """Градиентов UHF нет: оптимизация отклоняется, а не считается по RHF-силам."""
+def test_uhf_optimization_is_not_rejected_any_more() -> None:
+    """Аналитические градиенты UHF реализованы — оптимизация открытой оболочки идёт.
+
+    Прежняя версия этого теста утверждала обратное и проходила лишь потому, что
+    спецификация по умолчанию просила нереализованную систему координат. Теперь
+    проверяется содержательное: расчёт доходит до результата, а ⟨S²⟩ в нём есть.
+    """
     hydrogen = Molecule(
         name="h2",
         atoms=(
@@ -370,14 +389,16 @@ def test_uhf_optimization_is_rejected_honestly() -> None:
         multiplicity=2,
         charge=1,
     )
-    with pytest.raises(MethodNotAvailableError):
-        _run(
-            molecule=hydrogen,
-            spec=CalculationSpec(
-                task=Task.OPTIMIZATION,
-                method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF),
-            ),
-        )
+    result = _run(
+        molecule=hydrogen,
+        spec=CalculationSpec(
+            task=Task.OPTIMIZATION,
+            method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF),
+            optimization=OptimizationSpec(coordinates="cartesian", max_steps=5),
+        ),
+    )
+    assert result.optimization_steps is not None
+    assert result.spin_squared is not None
 
 
 def test_missing_method_spec_is_rejected_with_an_explanation() -> None:
@@ -549,3 +570,109 @@ def test_assert_supported_returns_the_basis_it_validated() -> None:
     assert engine.assert_supported(_spec("sto-3g")) == "sto-3g"
     with pytest.raises(MethodNotAvailableError):
         engine.assert_supported(CalculationSpec(task=Task.IRC))
+
+
+def _option_spec(**overrides: object) -> CalculationSpec:
+    """Спецификация RHF/STO-3G с переопределёнными полями — для проверок отказов."""
+    base: dict[str, object] = {
+        "task": Task.SINGLE_POINT,
+        "method": MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+    }
+    base.update(overrides)
+    return CalculationSpec(**base)  # type: ignore[arg-type]
+
+
+def test_unimplemented_scf_strategies_are_rejected_not_silently_skipped() -> None:
+    """Запрос EDIIS/SOSCF отклоняется, а не выполняется без них.
+
+    Это ключевой случай §54 ТЗ: расчёт сошёлся бы и вернул число, посчитанное
+    другим алгоритмом. Пользователь выбрал метод — он обязан получить либо его,
+    либо отказ.
+    """
+    engine = ReferenceEngine()
+    for strategies in (("ediis",), ("diis", "soscf"), ("ediis", "damping", "level_shift")):
+        with pytest.raises(MethodNotAvailableError):
+            engine.assert_supported(_option_spec(scf=ScfSpec(fallback_strategies=strategies)))
+    with pytest.raises(MethodNotAvailableError):
+        engine.assert_supported(_option_spec(scf=ScfSpec(stability_analysis=True)))
+    with pytest.raises(MethodNotAvailableError):
+        engine.assert_supported(_option_spec(scf=ScfSpec(fractional_occupations=True)))
+    # Реализованные стратегии проходят.
+    assert engine.assert_supported(
+        _option_spec(scf=ScfSpec(fallback_strategies=("diis", "damping")))
+    )
+
+
+def test_unimplemented_optimizer_options_are_rejected() -> None:
+    """Ограничения координат и обновление Бофилла отклоняются явно.
+
+    Движок всегда применяет BFGS и не читает ``constraints``. Молча
+    проигнорированное ограничение вернуло бы геометрию, которую пользователь
+    счёл бы удовлетворяющей условию, — худший вид неправды, потому что
+    результат выглядит успешным.
+    """
+    engine = ReferenceEngine()
+    constrained = _option_spec(
+        task=Task.OPTIMIZATION,
+        optimization=OptimizationSpec(
+            constraints=(CoordinateConstraint(atoms=(0, 1), value=1.0),),
+        ),
+    )
+    with pytest.raises(MethodNotAvailableError):
+        engine.assert_supported(constrained)
+    for update in ("bofill", "none"):
+        with pytest.raises(MethodNotAvailableError):
+            engine.assert_supported(
+                _option_spec(
+                    task=Task.OPTIMIZATION,
+                    optimization=OptimizationSpec(hessian_update=update),
+                )
+            )
+    assert engine.assert_supported(
+        _option_spec(task=Task.OPTIMIZATION, optimization=OptimizationSpec(hessian_update="bfgs"))
+    )
+
+
+def test_default_specification_is_executable() -> None:
+    """Спецификация по умолчанию обязана проходить валидацию.
+
+    Прежний дефолт ``coordinates="redundant_internal"`` описывал схему, которой
+    в движке нет, поэтому любой запрос с настройками по умолчанию отклонялся.
+    Дефолт, требующий правки перед использованием, — это ловушка, а не
+    convenience.
+    """
+    optimization = OptimizationSpec()
+    assert optimization.coordinates == "cartesian"
+    assert ReferenceEngine().assert_supported(_option_spec(task=Task.OPTIMIZATION)) == "sto-3g"
+    # И дефолтный список стратегий SCF состоит только из реализованных.
+    for strategy in ScfSpec().fallback_strategies:
+        assert default_registry().get(f"scf:{strategy}").availability.is_usable, strategy
+
+
+def test_fallback_strategies_actually_whitelist_the_strategies() -> None:
+    """Поле — белый список, а не пожелание: исключённая стратегия не применяется.
+
+    Проверяется на отображении в настройки решателя: убрать стратегию из списка
+    и получить расчёт с ней было бы той же неправдой, что и обещать
+    нереализованное.
+    """
+    full = _scf_settings(
+        _option_spec(
+            scf=ScfSpec(
+                fallback_strategies=("diis", "damping", "level_shift"),
+                damping=0.5,
+                level_shift=0.25,
+            )
+        )
+    )
+    assert full.damping_rounds > 0
+    assert full.diis_start <= full.max_iterations
+
+    without = _scf_settings(
+        _option_spec(scf=ScfSpec(fallback_strategies=("diis",), damping=0.5, level_shift=0.25))
+    )
+    assert without.damping_rounds == 0
+    assert without.diis_start <= without.max_iterations
+
+    no_diis = _scf_settings(_option_spec(scf=ScfSpec(fallback_strategies=("damping",))))
+    assert no_diis.diis_start > no_diis.max_iterations, "DIIS должен быть выключен"

@@ -167,6 +167,11 @@ def test_implemented_capabilities_match_the_verified_surface(
         # D3/D4 в реестре есть и помечены как нереализованные.
         "dispersion:none",
         "format:xyz",
+        "optimizer:frozen_atoms",
+        "optimizer:hessian_update:bfgs",
+        "scf:damping",
+        "scf:diis",
+        "scf:level_shift",
         "task:optimization",
         "task:single_point",
     ]
@@ -222,6 +227,8 @@ def test_snapshot_groups_by_kind(registry: CapabilityRegistry) -> None:
         "scheduler",
         "coordinates",
         "spin",
+        "scf",
+        "optimizer",
     }
     assert snapshot["backend"][0]["availability"] == "not_implemented"
     # Системы координат и спин — отдельные категории: раздел «База методов» в GUI
@@ -254,3 +261,32 @@ def test_plugin_can_register_new_capability(registry: CapabilityRegistry) -> Non
 def test_duplicate_registration_is_rejected(registry: CapabilityRegistry) -> None:
     with pytest.raises(ValueError, match="уже зарегистрирована"):
         registry.register(registry.get("method:hf"))
+
+
+def test_scf_and_optimizer_options_are_declared_not_just_unknown() -> None:
+    """Параметры SCF и оптимизатора объявлены, а не «неизвестны».
+
+    Неизвестный идентификатор реестр тоже считает недоступным, поэтому
+    отсутствие записи выглядело бы безопасно — но тогда ``quantumlab
+    capabilities`` о них молчал, и пользователь не мог узнать, что именно
+    недоступно. Отличаем одно от другого явной проверкой наличия записи.
+    """
+    registry = default_registry()
+    for capability_id in (
+        "scf:diis",
+        "scf:damping",
+        "scf:level_shift",
+        "scf:ediis",
+        "scf:soscf",
+        "scf:stability_analysis",
+        "scf:fractional_occupations",
+        "optimizer:frozen_atoms",
+        "optimizer:constraints",
+        "optimizer:hessian_update:bfgs",
+        "optimizer:hessian_update:bofill",
+        "optimizer:hessian_update:none",
+    ):
+        assert registry.get(capability_id).name, capability_id
+    assert registry.get("scf:diis").availability is Availability.IMPLEMENTED
+    assert registry.get("scf:ediis").availability is Availability.NOT_IMPLEMENTED
+    assert registry.get("optimizer:constraints").availability is Availability.NOT_IMPLEMENTED

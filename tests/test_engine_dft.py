@@ -305,15 +305,26 @@ def test_engine_refuses_dft_without_explicit_functional(water: Molecule) -> None
     assert water.n_electrons == 10
 
 
-def test_engine_refuses_dft_geometry_optimization(water: Molecule) -> None:
-    """XC-вклада в аналитический градиент нет — оптимизация отклоняется (§54)."""
+def test_engine_runs_dft_geometry_optimization(water: Molecule) -> None:
+    """XC-вклад в аналитический градиент реализован — оптимизация методом DFT идёт.
+
+    Прежняя версия этого теста утверждала обратное и проходила лишь потому, что
+    ``OptimizationSpec`` по умолчанию просил нереализованную систему координат:
+    на уровне движка оптимизация DFT не проверялась вовсе.
+    """
     spec = CalculationSpec(
         task=Task.OPTIMIZATION,
         method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="svwn"),
-        optimization=OptimizationSpec(),
+        optimization=OptimizationSpec(max_steps=4),
     )
-    with pytest.raises(MethodNotAvailableError):
-        ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1))
+    result = ReferenceEngine().run(
+        EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1)
+    )
+    assert result.optimization_steps is not None
+    assert result.optimization_steps > 0
+    # Геометрия действительно изменилась — иначе «оптимизация» была бы пустышкой.
+    assert result.final_molecule is not None
+    assert result.final_molecule.atoms != water.atoms
 
 
 def test_engine_refuses_unimplemented_functional(water: Molecule) -> None:

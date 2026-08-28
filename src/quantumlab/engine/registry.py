@@ -295,6 +295,36 @@ def _functional_limitations(name: str) -> tuple[str, ...]:
     return tuple(limits)
 
 
+#: Параметры SCF. Имена совпадают со значениями ``ScfSpec.fallback_strategies``,
+#: иначе проверка «поддерживается ли запрошенное» сравнивала бы строки, которых
+#: нет ни в спецификации, ни в реестре.
+_SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
+    ("diis", True, ""),
+    ("damping", True, ""),
+    ("level_shift", True, ""),
+    ("ediis", False, "EDIIS не реализован; запрос отклоняется, а не выполняется без него."),
+    ("soscf", False, "SOSCF (второй порядок) не реализован."),
+    ("stability_analysis", False, "Проверка устойчивости волновой функции не реализована."),
+    ("fractional_occupations", False, "Дробные занятия не реализованы."),
+)
+
+#: Параметры оптимизатора. ``hessian_update`` объявлен в спецификации как
+#: ``bfgs|bofill|none``, но движок всегда применяет BFGS — поэтому bofill и none
+#: заявлены как нереализованные: иначе запрос «обновляй по Бофиллу» молча
+#: выполнился бы с BFGS.
+_OPTIMIZER_OPTIONS: tuple[tuple[str, bool, str], ...] = (
+    ("frozen_atoms", True, ""),
+    ("hessian_update:bfgs", True, ""),
+    ("constraints", False, "Ограничения координат не реализованы."),
+    (
+        "hessian_update:bofill",
+        False,
+        "Обновление Бофилла не реализовано; движок всегда применяет BFGS.",
+    ),
+    ("hessian_update:none", False, "Отказ от обновления гессиана не реализован."),
+)
+
+
 def default_registry() -> CapabilityRegistry:
     """Собирает реестр, соответствующий текущему состоянию кодовой базы.
 
@@ -488,6 +518,34 @@ def default_registry() -> CapabilityRegistry:
                 kind=CapabilityKind.SCHEDULER,
                 name=name,
                 availability=Availability.NOT_IMPLEMENTED,
+            )
+        )
+
+    for name, available, note in _SCF_OPTIONS:
+        capabilities.append(
+            Capability(
+                id=f"scf:{name}",
+                kind=CapabilityKind.SCF,
+                name=name,
+                availability=(
+                    Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
+                ),
+                since_version=__version__ if available else None,
+                limitations=() if available else (note,),
+            )
+        )
+
+    for name, available, note in _OPTIMIZER_OPTIONS:
+        capabilities.append(
+            Capability(
+                id=f"optimizer:{name}",
+                kind=CapabilityKind.OPTIMIZER,
+                name=name,
+                availability=(
+                    Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
+                ),
+                since_version=__version__ if available else None,
+                limitations=() if available else (note,),
             )
         )
 

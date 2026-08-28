@@ -32,6 +32,8 @@ class CapabilityKind(StrEnum):
     COORDINATES = "coordinates"
     SPIN = "spin"
     DISPERSION = "dispersion"
+    SCF = "scf"
+    OPTIMIZER = "optimizer"
 
 
 class Availability(StrEnum):

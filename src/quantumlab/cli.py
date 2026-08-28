@@ -245,9 +245,13 @@ def _command_capabilities(
     if not capabilities:
         print(t("cli.capabilities.none", locale))
         return 0
+    # Ширина колонки считается по содержимому: жёстко заданная ломала
+    # выравнивание, как только появился идентификатор длиннее неё
+    # (``optimizer:hessian_update:bofill``).
+    width = max(len(capability.id) for capability in capabilities)
     for capability in capabilities:
         status = capability.availability.value
-        print(f"  {capability.id:<28} {status:<16} {capability.describe(locale)}")
+        print(f"  {capability.id:<{width}} {status:<16} {capability.describe(locale)}")
     return 0
 
 
