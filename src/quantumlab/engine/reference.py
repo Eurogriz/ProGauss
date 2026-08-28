@@ -88,7 +88,11 @@ from quantumlab.engine.scf import (
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
 from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
-from quantumlab.errors import JobCheckpointInvalidError, ScfNotConvergedError
+from quantumlab.errors import (
+    CombinationUnavailableError,
+    JobCheckpointInvalidError,
+    ScfNotConvergedError,
+)
 from quantumlab.version import __version__
 
 #: Имя ядра — попадает в отпечаток расчёта и в журнал.
@@ -832,6 +836,43 @@ class ReferenceEngine:
         if optimization.constraints:
             self._registry.assert_available("optimizer:constraints")
 
+    def _assert_spin_combination_is_honoured(self, spec: CalculationSpec) -> None:
+        """Отклоняет сочетания, где спин реализован, а их комбинация с задачей — нет.
+
+        Проверка доступности ``spin:uhf`` сама по себе недостаточна: UHF
+        реализован для HF, но не для DFT. Без этой проверки запрос проходил
+        валидацию, попадал в ветку RKS и падал необработанным ``ValueError``
+        про нечётное число электронов — то есть пользователь получал аварийный
+        сбой вместо честного «недоступно» (§54 ТЗ).
+
+        То же с ROHF: реестр честно объявляет его пригодным только для энергии
+        в одной точке, но объявление без читателя ничего не значит — движок
+        проваливался в RHF и падал там. Проверка делает ограничение реальным.
+        """
+        method = spec.method
+        if method is None:
+            return
+
+        if method.theory is TheoryFamily.DFT and method.spin is not SpinTreatment.RHF:
+            # В ``combination`` — только технические идентификаторы: движок по
+            # устройству не знает локали вызывающей стороны, а подставлять
+            # русский текст в параметр значило бы зашить в код строку
+            # интерфейса (§3 ТЗ).
+            raise CombinationUnavailableError(
+                f"DFT/{method.functional} + {method.spin.value}",
+                "UKS (спиново-поляризованный DFT) не реализован: функционалы "
+                "считаются только по полной плотности. Для открытой оболочки "
+                "доступен метод HF с обработкой "
+                f"{method.spin.value}.",
+            )
+        if method.spin is SpinTreatment.ROHF and spec.task is not Task.SINGLE_POINT:
+            raise CombinationUnavailableError(
+                f"ROHF + {spec.task.value}",
+                "аналитических градиентов ROHF нет, поэтому нужны производные "
+                "энергии. Для открытой оболочки доступны UHF (оптимизация и "
+                "частоты) и ROHF (только энергия в одной точке).",
+            )
+
     def assert_supported(self, spec: CalculationSpec) -> str:
         """Отклоняет запрос, который ядро не может выполнить корректно.
 
@@ -869,6 +910,7 @@ class ReferenceEngine:
         self._registry.assert_available(f"dispersion:{method.dispersion.value}")
         if method.spin is not SpinTreatment.RHF:
             self._registry.assert_available(f"spin:{method.spin.value}")
+        self._assert_spin_combination_is_honoured(spec)
         self._registry.assert_available(f"basis:{method.basis}")
         return method.basis
 

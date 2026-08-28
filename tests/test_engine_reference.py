@@ -39,6 +39,7 @@ from quantumlab.engine.registry import default_registry
 from quantumlab.engine.scf import ScfSettings, run_rhf
 from quantumlab.errors import (
     BasisNotFoundError,
+    CombinationUnavailableError,
     FunctionalNotFoundError,
     MethodNotAvailableError,
 )
@@ -711,3 +712,46 @@ def test_rohf_single_point_reports_exact_spin() -> None:
     )
     assert result.converged
     assert result.spin_squared == pytest.approx(0.75, abs=1e-10)
+
+
+def _matrix_spec(task: Task, theory: TheoryFamily, spin: SpinTreatment) -> CalculationSpec:
+    """Спецификация для матрицы «задача × метод × спин»."""
+    method = MethodSpec(
+        theory=theory,
+        basis="sto-3g",
+        spin=spin,
+        functional="pbe" if theory is TheoryFamily.DFT else None,
+    )
+    if task is Task.OPTIMIZATION:
+        return CalculationSpec(task=task, method=method, optimization=OptimizationSpec(max_steps=3))
+    return CalculationSpec(task=task, method=method)
+
+
+@pytest.mark.parametrize("task", [Task.SINGLE_POINT, Task.OPTIMIZATION, Task.FREQUENCIES])
+@pytest.mark.parametrize("theory", [TheoryFamily.HF, TheoryFamily.DFT])
+@pytest.mark.parametrize("spin", [SpinTreatment.RHF, SpinTreatment.UHF, SpinTreatment.ROHF])
+def test_spin_combination_is_refused_instead_of_crashing(
+    task: Task, theory: TheoryFamily, spin: SpinTreatment
+) -> None:
+    """Ни одно сочетание не проходит валидацию, чтобы потом упасть внутри ядра.
+
+    Проверка матрицей, а не по отдельным случаям: раньше DFT с открытой
+    оболочкой и ROHF с оптимизацией проходили ``assert_supported``, попадали в
+    ветку RKS/RHF и падали необработанным ``ValueError`` про нечётное число
+    электронов. Пользователь получал аварийный сбой вместо честного
+    «недоступно» (§54 ТЗ), а восемь ячеек из восемнадцати вели себя так.
+
+    Утверждение здесь ровно то, которое отличает честный отказ от сбоя: ошибка
+    обязана быть :class:`QuantumLabError`, то есть локализуемой и diagnosable.
+    """
+    engine = ReferenceEngine()
+    spec = _matrix_spec(task, theory, spin)
+
+    unsupported = (theory is TheoryFamily.DFT and spin is not SpinTreatment.RHF) or (
+        spin is SpinTreatment.ROHF and task is not Task.SINGLE_POINT
+    )
+    if unsupported:
+        with pytest.raises(CombinationUnavailableError):
+            engine.assert_supported(spec)
+    else:
+        assert engine.assert_supported(spec) == "sto-3g"

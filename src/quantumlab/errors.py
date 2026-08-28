@@ -28,6 +28,7 @@ class ErrorCode(StrEnum):
     """
 
     METHOD_NOT_AVAILABLE = "engine.method_not_available"
+    COMBINATION_UNAVAILABLE = "engine.combination_unavailable"
     BASIS_NOT_FOUND = "registry.basis_not_found"
     FUNCTIONAL_NOT_FOUND = "registry.functional_not_found"
     MOLECULE_EMPTY = "molecule.empty"
@@ -208,6 +209,26 @@ class UnsupportedStructureFormatError(QuantumLabError):
         """Создаёт ошибку для формата ``name``."""
         super().__init__({"format": name})
         self.format_name = name
+
+
+class CombinationUnavailableError(QuantumLabError):
+    """Отдельные части метода реализованы, но их сочетание — нет (§54 ТЗ).
+
+    Отдельный код нужен потому, что диагностика здесь иная, чем у
+    :class:`MethodNotAvailableError`. Примеры: ROHF считает энергию, но
+    аналитических градиентов у него нет, поэтому оптимизация геометрии
+    недоступна; UHF реализован для HF, но не для DFT. Сообщение «метод не
+    реализован» в обоих случаях было бы неправдой: реализована часть, и
+    пользователю важно знать, какая именно и чего не хватает.
+    """
+
+    code = ErrorCode.COMBINATION_UNAVAILABLE
+
+    def __init__(self, combination: str, reason: str) -> None:
+        """Создаёт ошибку для сочетания ``combination`` по причине ``reason``."""
+        super().__init__({"combination": combination, "reason": reason})
+        self.combination = combination
+        self.reason = reason
 
 
 class MethodNotAvailableError(QuantumLabError):
