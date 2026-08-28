@@ -49,6 +49,18 @@ REFERENCE_DIR = Path(__file__).resolve().parent / "reference"
 #: Относительная деградация wall time, после которой прогон считается красным.
 WALL_TOLERANCE = 0.10
 
+#: Абсолютный нижний порог допуска для времени, в секундах.
+#:
+#: Относительный допуск теряет смысл, когда измеряемая величина сравнима с
+#: шумом стенда. На 2-CPU песочнице повторный прогон **того же самого кода**
+#: дал систематическое смещение +0.026…+0.049 c по всем пяти кейсам набора
+#: `small` (измерено 2026-08-28, медианы трёх прогонов) — то есть больше, чем
+#: 10 % от 0.3 c. Без порога бенчмарк рапортовал «ДЕГРАДАЦИЯ» на неизменённом
+#: коде, а такие сигналы приучают игнорировать и настоящие. Порог 0.1 c
+#: выбран как удвоенное наблюдаемое смещение; замедление вдвое он по-прежнему
+#: ловит (0.31 c → 0.62 c), а мелкий дрейф стенда — нет.
+TOLERANCE_FLOOR_S = 0.10
+
 
 # --------------------------------------------------------------------------- #
 # Схема
@@ -174,8 +186,13 @@ def describe_environment() -> dict[str, Any]:
 def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
     """Выполняет расчёт и возвращает времена этапов и итерации SCF.
 
-    Итерации снимаются с прогревающего SCF, а не отдельным расчётом: для
-    оптимизации лишний полный прогон стоил бы столько же, сколько измерение.
+    Расчёт выполняется **ровно один раз**. Итерации SCF берутся из результата
+    движка, а не из отдельного прогона: раньше здесь сначала запускался
+    `run_rhf`, а потом `ReferenceEngine.run`, и бенчмарк измерял двойную
+    работу — на бензоле/6-31G 12.4 c сборки интегралов выполнялись дважды,
+    из-за чего wall-время кейса было 27.7 c при 14.0 c реального расчёта.
+    Отдельный SCF остаётся только в ветви `measure_gradient`, где он и есть
+    измеряемая работа: градиенту нужен сошедшийся `ScfResult`.
     """
     from quantumlab.domain.molecule import Molecule
     from quantumlab.domain.spec import (
@@ -203,19 +220,20 @@ def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
         optimization=OptimizationSpec(**case.spec.get("optimization", {})),
     )
 
-    basis = build_basis(method.basis, molecule)
-    scf = run_rhf(basis, molecule)
-    payload: dict[str, object] = {"scf_iterations": scf.iterations}
     if case.measure_gradient:
+        basis = build_basis(method.basis, molecule)
+        scf = run_rhf(basis, molecule)
         rhf_gradient(basis, molecule, scf)
-        payload["stages"] = {}
+        payload: dict[str, object] = {"scf_iterations": scf.iterations, "stages": {}}
         return payload
 
     result = ReferenceEngine().run(
         EngineRequest(job_id=f"benchmark-{case.id}", molecule=molecule, spec=spec)
     )
-    payload["stages"] = {record.stage: record.wall_seconds for record in result.timings}
-    return payload
+    return {
+        "scf_iterations": result.scf_iterations,
+        "stages": {record.stage: record.wall_seconds for record in result.timings},
+    }
 
 
 def _worker(case_id: str) -> int:
@@ -227,7 +245,6 @@ def _worker(case_id: str) -> int:
 
 def measure(case: BenchmarkCase) -> tuple[Summary, dict[str, float]]:
     """Серия прогонов кейса в отдельных процессах; прогрев отбрасывается."""
-    """Серия прогонов в отдельных процессах; прогрев отбрасывается."""
     measurements: list[Measurement] = []
     stages: dict[str, float] = {}
     iterations = -1
@@ -294,15 +311,40 @@ def load_reference(suite: str) -> Reference | None:
     return Reference.model_validate_json(path.read_text(encoding="utf-8"))
 
 
-def compare(summary: Summary, reference: Reference | None) -> list[str]:
-    """Строки расхождений с эталоном; деградация больше допуска помечается."""
-    if reference is None:
-        return ["    эталона нет — прогон только записывает числа"]
-    entries = reference.cases.get(summary.case_id)
-    if entries is None:
-        return [f"    в эталоне нет кейса {summary.case_id}"]
+#: Метрики времени, для которых действует абсолютный нижний порог допуска.
+#: Память и число итераций измеряются без такого шума, поэтому порог к ним
+#: не применяется.
+_TIME_METRICS = frozenset({"wall_s", "cpu_s"})
 
-    lines: list[str] = []
+
+def _allowance(metric: str, entry: ReferenceEntry) -> float:
+    """Абсолютный допуск метрики: относительный, но не ниже шума стенда.
+
+    Единственное место, где решается, что считать деградацией: ``compare``
+    печатает строку по этому числу, ``degraded`` возвращает код выхода по нему
+    же. Два мнения об одном пороге разошлись бы — отчёт говорил бы «✓», а
+    процесс завершался бы ненулевым кодом.
+    """
+    relative = entry.tolerance * entry.value
+    if metric in _TIME_METRICS:
+        return max(relative, TOLERANCE_FLOOR_S)
+    return relative
+
+
+def _deviations(
+    summary: Summary, reference: Reference
+) -> list[tuple[str, float, ReferenceEntry, float]]:
+    """Метрики кейса, которые есть в эталоне: ``(имя, получено, эталон, допуск)``.
+
+    Один обход для отчёта и для кода выхода. До этой правки ``compare`` судил о
+    четырёх метриках, а ``degraded`` — только о ``wall_s``, и расхождение числа
+    итераций печатало «ДЕГРАДАЦИЯ» при нулевом коде выхода: отчёт красный,
+    CI зелёный. Число итераций — содержательный сигнал, а не шум: при молча
+    ослабленном пороге сходимости энергия может совпасть до 8 знаков, а
+    итераций станет меньше.
+    """
+    entries = reference.cases.get(summary.case_id, {})
+    out: list[tuple[str, float, ReferenceEntry, float]] = []
     for metric, obtained in (
         ("wall_s", summary.wall_s),
         ("cpu_s", summary.cpu_s),
@@ -310,27 +352,48 @@ def compare(summary: Summary, reference: Reference | None) -> list[str]:
         ("scf_iterations", float(summary.scf_iterations)),
     ):
         entry = entries.get(metric)
-        if entry is None or obtained < 0:
+        if entry is None or obtained < 0 or entry.value == 0:
             continue
-        if entry.value == 0:
-            continue
+        out.append((metric, obtained, entry, _allowance(metric, entry)))
+    return out
+
+
+def compare(summary: Summary, reference: Reference | None) -> list[str]:
+    """Строки расхождений с эталоном; деградация больше допуска помечается."""
+    if reference is None:
+        return ["    эталона нет — прогон только записывает числа"]
+    if summary.case_id not in reference.cases:
+        return [f"    в эталоне нет кейса {summary.case_id}"]
+
+    lines: list[str] = []
+    for metric, obtained, entry, allowed in _deviations(summary, reference):
         relative = (obtained - entry.value) / entry.value
-        flag = "✓" if relative <= entry.tolerance else "✗ ДЕГРАДАЦИЯ"
+        # Допуск печатается так, как он применён: для медленных кейсов это
+        # относительный порог, для быстрых — абсолютный, и читатель видит,
+        # какой именно сработал.
+        limit = f"{allowed / entry.value:+.0%}"
+        if metric in _TIME_METRICS and allowed > entry.tolerance * entry.value:
+            limit += f" (= {TOLERANCE_FLOOR_S:g} c)"
+        flag = "✓" if obtained - entry.value <= allowed else "✗ ДЕГРАДАЦИЯ"
         lines.append(
             f"    {metric}: {obtained:.4g} (эталон {entry.value:.4g}, "
-            f"{relative:+.1%}, допуск {entry.tolerance:+.0%}) {flag}"
+            f"{relative:+.1%}, допуск {limit}) {flag}"
         )
     return lines
 
 
 def degraded(summary: Summary, reference: Reference | None) -> bool:
-    """True, если wall time вышел за допуск эталона."""
+    """True, если хотя бы одна метрика вышла за допуск эталона.
+
+    Те же самые числа, что печатает ``compare``: если в отчёте есть
+    «ДЕГРАДАЦИЯ», процесс обязан завершиться ненулевым кодом.
+    """
     if reference is None:
         return False
-    entry = reference.cases.get(summary.case_id, {}).get("wall_s")
-    if entry is None or entry.value <= 0:
-        return False
-    return (summary.wall_s - entry.value) / entry.value > entry.tolerance
+    return any(
+        obtained - entry.value > allowed
+        for _, obtained, entry, allowed in _deviations(summary, reference)
+    )
 
 
 # --------------------------------------------------------------------------- #
