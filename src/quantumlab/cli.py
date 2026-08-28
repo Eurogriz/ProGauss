@@ -222,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "run":
             return _command_run(args, registry, locale)
         if args.command == "job":
-            return _command_job(args, locale)
+            return _command_job(args, registry, locale)
     except QuantumLabError as error:
         print(f"{t('cli.error.header', locale)}: {error.explain(locale)}", file=sys.stderr)
         return 2
@@ -349,7 +349,24 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
 
     store.update(job.id, lambda item: item.transition_to(JobStatus.QUEUED, actor="cli"))
     print(t("cli.job.queued", locale, id=job.id))
+    return _execute_job(store, job.id, registry, locale)
 
+
+def _execute_job(
+    store: LocalJobStore, job_id: str, registry: CapabilityRegistry, locale: str
+) -> int:
+    """Исполняет задание и печатает итог.
+
+    Общий путь для ``run`` и ``job retry``. Держать две копии исполнения значило
+    бы, что они разойдутся, и повтор считался бы иначе, чем первый запуск.
+    Молекула перечитывается из хранилища: повтор обязан работать с той же
+    структурой, что и исходное задание, а не с той, что лежит в аргументах CLI.
+    """
+    job = store.load(job_id)
+    molecule = Molecule.from_xyz(
+        store.molecule_path(job_id).read_text(encoding="utf-8"), name=job.name
+    )
+    spec = job.spec
     engine = ReferenceEngine(registry)
 
     # Честная проверка доступности ДО запуска (§54 ТЗ): вместо имитации расчёта
@@ -464,7 +481,7 @@ def _mark_finished(job: Job, result_uri: str, status: JobStatus) -> None:
     job.transition_to(status, actor="cli")
 
 
-def _command_job(args: argparse.Namespace, locale: str) -> int:
+def _command_job(args: argparse.Namespace, registry: CapabilityRegistry, locale: str) -> int:
     store = LocalJobStore(args.data_dir)
     command: str = args.job_command
 
@@ -501,6 +518,12 @@ def _command_job(args: argparse.Namespace, locale: str) -> int:
             print(t("cli.job.cancelled", locale, id=job_id))
             return 0
         if command == "resume":
+            # Контрольные точки не пишутся, поэтому продолжать не с чего.
+            # Прежняя версия просто переводила статус в RUNNING и печатала
+            # «Продолжен» — то есть сообщала о расчёте, которого не существует
+            # (§54 ТЗ). Проверка стоит до смены статуса: когда запись чекпоинтов
+            # появится, эта команда заработает без переделки.
+            store.load(job_id).ensure_resumable()
             job = store.update(
                 job_id, lambda item: item.transition_to(JobStatus.RUNNING, actor="cli")
             )
@@ -509,7 +532,10 @@ def _command_job(args: argparse.Namespace, locale: str) -> int:
         if command == "retry":
             job = store.update(job_id, lambda item: item.retry(actor="cli"))
             print(t("cli.job.retried", locale, id=job.id, attempt=job.attempt))
-            return 0
+            # Вернуть в очередь и на этом остановиться значило бы сообщить
+            # «повтор запущен», ничего не запустив: отдельного демона нет, CLI
+            # исполняет расчёты синхронно. Поэтому очередь обрабатывается здесь.
+            return _execute_job(store, job.id, registry, locale)
     except LookupError:
         print(t("cli.job.not_found", locale, id=job_id, store=str(store.root)), file=sys.stderr)
         return 2

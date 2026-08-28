@@ -34,6 +34,7 @@ class CapabilityKind(StrEnum):
     DISPERSION = "dispersion"
     SCF = "scf"
     OPTIMIZER = "optimizer"
+    JOB = "job"
 
 
 class Availability(StrEnum):

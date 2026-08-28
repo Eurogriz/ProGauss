@@ -308,6 +308,19 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
     ("fractional_occupations", False, "Дробные занятия не реализованы."),
 )
 
+#: Возможности диспетчера заданий. Контрольная точка заявлена отдельно от
+#: повтора: повтор выполняется, а продолжать прерванный расчёт не с чего —
+#: чекпоинты не пишутся. Разделять их нужно, чтобы «Продолжить расчёт» (§14 ТЗ)
+#: не выглядело доступным там, где его нет.
+_JOB_OPTIONS: tuple[tuple[str, bool, str], ...] = (
+    ("retry", True, ""),
+    (
+        "checkpoint",
+        False,
+        "Контрольные точки не пишутся, поэтому прерванный расчёт нельзя продолжить.",
+    ),
+)
+
 #: Параметры оптимизатора. ``hessian_update`` объявлен в спецификации как
 #: ``bfgs|bofill|none``, но движок всегда применяет BFGS — поэтому bofill и none
 #: заявлены как нереализованные: иначе запрос «обновляй по Бофиллу» молча
@@ -526,6 +539,20 @@ def default_registry() -> CapabilityRegistry:
             Capability(
                 id=f"scf:{name}",
                 kind=CapabilityKind.SCF,
+                name=name,
+                availability=(
+                    Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
+                ),
+                since_version=__version__ if available else None,
+                limitations=() if available else (note,),
+            )
+        )
+
+    for name, available, note in _JOB_OPTIONS:
+        capabilities.append(
+            Capability(
+                id=f"job:{name}",
+                kind=CapabilityKind.JOB,
                 name=name,
                 availability=(
                     Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED

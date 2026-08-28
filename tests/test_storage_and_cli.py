@@ -14,7 +14,15 @@ import pytest
 
 from quantumlab.cli import main
 from quantumlab.domain.job import Job
-from quantumlab.domain.spec import CalculationSpec, PrecisionProfile, Task
+from quantumlab.domain.molecule import Molecule
+from quantumlab.domain.spec import (
+    CalculationSpec,
+    MethodSpec,
+    PrecisionProfile,
+    Task,
+    TheoryFamily,
+)
+from quantumlab.engine.registry import default_registry
 from quantumlab.errors import InvalidJobTransitionError
 from quantumlab.jobs.state_machine import JobStatus
 from quantumlab.storage.local_jobs import LocalJobStore
@@ -394,7 +402,11 @@ def test_cli_job_lifecycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -
     assert main([*base, "job", "cancel", job_id]) == 0
     assert store.load(job_id).status is JobStatus.CANCELLED
 
-    assert main([*base, "job", "retry", job_id]) == 0
+    # Повтор теперь действительно исполняет задание, а не только меняет статус.
+    # Метод (IRC) недоступен, поэтому возврат ненулевой. Задание остаётся в
+    # очереди — это правда: оно выполнится, когда появится соответствующее ядро.
+    assert main([*base, "job", "retry", job_id]) == 1
+    assert "недоступен" in capsys.readouterr().out + capsys.readouterr().err
     reloaded = store.load(job_id)
     assert reloaded.status is JobStatus.QUEUED
     assert reloaded.attempt == 1
@@ -440,3 +452,81 @@ def test_cli_rejects_unknown_task(tmp_path: Path, capsys: pytest.CaptureFixture[
     )
     assert code == 2
     assert "Неизвестная задача" in capsys.readouterr().err
+
+
+def _queued_job(
+    tmp_path: Path, *, final: JobStatus = JobStatus.FAILED
+) -> tuple[LocalJobStore, str]:
+    """Создаёт задание и доводит его до ``final`` штатными переходами."""
+    store = LocalJobStore(tmp_path)
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    spec = CalculationSpec(
+        task=Task.SINGLE_POINT,
+        method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
+    )
+    job = Job(
+        name="water-test",
+        project_id="p",
+        owner="o",
+        spec=spec,
+        molecule_uri="file:///placeholder",
+        molecule_hash=molecule.structure_hash(),
+        resources=spec.resources,
+    )
+    store.store_molecule(job.id, molecule.to_xyz())
+    store.save(job.model_copy(update={"molecule_uri": f"file://{store.molecule_path(job.id)}"}))
+    path: tuple[JobStatus, ...] = (JobStatus.QUEUED, JobStatus.STARTING, JobStatus.RUNNING)
+    if final is JobStatus.PAUSED:
+        path = (*path, JobStatus.PAUSED)
+    elif final is JobStatus.FAILED:
+        path = (*path, JobStatus.FAILED)
+    for status in path:
+        _advance(store, job.id, status)
+    return store, job.id
+
+
+def _advance(store: LocalJobStore, job_id: str, status: JobStatus) -> None:
+    """Один переход состояния.
+
+    Вынесен из цикла намеренно: замыкание с аргументом по умолчанию mypy не
+    выводит, а захватывать переменную цикла напрямую значило бы привязать все
+    вызовы к последнему значению.
+    """
+    store.update(job_id, lambda item: item.transition_to(status, actor="test"))
+
+
+def test_job_retry_actually_reruns_the_calculation(tmp_path: Path) -> None:
+    """Повтор выполняет расчёт, а не только меняет статус.
+
+    Прежняя реализация возвращала задание в очередь и печатала «повтор
+    поставлен», но очередь никто не обрабатывал: задание висело в QUEUED без
+    результата. Сообщение об успешном повторе при отсутствии расчёта — это
+    ровно тот класс неправды, который запрещает §54 ТЗ.
+    """
+    store, job_id = _queued_job(tmp_path)
+    assert store.load(job_id).status is JobStatus.FAILED
+
+    code = main(["--data-dir", str(tmp_path), "job", "retry", job_id])
+
+    after = store.load(job_id)
+    assert code == 0
+    assert after.attempt == 1
+    assert after.status is JobStatus.COMPLETED
+    assert after.result_uri is not None
+    assert Path(store.result_path(job_id)).exists()
+
+
+def test_job_resume_is_refused_while_checkpoints_do_not_exist(tmp_path: Path) -> None:
+    """Без контрольной точки «продолжить» честно отказывает.
+
+    Прежняя реализация переводила задание в RUNNING и печатала «Продолжен»,
+    хотя не запускала ничего и продолжать было не с чего: пользователь видел бы
+    расчёт, которого не существует. Статус обязан остаться прежним.
+    """
+    store, job_id = _queued_job(tmp_path, final=JobStatus.PAUSED)
+
+    code = main(["--data-dir", str(tmp_path), "job", "resume", job_id])
+
+    assert code == 2
+    assert store.load(job_id).status is JobStatus.PAUSED, "статус не должен меняться"
+    assert not default_registry().get("job:checkpoint").availability.is_usable

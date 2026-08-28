@@ -167,6 +167,7 @@ def test_implemented_capabilities_match_the_verified_surface(
         # D3/D4 в реестре есть и помечены как нереализованные.
         "dispersion:none",
         "format:xyz",
+        "job:retry",
         "optimizer:frozen_atoms",
         "optimizer:hessian_update:bfgs",
         "scf:damping",
@@ -229,6 +230,7 @@ def test_snapshot_groups_by_kind(registry: CapabilityRegistry) -> None:
         "spin",
         "scf",
         "optimizer",
+        "job",
     }
     assert snapshot["backend"][0]["availability"] == "not_implemented"
     # Системы координат и спин — отдельные категории: раздел «База методов» в GUI
