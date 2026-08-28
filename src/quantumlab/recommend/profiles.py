@@ -202,7 +202,15 @@ def resolve_profile(
 
     decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
 
-    grid_preset, scf = _numerics(profile, task, is_large)
+    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities)
+    if stability_omitted:
+        decisions.append(
+            Decision(
+                "stability_analysis",
+                "off",
+                "profile.decision.stability_unavailable",
+            )
+        )
     decisions.append(Decision("grid", grid_preset.value, "profile.decision.grid"))
     decisions.append(
         Decision("scf_threshold", f"{scf.energy_threshold:.0e}", "profile.decision.scf_threshold")
@@ -298,7 +306,12 @@ def _base_choice(
     )
 
 
-def _numerics(profile: PrecisionProfile, task: Task, is_large: bool) -> tuple[GridPreset, ScfSpec]:
+def _numerics(
+    profile: PrecisionProfile,
+    task: Task,
+    is_large: bool,
+    capabilities: CapabilityRegistry,
+) -> tuple[GridPreset, ScfSpec, bool]:
     """Сетка и пороги SCF.
 
     Частотные расчёты требуют более жёстких порогов и мелкой сетки: численное
@@ -327,14 +340,21 @@ def _numerics(profile: PrecisionProfile, task: Task, is_large: bool) -> tuple[Gr
     if is_large:
         grid = GridPreset.FINE
 
+    # Проверка устойчивости волновой функции входит в обещание точных профилей,
+    # но ядро может её не реализовывать. Запросить и получить отказ значило бы,
+    # что подборщик выдаёт спецификацию, которую движок не принимает — то есть
+    # «подобранные параметры» неработоспособны. Поэтому сверяемся с реестром,
+    # а пропуск объясняем отдельным решением (§8 ТЗ).
+    wants_stability = profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH)
+    has_stability = capabilities.is_available("scf:stability_analysis")
     scf = ScfSpec(
         max_iterations=80 if profile is PrecisionProfile.SCREENING else 128,
         energy_threshold=energy_threshold,
         density_threshold=density_threshold,
-        stability_analysis=profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH),
+        stability_analysis=wants_stability and has_stability,
         damping=0.2 if profile is PrecisionProfile.RESEARCH else 0.0,
     )
-    return grid, scf
+    return grid, scf, wants_stability and not has_stability
 
 
 def _integral_threshold(profile: PrecisionProfile, is_large: bool) -> float:

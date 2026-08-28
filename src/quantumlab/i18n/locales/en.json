@@ -197,6 +197,7 @@
   "profile.decision.memory": "Memory per calculation: {value}",
   "profile.decision.method": "Method selected: {value}",
   "profile.decision.scf_threshold": "SCF convergence threshold: {value}",
+  "profile.decision.stability_unavailable": "The wavefunction stability check this profile calls for is not implemented yet — the calculation ran without it",
   "profile.decision.threads": "Thread count: {value}",
   "profile.high_accuracy.description": "Larger basis and tighter thresholds for publication-quality energies and geometries.",
   "profile.high_accuracy.name": "High accuracy",

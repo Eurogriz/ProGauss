@@ -202,8 +202,68 @@ def test_every_decision_is_localized_in_both_languages(water: Molecule) -> None:
         assert all(line and "{" not in line for line in rendered)
 
 
-def test_research_profile_enables_stability_analysis_and_damping(water: Molecule) -> None:
+def test_research_profile_tightens_numerics_and_damps(water: Molecule) -> None:
+    """Исследовательский профиль ужесточает численные параметры.
+
+    Проверка устойчивости сюда больше не входит безусловно: ядро её не
+    реализует, и включить её в спецификацию значило бы сделать профиль
+    незапускаемым. Ожидание читается из реестра, а не зашито: когда возможность
+    появится, тест сам начнёт требовать ``True``.
+    """
     resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
-    assert resolution.spec.scf.stability_analysis is True
+    available = default_registry().is_available("scf:stability_analysis")
+    assert resolution.spec.scf.stability_analysis is available
     assert resolution.spec.scf.damping > 0.0
     assert resolution.spec.scf.energy_threshold <= 1e-10
+
+
+def test_every_profile_produces_a_spec_the_engine_accepts(water: Molecule) -> None:
+    """Подобранные параметры обязаны быть работоспособными.
+
+    Инвариант, а не проверка одного случая: подборщик и движок развиваются
+    независимо, и расхождение между ними означает, что «подобранные параметры»
+    отклоняются при запуске. Пользователь нажимает «Рассчитать» после выбора
+    точности (§17 ТЗ) и не должен получать отказ от того, что система сама же
+    и подобрала.
+
+    Регрессия, которую этот тест ловит, уже случалась: ядро начало отклонять
+    ``stability_analysis``, а точные профили его запрашивали — и два профиля из
+    четырёх перестали запускаться.
+    """
+    from quantumlab.engine.reference import ReferenceEngine
+
+    engine = ReferenceEngine()
+    supported = {Task(name) for name in engine.supported_tasks()}
+
+    checked = 0
+    for profile in PrecisionProfile:
+        for task in supported:
+            resolution = resolve_profile(profile, task=task, molecule=water)
+            assert engine.assert_supported(resolution.spec), (profile, task)
+            checked += 1
+    assert checked == len(list(PrecisionProfile)) * len(supported)
+
+
+def test_unavailable_scf_option_is_reported_as_a_decision(water: Molecule) -> None:
+    """Пропуск нереализованной опции объясняется, а не происходит молча.
+
+    Если профиль обещает проверку устойчивости, а ядро её не делает,
+    пользователь обязан это увидеть: иначе «высокая точность» означала бы
+    нечто иное, чем написано (§8 ТЗ).
+    """
+    from quantumlab.engine.registry import default_registry
+
+    registry = default_registry()
+    if registry.is_available("scf:stability_analysis"):
+        pytest.skip("проверка устойчивости реализована — пропускать нечего")
+    resolution = resolve_profile(
+        PrecisionProfile.HIGH_ACCURACY, task=Task.SINGLE_POINT, molecule=water
+    )
+    assert resolution.spec.scf.stability_analysis is False
+    assert any(decision.parameter == "stability_analysis" for decision in resolution.decisions)
+    rendered = next(
+        decision.render("ru")
+        for decision in resolution.decisions
+        if decision.parameter == "stability_analysis"
+    )
+    assert "не реализована" in rendered

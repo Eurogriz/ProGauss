@@ -197,6 +197,7 @@
   "profile.decision.memory": "Память на расчёт: {value}",
   "profile.decision.method": "Выбран метод {value}",
   "profile.decision.scf_threshold": "Порог сходимости SCF: {value}",
+  "profile.decision.stability_unavailable": "Проверка устойчивости волновой функции, которую предполагает этот профиль, ещё не реализована — расчёт выполнен без неё",
   "profile.decision.threads": "Число потоков: {value}",
   "profile.high_accuracy.description": "Расширенный базис и строгие пороги для публикуемых значений энергий и геометрий.",
   "profile.high_accuracy.name": "Высокая точность",
