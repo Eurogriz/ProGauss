@@ -71,6 +71,7 @@ from quantumlab.engine.scf import (
     spin_population,
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
+from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
 from quantumlab.errors import ScfNotConvergedError
 from quantumlab.version import __version__
 
@@ -197,7 +198,7 @@ class ReferenceEngine:
 
     def supported_tasks(self) -> Sequence[str]:
         """Задачи, которые ядро действительно умеет выполнять."""
-        return (Task.SINGLE_POINT.value, Task.OPTIMIZATION.value)
+        return (Task.SINGLE_POINT.value, Task.OPTIMIZATION.value, Task.FREQUENCIES.value)
 
     # ------------------------------------------------------------------ #
     # Основной вход
@@ -216,6 +217,8 @@ class ReferenceEngine:
         basis_name = self.assert_supported(spec)
         if spec.task is Task.OPTIMIZATION:
             return self._run_optimization(request, basis_name, progress=progress)
+        if spec.task is Task.FREQUENCIES:
+            return self._run_frequencies(request, basis_name, progress=progress)
         return self._run_single_point(request, basis_name, progress=progress)
 
     # ------------------------------------------------------------------ #
@@ -412,6 +415,61 @@ class ReferenceEngine:
     # ------------------------------------------------------------------ #
     # Оптимизация геометрии
     # ------------------------------------------------------------------ #
+    def _run_frequencies(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """Колебательные частоты: численный гессиан из аналитических градиентов.
+
+        Расчёт в одной точке выполняется целиком (со своими проверками качества),
+        а к нему добавляются частоты: дублировать SCF, свойства и проверки ради
+        одной задачи означало бы держать два расходящихся мнения о том же
+        расчёте.
+
+        Частоты имеют смысл только в стационарной точке. Если сила превышает
+        порог, расчёт **не отбрасывается и не подменяется оптимизацией** —
+        пользователь попросил частоты, а не геометрию; вместо этого результат
+        несёт явное предупреждение. То же самое с мнимыми частотами: одна мнимая
+        частота означает седловую точку, и сообщить об этом обязан движок.
+        """
+        spec = request.spec
+        base = self._run_single_point(request, basis_name, progress=progress)
+        _report(progress, 15.0, "frequencies")
+
+        started = time.perf_counter()
+        hessian = numerical_hessian(
+            request.molecule,
+            lambda molecule: _solve_energy_and_gradient(spec, basis_name, molecule)[1],
+        )
+        vibrations = vibrational_analysis(hessian, request.molecule)
+        _, gradient = _solve_energy_and_gradient(spec, basis_name, request.molecule)
+        timings = [*base.timings, _timing("hessian", started)]
+
+        warnings = list(base.warnings)
+        max_force = float(np.max(np.abs(gradient)))
+        if max_force > _STATIONARY_FORCE_TOLERANCE:
+            warnings.append(
+                f"Частоты посчитаны вне стационарной точки: максимальная сила "
+                f"{max_force:.3e} э/бор больше порога "
+                f"{_STATIONARY_FORCE_TOLERANCE:.1e}. Значения не имеют обычного "
+                f"физического смысла — сначала выполните оптимизацию геометрии."
+            )
+        if vibrations.imaginary_frequencies:
+            warnings.append(
+                "Найдены мнимые частоты: "
+                + ", ".join(f"{value:.1f}" for value in vibrations.imaginary_frequencies)
+                + " см⁻¹. Это не минимум, а седловая точка поверхности энергии."
+            )
+        _report(progress, 100.0, "frequencies", modes=len(vibrations.frequencies_cm1))
+
+        return base.model_copy(
+            update={
+                "frequencies_cm1": vibrations.frequencies_cm1,
+                "zero_point_energy_hartree": vibrations.zero_point_energy_hartree,
+                "timings": tuple(timings),
+                "warnings": tuple(warnings),
+            }
+        )
+
     def _run_optimization(
         self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
     ) -> CalculationResult:
@@ -439,25 +497,7 @@ class ReferenceEngine:
         is_uhf = method is not None and method.spin is SpinTreatment.UHF
 
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
-            basis = build_basis(basis_name, molecule)
-            if functional is not None:
-                # Сетка перестраивается на каждой геометрии, чтобы энергия
-                # оставалась той же величиной, что и в расчёте в одной точке.
-                grid = build_grid(molecule, spec.grid.preset)
-                rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
-                _require_converged(rks)
-                gradient = rks_gradient(basis, molecule, rks, grid, functional).gradient
-                total_energy = rks.total_energy
-            elif is_uhf:
-                uhf = run_uhf(basis, molecule, _scf_settings(spec))
-                _require_converged(uhf)
-                gradient = uhf_gradient(basis, molecule, uhf).gradient
-                total_energy = uhf.total_energy
-            else:
-                rhf = run_rhf(basis, molecule, _scf_settings(spec))
-                _require_converged(rhf)
-                gradient = rhf_gradient(basis, molecule, rhf).gradient
-                total_energy = rhf.total_energy
+            total_energy, gradient = _solve_energy_and_gradient(spec, basis_name, molecule)
             done.append(1)
             _report(
                 progress,
@@ -567,6 +607,8 @@ class ReferenceEngine:
         initial_molecule: Molecule | None = None,
         converged: bool | None = None,
         optimization_steps: int | None = None,
+        frequencies_cm1: tuple[float, ...] = (),
+        zero_point_energy_hartree: float | None = None,
     ) -> CalculationResult:
         """Собирает ``CalculationResult``: отпечаток, проверки, окружение.
 
@@ -605,6 +647,8 @@ class ReferenceEngine:
             environment=_environment(),
             final_molecule=final_molecule,
             optimization_steps=optimization_steps,
+            frequencies_cm1=frequencies_cm1,
+            zero_point_energy_hartree=zero_point_energy_hartree,
         )
 
     # ------------------------------------------------------------------ #
@@ -652,6 +696,42 @@ def _timing(stage: str, started: float) -> TimingRecord:
     """Запись времени этапа. CPU-время не измеряется отдельно — один поток."""
     wall = time.perf_counter() - started
     return TimingRecord(stage=stage, wall_seconds=wall, cpu_seconds=wall)
+
+
+#: Порог, ниже которого структуру можно считать стационарной точкой: частоты в
+#: нестационарной точке лишены физического смысла, и об этом надо сказать.
+#: Совпадает с порогом оптимизатора по силе, чтобы оба критерия не расходились.
+_STATIONARY_FORCE_TOLERANCE: float = 4.5e-4
+
+
+def _solve_energy_and_gradient(
+    spec: CalculationSpec, basis_name: str, molecule: Molecule
+) -> tuple[float, np.ndarray]:
+    """Энергия и аналитический градиент в одной точке тем методом, что в спецификации.
+
+    Используется и оптимизацией, и частотами: держать две копии выбора метода
+    означало бы, что они разойдутся, и один путь начнёт считать другим методом.
+    """
+    method = spec.method
+    basis = build_basis(basis_name, molecule)
+    if method is not None and method.theory is TheoryFamily.DFT:
+        if method.functional is None:
+            msg = "DFT-расчёт требует явного обменно-корреляционного функционала."
+            raise ValueError(msg)
+        functional = get_functional(method.functional)
+        # Сетка перестраивается на каждой геометрии, чтобы энергия оставалась той
+        # же величиной, что и в расчёте в одной точке.
+        grid = build_grid(molecule, spec.grid.preset)
+        rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+        _require_converged(rks)
+        return rks.total_energy, rks_gradient(basis, molecule, rks, grid, functional).gradient
+    if method is not None and method.spin is SpinTreatment.UHF:
+        uhf = run_uhf(basis, molecule, _scf_settings(spec))
+        _require_converged(uhf)
+        return uhf.total_energy, uhf_gradient(basis, molecule, uhf).gradient
+    rhf = run_rhf(basis, molecule, _scf_settings(spec))
+    _require_converged(rhf)
+    return rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
 
 
 def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:

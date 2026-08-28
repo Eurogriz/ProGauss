@@ -258,7 +258,7 @@ def test_unimplemented_task_is_rejected_before_queueing(
         "/jobs",
         json={
             "moleculeId": hydrogen_id,
-            "spec": {"task": "frequencies", "method": {"theory": "hf", "basis": "sto-3g"}},
+            "spec": {"task": "irc", "method": {"theory": "hf", "basis": "sto-3g"}},
         },
     )
     assert response.status_code == 501

@@ -87,18 +87,29 @@ def _run(
 # Числа
 # --------------------------------------------------------------------------- #
 def test_supported_tasks_list_only_implemented_ones() -> None:
-    """Ядро заявляет ровно то, что умеет: расчёт в точке и оптимизацию."""
-    assert list(ReferenceEngine().supported_tasks()) == ["single_point", "optimization"]
+    """Ядро заявляет ровно то, что умеет: точка, оптимизация и частоты."""
+    assert list(ReferenceEngine().supported_tasks()) == [
+        "single_point",
+        "optimization",
+        "frequencies",
+    ]
     assert ReferenceEngine().name == ENGINE_NAME
 
 
-def test_frequencies_are_not_claimed() -> None:
-    """Частоты требуют гессиана, которого нет, — в списке задач их быть не должно."""
-    assert "frequencies" not in list(ReferenceEngine().supported_tasks())
+def test_tasks_without_a_kernel_are_not_claimed() -> None:
+    """Задачи без ядра не заявлены и отклоняются до начала вычислений.
+
+    Частоты в этот список больше не входят: гессиан из аналитических градиентов
+    реализован. Примером недоступной задачи служит IRC — для него нужен путь по
+    дну долины, которого нет (§54 ТЗ).
+    """
+    supported = list(ReferenceEngine().supported_tasks())
+    assert "frequencies" in supported
+    assert "irc" not in supported
     with pytest.raises(MethodNotAvailableError):
         ReferenceEngine().assert_supported(
             CalculationSpec(
-                task=Task.FREQUENCIES,
+                task=Task.IRC,
                 method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
             )
         )

@@ -232,7 +232,7 @@ def test_cli_run_warns_instead_of_hiding_basis_scheme(
 def test_cli_run_reports_unavailable_task_honestly(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Частоты требуют гессиана, которого нет: отказ, а не число.
+    """IRC требует пути по дну долины, которого нет: отказ, а не число.
 
     Задание остаётся в очереди — это правда: оно выполнится, когда появится
     соответствующее ядро.
@@ -246,7 +246,7 @@ def test_cli_run_reports_unavailable_task_honestly(
             "run",
             str(WATER),
             "--task",
-            "freq",
+            "irc",
             "--method",
             "hf",
             "--basis",
@@ -266,7 +266,7 @@ def test_cli_run_reports_unavailable_task_honestly(
 def test_cli_run_rejects_unimplemented_functional(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """DFT не реализован, поэтому и функционал недоступен — до создания ядра."""
+    """B3LYP не реализован: запрос отклоняется до создания задания, а не в середине расчёта."""
     code = main(
         [
             "--lang",
@@ -373,12 +373,12 @@ def test_cli_plan_shows_the_coordinate_system_in_expert_mode(
 def test_cli_job_lifecycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Отмена, повтор и журнал состояний на задании, которое ещё не выполнено.
 
-    Берётся задача без ядра (частоты): такое задание честно остаётся в очереди,
+    Берётся задача без ядра (IRC): такое задание честно остаётся в очереди,
     и на нём можно проверять переходы состояний. Реализованный расчёт здесь не
     годится — он выполнился бы и закрыл задание до отмены.
     """
     base = ["--lang", "ru", "--data-dir", str(tmp_path)]
-    main([*base, "run", str(WATER), "--task", "freq", "--method", "hf", "--basis", "sto-3g"])
+    main([*base, "run", str(WATER), "--task", "irc", "--method", "hf", "--basis", "sto-3g"])
     capsys.readouterr()
 
     assert main([*base, "job", "list"]) == 0
@@ -420,7 +420,7 @@ def test_cli_works_in_english(tmp_path: Path, capsys: pytest.CaptureFixture[str]
             "run",
             str(WATER),
             "--task",
-            "freq",
+            "irc",
             "--method",
             "hf",
             "--basis",

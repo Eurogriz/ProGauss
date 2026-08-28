@@ -419,6 +419,18 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
             dipole=f"{result.dipole_debye:.4f}",
         )
     )
+    if result.frequencies_cm1:
+        values = ", ".join(f"{frequency:.1f}" for frequency in result.frequencies_cm1)
+        print("  " + t("cli.run.frequencies", locale, values=values))
+        if result.zero_point_energy_hartree is not None:
+            print(
+                "  "
+                + t(
+                    "cli.run.zpe",
+                    locale,
+                    zpe=f"{result.zero_point_energy_hartree:.8f}",
+                )
+            )
     if result.warnings:
         print(f"  {t('cli.run.warnings', locale)}")
         for warning in result.warnings:

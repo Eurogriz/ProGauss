@@ -124,10 +124,10 @@ def test_assert_available_distinguishes_error_types(registry: CapabilityRegistry
         registry.assert_available("basis:unobtainium-qzvp")
     with pytest.raises(FunctionalNotFoundError):
         registry.assert_available("functional:b3lyp")
-    # optimization реализована, поэтому примером недоступной задачи служат
-    # частоты: для них нужен гессиан, которого нет.
+    # single_point, optimization и frequencies реализованы, поэтому примером
+    # недоступной задачи служит IRC: для неё нужен гессиан и путь по дну долины.
     with pytest.raises(MethodNotAvailableError):
-        registry.assert_available("task:frequencies")
+        registry.assert_available("task:irc")
 
 
 def test_unknown_capability_is_treated_as_unavailable(registry: CapabilityRegistry) -> None:
@@ -174,7 +174,10 @@ def test_implemented_capabilities_match_the_verified_surface(
     # coordinates:cartesian partial, а внутренние координаты не реализованы.
     assert registry.get("coordinates:cartesian").availability is Availability.PARTIAL
     assert not registry.is_available("coordinates:redundant_internal")
-    assert not registry.is_available("task:frequencies")
+    # Частоты доступны, но partial: гессиан численный, а не аналитический.
+    assert registry.get("task:frequencies").availability is Availability.PARTIAL
+    assert registry.is_available("task:frequencies")
+    assert not registry.is_available("task:irc")
     assert registry.get("format:xyz").describe("ru") == (
         "Референсная реализация: проверена на верификационном наборе."
     )

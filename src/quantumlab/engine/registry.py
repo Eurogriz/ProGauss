@@ -208,8 +208,8 @@ _SPINS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
         "uhf",
         Availability.PARTIAL,
         (
-            "Задачи: энергия в точке и оптимизация геометрии (частоты и "
-            "переходные состояния требуют гессиана).",
+            "Задачи: энергия в точке, оптимизация геометрии и частоты "
+            "(переходные состояния и сканирования не реализованы).",
             "Оптимизация — только в декартовых координатах.",
             "Спиновое загрязнение возможно: значение <S^2> выводится в "
             "результат и в предупреждения, а не замалчивается.",
@@ -251,8 +251,8 @@ def _method_limitations(name: str) -> tuple[str, ...]:
     if name == "hf":
         return (
             "Только RHF: нечётное число электронов отклоняется.",
-            "Задачи: только энергия в точке и оптимизация геометрии "
-            "(частоты, переходные состояния и сканирования требуют гессиана).",
+            "Задачи: энергия в точке, оптимизация геометрии и частоты "
+            "(переходные состояния и сканирования не реализованы).",
             "Оптимизация — только в декартовых координатах.",
         )
     if name == "dft":
@@ -313,18 +313,35 @@ def default_registry() -> CapabilityRegistry:
 
     for task in Task:
         # single_point проверен сверкой с PySCF (до 1e-6 Eh), optimization —
-        # сверкой аналитического градиента с конечными разностями (до 1e-6 э/бор).
-        # Остальные задачи требуют гессиана и производных высших порядков.
-        implemented = task in (Task.SINGLE_POINT, Task.OPTIMIZATION)
+        # сверкой аналитического градиента с конечными разностями (до 1e-6 э/бор),
+        # frequencies — сверкой гессиана с аналитическим гессианом PySCF
+        # (до 1e-6 э/бор²) и совпадением самих частот.
+        if task in (Task.SINGLE_POINT, Task.OPTIMIZATION):
+            availability = Availability.IMPLEMENTED
+        elif task is Task.FREQUENCIES:
+            # partial, а не implemented: гессиан численный (центральные разности
+            # аналитического градиента), и задача доступна только тем методам,
+            # у которых аналитический градиент есть.
+            availability = Availability.PARTIAL
+        else:
+            availability = Availability.NOT_IMPLEMENTED
+        limitations: tuple[str, ...] = ()
+        if task is Task.FREQUENCIES:
+            limitations = (
+                "Гессиан численный: центральные разности аналитического градиента, "
+                "а не аналитические вторые производные.",
+                "Доступны только методы с аналитическим градиентом: RHF, UHF, "
+                "RKS со SVWN/PBE/PBE0.",
+                "Стоимость — 6N расчётов градиента, поэтому задача заметно дороже одноточечной.",
+            )
         capabilities.append(
             Capability(
                 id=f"task:{task.value}",
                 kind=CapabilityKind.TASK,
                 name=task.value,
-                availability=(
-                    Availability.IMPLEMENTED if implemented else Availability.NOT_IMPLEMENTED
-                ),
-                since_version=__version__ if implemented else None,
+                availability=availability,
+                since_version=__version__ if availability.is_usable else None,
+                limitations=limitations,
             )
         )
 
