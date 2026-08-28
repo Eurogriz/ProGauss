@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 from typing import Any
 
@@ -28,12 +29,23 @@ import numpy as np
 import pytest
 
 from quantumlab.domain.molecule import Molecule
+from quantumlab.domain.spec import GridPreset
 from quantumlab.engine.basis import build_basis
 from quantumlab.engine.constants import angstrom_to_bohr
+from quantumlab.engine.dft import run_rks
+from quantumlab.engine.functional import get_functional
+from quantumlab.engine.gradients import rks_gradient
 from quantumlab.engine.integrals import build_dipole_integrals, build_overlap
+from quantumlab.engine.quadrature import build_grid
 from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
 
 pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
+
+#: ``importorskip`` тянет только верхний пакет: ``pyscf.gto`` и ``pyscf.scf`` подхватываются
+#: как побочный эффект, а ``pyscf.dft`` — нет. Статический ``import pyscf.dft``
+#: заставил бы mypy искать у PySCF заглушки типов, которых нет, поэтому
+#: подмодуль регистрируется через ``importlib``.
+importlib.import_module("pyscf.dft")
 
 pytestmark = pytest.mark.scientific
 
@@ -258,3 +270,40 @@ def test_uhf_orbital_energies_match_pyscf() -> None:
     np.testing.assert_allclose(
         np.sort(ours.beta_energies), np.sort(reference.mo_energy[1]), atol=1e-6
     )
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs"),
+    [("svwn", "SVWN"), ("pbe", "PBE"), ("pbe0", "PBE0")],
+)
+def test_dft_nuclear_gradient_matches_pyscf(ours: str, theirs: str) -> None:
+    """Аналитический ядерный градиент RKS против независимого оракула.
+
+    Конечные разности проверяют градиент против нашей же энергии: они ловят
+    ошибку в формуле, но не в самой энергии. PySCF считает градиент своим кодом
+    и своей сеткой, поэтому совпадение до ~1e-06 (разница квадратур) подтверждает
+    и формулу, и её реализацию.
+
+    ``grid_response=False`` у PySCF соответствует нашей модели: сетка считается
+    неподвижной в пространстве. При ``True`` расхождение растёт лишь на
+    2.5e-08 — 3.8e-08, то есть отклик весов Беке мал по сравнению с разницей
+    квадратурных сеток.
+    """
+    molecule = _water()
+    functional = get_functional(ours)
+    grid = build_grid(molecule, GridPreset.ULTRAFINE)
+    basis = build_basis("sto-3g", molecule)
+    result = run_rks(basis, molecule, functional, grid=grid)
+    ours_gradient = rks_gradient(basis, molecule, result, grid, functional).gradient
+
+    reference = pyscf.dft.RKS(_pyscf_molecule(molecule, "STO-3G"))
+    reference.xc = theirs
+    reference.grids.atom_grid = (120, 974)
+    reference.conv_tol = 1e-12
+    reference.run()
+    gradient = reference.nuc_grad_method()
+    gradient.grid_response = False
+    theirs_gradient = np.asarray(gradient.kernel())
+
+    deviation = float(np.max(np.abs(ours_gradient - theirs_gradient)))
+    assert deviation < 5e-6, deviation

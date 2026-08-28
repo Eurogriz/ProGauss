@@ -118,6 +118,109 @@ def evaluate_basis_with_gradients(
     return values, gradients
 
 
+def evaluate_basis_hessian_for_center(
+    basis: BasisSet, molecule: Molecule, points: np.ndarray, center: int
+) -> np.ndarray:
+    """Гессианы базисных функций заданного центра, форма ``(n_points, n_bf_A, 3, 3)``.
+
+    Нужны для обменно-корреляционного вклада в градиент GGA: производная
+    ``σ = |∇ρ|²`` по координате ядра содержит ``∂_a∇φ_μ``. Возвращаются только
+    функции выбранного центра и только он — полный тензор по всем функциям на
+    ультрамелкой сетке занял бы сотни мегабайт, а в градиент он входит
+    поатомно.
+
+    Производная берётся дважды по правилу произведения:
+
+    ``∂_b∂_a φ = (∂_b∂_a P)·C + (∂_a P)(∂_b C) + (∂_b P)(∂_a C) + P·(∂_b∂_a C)``
+
+    где ``P`` — угловой многочлен, ``C`` — сжатая радиальная часть. Для
+    экспоненты ``∂_b∂_a C = −2δ_ab Σ c_i ζ_i e^{−ζ_i r²} + 4Δ_aΔ_b Σ c_i ζ_i² e^{−ζ_i r²}``.
+    """
+    from quantumlab.engine.constants import angstrom_to_bohr
+
+    centers = np.array(
+        [[angstrom_to_bohr(value) for value in atom.position] for atom in molecule.atoms]
+    )
+    n_points = points.shape[0]
+    columns: list[np.ndarray] = []
+    for shell in basis.shells:
+        if shell.center != center:
+            continue
+        offset = centers[shell.center]
+        delta = points - offset[None, :]
+        distance_squared = np.sum(delta * delta, axis=1)
+        exponents = np.asarray(shell.exponents)
+        coefficients = np.asarray(shell.coefficients)
+        radial = np.zeros((shell.n_primitives, n_points))
+        for index, exponent in enumerate(exponents):
+            radial[index] = np.exp(-exponent * distance_squared)
+        contracted = coefficients @ radial
+        radial_first = (coefficients * exponents) @ radial
+        radial_second = (coefficients * exponents**2) @ radial
+        scales = shell.component_scales
+        for component, powers in enumerate(cartesian_powers(shell.angular_momentum)):
+            angular = np.ones(n_points)
+            for axis, power in enumerate(powers):
+                if power:
+                    angular *= delta[:, axis] ** power
+
+            # ∂_a P
+            first_angular = []
+            for axis in range(3):
+                if powers[axis]:
+                    reduced = np.full(n_points, float(powers[axis]))
+                    for other, power in enumerate(powers):
+                        if other == axis:
+                            if power > 1:
+                                reduced = reduced * delta[:, axis] ** (power - 1)
+                        elif power:
+                            reduced = reduced * delta[:, other] ** power
+                    first_angular.append(reduced)
+                else:
+                    first_angular.append(np.zeros(n_points))
+
+            hessian = np.zeros((n_points, 3, 3))
+            for a in range(3):
+                d_c_a = -2.0 * delta[:, a] * radial_first
+                for b in range(3):
+                    d_c_b = -2.0 * delta[:, b] * radial_first
+                    # ∂_b∂_a P
+                    if a == b:
+                        if powers[a] >= 2:
+                            second_angular = np.full(n_points, float(powers[a] * (powers[a] - 1)))
+                            for other, power in enumerate(powers):
+                                if other == a:
+                                    second_angular = second_angular * delta[:, a] ** (power - 2)
+                                elif power:
+                                    second_angular = second_angular * delta[:, other] ** power
+                        else:
+                            second_angular = np.zeros(n_points)
+                    elif powers[a] and powers[b]:
+                        second_angular = np.full(n_points, float(powers[a] * powers[b]))
+                        for other, power in enumerate(powers):
+                            if other in (a, b):
+                                if power > 1:
+                                    second_angular = second_angular * delta[:, other] ** (power - 1)
+                            elif power:
+                                second_angular = second_angular * delta[:, other] ** power
+                    else:
+                        second_angular = np.zeros(n_points)
+
+                    d_c_ab = (-2.0 * radial_first if a == b else 0.0) + 4.0 * delta[:, a] * delta[
+                        :, b
+                    ] * radial_second
+                    hessian[:, a, b] = scales[component] * (
+                        second_angular * contracted
+                        + first_angular[a] * d_c_b
+                        + first_angular[b] * d_c_a
+                        + angular * d_c_ab
+                    )
+            columns.append(hessian)
+    if not columns:
+        return np.zeros((n_points, 0, 3, 3))
+    return np.stack(columns, axis=1)
+
+
 def density_at_points(values: np.ndarray, density: np.ndarray) -> np.ndarray:
     """Плотность ``ρ(r) = Σ_μν D_μν φ_μ φ_ν`` в точках сетки.
 

@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -41,6 +42,15 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet
 from quantumlab.engine.constants import angstrom_to_bohr
+from quantumlab.engine.contracts import ExchangeCorrelationFunctional
+from quantumlab.engine.dft import RksResult
+from quantumlab.engine.functional import (
+    density_at_points,
+    density_gradient_at_points,
+    evaluate_basis_hessian_for_center,
+    evaluate_basis_with_gradients,
+)
+from quantumlab.engine.quadrature import QuadratureGrid
 from quantumlab.engine.scf import ScfResult
 
 Array = npt.NDArray[np.float64]
@@ -69,10 +79,23 @@ class RhfGradient:
         return float(np.sqrt(np.mean(np.square(self.gradient))))
 
 
-def energy_weighted_density(scf: ScfResult, n_occupied: int) -> Array:
+class OrbitalSolution(Protocol):
+    """Всё, что нужно от решателя для энерговзвешенной плотности.
+
+    Структурный тип, а не ``ScfResult``: ``RksResult`` повторяет набор полей
+    RHF, но не наследует от него, и привязка к конкретному классу заставила бы
+    DFT-градиент дублировать вычисление ``W``.
+    """
+
+    coefficients: np.ndarray
+    orbital_energies: tuple[float, ...]
+    density: np.ndarray
+
+
+def energy_weighted_density(solution: OrbitalSolution, n_occupied: int) -> Array:
     """Энерговзвешенная плотность ``W_μν = 2Σ_i^{занято} C_μi ε_i C_νi``."""
-    occupied = scf.coefficients[:, :n_occupied]
-    energies = np.asarray(scf.orbital_energies[:n_occupied])
+    occupied = solution.coefficients[:, :n_occupied]
+    energies = np.asarray(solution.orbital_energies[:n_occupied])
     return np.asarray(2.0 * (occupied * energies) @ occupied.T)
 
 
@@ -103,17 +126,28 @@ def _function_owner(basis: BasisSet) -> Array:
     )
 
 
-def rhf_gradient(basis: BasisSet, molecule: Molecule, scf: ScfResult) -> RhfGradient:
-    """Аналитический градиент RHF-энергии по координатам всех ядер.
+def _orbital_gradient(
+    basis: BasisSet,
+    molecule: Molecule,
+    solution: OrbitalSolution,
+    *,
+    exchange_coefficient: float,
+) -> Array:
+    """Аналитический градиент электронной части, хартри/бор.
 
-    Требует **сошедшейся** SCF: формула использует стационарность энергии по
+    Требует **сошедшегося** решения: формула использует стационарность энергии по
     орбиталям, поэтому на несошедшейся плотности градиент неверен. Проверка
     вызывающим кодом, а не здесь — движок решает, что делать с несошедшимся
     расчётом (прервать или сообщить).
+
+    ``exchange_coefficient`` — множитель при обменном вкладе ``Σ DD·(μλ|νσ)'``.
+    У RHF это ``¼``; у гибридного функционала обмен точный лишь частично, и
+    множитель равен ``α/4``. Чистые функционалы DFT передают ``0``: у них обмен
+    целиком содержится в ``E_xc`` и входит через отдельное слагаемое.
     """
     n_occupied = molecule.n_electrons // 2
-    density = scf.density
-    weight = energy_weighted_density(scf, n_occupied)
+    density = solution.density
+    weight = energy_weighted_density(solution, n_occupied)
     owner = _function_owner(basis)
     n_functions = basis.n_functions
 
@@ -157,7 +191,7 @@ def rhf_gradient(basis: BasisSet, molecule: Molecule, scf: ScfResult) -> RhfGrad
             orbital_relaxation = float(np.sum(weight * overlap))
 
             gradient[atom_index, axis] += (
-                one_electron + 0.5 * coulomb - 0.25 * exchange - orbital_relaxation
+                one_electron + 0.5 * coulomb - exchange_coefficient * exchange - orbital_relaxation
             )
 
         # Движение самих ядер в операторе притяжения — отдельно для каждого атома:
@@ -168,4 +202,110 @@ def rhf_gradient(basis: BasisSet, molecule: Molecule, scf: ScfResult) -> RhfGrad
             )
             gradient[atom_index, axis] += float(np.sum(density * position_derivative))
 
+    return gradient
+
+
+def rhf_gradient(basis: BasisSet, molecule: Molecule, scf: ScfResult) -> RhfGradient:
+    """Аналитический градиент RHF-энергии по координатам всех ядер."""
+    gradient = _orbital_gradient(basis, molecule, scf, exchange_coefficient=0.25)
     return RhfGradient(energy_hartree=scf.total_energy, gradient=gradient)
+
+
+def xc_gradient(
+    basis: BasisSet,
+    molecule: Molecule,
+    grid: QuadratureGrid,
+    density: Array,
+    functional: ExchangeCorrelationFunctional,
+) -> Array:
+    """Обменно-корреляционный вклад в градиент, хартри/бор.
+
+    ``E_xc = Σ_g w_g ρ_g ε_xc(ρ_g, σ_g)`` ⇒
+
+    ``dE_xc/dR_Aa = Σ_g w_g [ v_ρ ∂ρ_g/∂R_Aa + v_σ ∂σ_g/∂R_Aa ]``
+
+    Производные плотности — от движения базисных функций, центрированных на
+    атоме ``A``, при **неподвижных точках сетки**:
+
+    ``∂ρ/∂R_Aa = −2 Σ_{μ∈A} Σ_ν D_μν (∂_aφ_μ) φ_ν``
+
+    Знак минус потому, что ``φ_μ(r − R_A)`` сдвигается вместе с центром. Для
+    GGA добавляется член с ``∂σ/∂R_Aa = 2∇ρ·∂(∇ρ)/∂R_Aa``, куда входят вторые
+    производные базисных функций.
+
+    **Градиент соответствует неподвижной в пространстве сетке.** Точки Беке
+    центрированы на атомах, поэтому при движении ядра сетка, построенная заново,
+    смещается вместе с ним: ``dE_xc/dR`` для такой поверхности содержало бы ещё
+    отклик точек и весов, ``Σ_g (∂(w_g)/∂R_Aa) ρ_g ε_g`` плюс сдвиг самих ``r_g``.
+    Движок перестраивает сетку на каждой геометрии (иначе энергия перестала бы
+    быть той величиной, что в расчёте в одной точке), поэтому между поверхностью,
+    для которой градиент точен, и поверхностью оптимизатора есть расхождение.
+
+    Оно измерено, а не оценено. На воде/STO-3G/SVWN полное расхождение
+    (перестраиваемая сетка против замороженной) — ``max|Δg| = 7.0e−06``
+    хартри/бор, то есть в 64 раза ниже порога ``max_force = 4.5e−4``. Основная
+    часть — сдвиг точек, а не производные весов Беке: у PySCF на сопоставимых
+    сетках член ``grid_response`` даёт лишь ``2.5e−08 … 3.8e−08``. Приближение
+    стандартное: в Molpro производные весов сетки в аналитическом градиенте
+    вообще выключены по умолчанию (``GRIDGRAD=0``).
+    """
+    values, basis_gradients = evaluate_basis_with_gradients(basis, molecule, grid.points)
+    rho = density_at_points(values, density)
+    rho_gradient = density_gradient_at_points(values, basis_gradients, density)
+    evaluation = functional.evaluate(grid.points, rho, rho_gradient)
+
+    v_rho = np.asarray(evaluation.vrho)
+    v_sigma = np.asarray(evaluation.vsigma) if evaluation.vsigma is not None else None
+    weighted_v_rho = grid.weights * v_rho
+
+    contracted = np.asarray(density @ values.T)
+    gradient_contracted = (
+        np.einsum("nm,pnb->mpb", density, basis_gradients) if v_sigma is not None else None
+    )
+
+    owner = _function_owner(basis)
+    gradient = np.zeros((len(molecule.atoms), 3))
+    for atom in range(len(molecule.atoms)):
+        columns = np.flatnonzero(owner == atom)
+        if columns.size == 0:
+            continue
+        hessian = (
+            evaluate_basis_hessian_for_center(basis, molecule, grid.points, atom)
+            if v_sigma is not None
+            else None
+        )
+        for axis in range(3):
+            d_phi = basis_gradients[:, columns, axis]
+            term = -2.0 * float(
+                np.sum(weighted_v_rho * np.sum(d_phi * contracted[columns].T, axis=1))
+            )
+            if v_sigma is not None and hessian is not None and gradient_contracted is not None:
+                # Ось ``axis`` срезается до einsum явно: индекс, отсутствующий
+                # в выходной части подписи, einsum считает суммируемым, и
+                # "pjab,jp->pb" сложило бы производные по всем трём осям.
+                first = np.einsum("pjb,jp->pb", hessian[:, :, axis, :], contracted[columns])
+                second = np.einsum("pj,jpb->pb", d_phi, gradient_contracted[columns])
+                inner = np.sum(rho_gradient * (first + second), axis=1)
+                term += -4.0 * float(np.sum(grid.weights * v_sigma * inner))
+            gradient[atom, axis] = term
+    return gradient
+
+
+def rks_gradient(
+    basis: BasisSet,
+    molecule: Molecule,
+    rks: RksResult,
+    grid: QuadratureGrid,
+    functional: ExchangeCorrelationFunctional,
+) -> RhfGradient:
+    """Аналитический градиент RKS-энергии по координатам всех ядер.
+
+    Орбитальная часть совпадает с RHF с точностью до множителя точного обмена:
+    у гибрида обменный интеграл входит с весом ``α/4`` вместо ``¼``, а у чистого
+    функционала — не входит вовсе. К ней добавляется обменно-корреляционный
+    вклад, вычисленный на той же сетке, что и сама энергия.
+    """
+    alpha = float(rks.exact_exchange_fraction)
+    gradient = _orbital_gradient(basis, molecule, rks, exchange_coefficient=0.25 * alpha)
+    gradient = gradient + xc_gradient(basis, molecule, grid, rks.density, functional)
+    return RhfGradient(energy_hartree=rks.total_energy, gradient=gradient)

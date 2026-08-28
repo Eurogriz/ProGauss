@@ -20,7 +20,7 @@ from collections.abc import Sequence as Seq
 from quantumlab.domain.spec import DispersionCorrection, Task
 from quantumlab.engine.basis import basis_angular_scheme
 from quantumlab.engine.capabilities import Availability, Capability, CapabilityKind
-from quantumlab.engine.functional import FUNCTIONALS
+from quantumlab.engine.functional import FUNCTIONALS, get_functional
 from quantumlab.errors import (
     BasisNotFoundError,
     FunctionalNotFoundError,
@@ -259,10 +259,37 @@ def _method_limitations(name: str) -> tuple[str, ...]:
             "не реализованы.",
             "Дисперсионные поправки (D3, D4) не реализованы.",
             "Только RKS: UKS для открытой оболочки не реализован.",
-            "Только энергия в точке: XC-вклад в аналитический градиент "
-            "не реализован, поэтому оптимизация геометрии недоступна.",
+            "Оптимизация геометрии реализована, но аналитический градиент не "
+            "содержит отклика квадратурной сетки: расхождение с поверхностью "
+            "оптимизатора измерено (7.0e-06 э/бор на воде/STO-3G) и в 64 раза "
+            "ниже порога сходимости по силе.",
         )
     return ()
+
+
+def _functional_limitations(name: str) -> tuple[str, ...]:
+    """Ограничения конкретного функционала, а не общие для всех.
+
+    Общая формулировка вроде «только LDA» для PBE и PBE0 была бы неправдой, а
+    реестр — это то, на что пользователь опирается при выборе метода. Поэтому
+    класс берётся из самого объекта функционала (§54 ТЗ).
+    """
+    functional = get_functional(name)
+    limits: list[str] = []
+    if functional.functional_class == "lda":
+        limits.append("LDA: зависит только от плотности, без её градиента.")
+    elif functional.functional_class == "gga":
+        limits.append(
+            "GGA: зависит от плотности и её градиента; кинетическая плотность "
+            "(meta-GGA) не используется."
+        )
+    else:
+        limits.append(
+            f"Гибрид: {functional.exact_exchange_fraction:g} точного обмена; "
+            "дальнодействующая коррекция (ωB97X и подобные) не реализована."
+        )
+    limits.append("Только замкнутая оболочка: UKS не реализован.")
+    return tuple(limits)
 
 
 def default_registry() -> CapabilityRegistry:
@@ -330,18 +357,7 @@ def default_registry() -> CapabilityRegistry:
                     Availability.PARTIAL if implemented else Availability.NOT_IMPLEMENTED
                 ),
                 since_version=__version__ if implemented else None,
-                limitations=(
-                    (
-                        "Только LDA: градиенты плотности (GGA), кинетическая "
-                        "плотность (meta-GGA) и доля точного обмена (гибриды) "
-                        "не реализованы.",
-                        "Только замкнутая оболочка: UKS не реализован.",
-                        "XC-вклад в градиент не реализован, поэтому оптимизация "
-                        "геометрии недоступна.",
-                    )
-                    if implemented
-                    else ()
-                ),
+                limitations=(_functional_limitations(name) if implemented else ()),
                 metadata={"label": label, "class": functional_class},
             )
         )

@@ -20,15 +20,26 @@ import numpy as np
 import pytest
 
 from quantumlab.domain.molecule import Atom, Molecule
+from quantumlab.domain.spec import GridPreset
 from quantumlab.engine import integrals
-from quantumlab.engine.basis import build_basis
+from quantumlab.engine.basis import build_basis, cartesian_powers
 from quantumlab.engine.constants import angstrom_to_bohr
+from quantumlab.engine.dft import run_rks
+from quantumlab.engine.functional import (
+    density_gradient_at_points,
+    evaluate_basis_hessian_for_center,
+    evaluate_basis_with_gradients,
+    get_functional,
+)
 from quantumlab.engine.gradients import (
     RhfGradient,
+    _function_owner,
     energy_weighted_density,
     nuclear_repulsion_gradient,
     rhf_gradient,
+    rks_gradient,
 )
+from quantumlab.engine.quadrature import build_grid
 from quantumlab.engine.scf import ScfSettings, run_rhf
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
@@ -271,3 +282,168 @@ def test_gradient_requires_converged_scf_by_construction() -> None:
     # на движке — это фиксируется тестом движка, а не здесь.
     result = rhf_gradient(basis, molecule, scf)
     assert result.gradient.shape == (molecule.n_atoms, 3)
+
+
+# --------------------------------------------------------------------------- #
+# DFT: вторые производные базисных функций и обменно-корреляционный градиент
+# --------------------------------------------------------------------------- #
+_STEP_BOHR = 1e-4
+
+
+def _displace_water(atom_index: int, axis: int, delta_angstrom: float) -> Molecule:
+    """Вода со смещённым атомом: сетка при этом не перестраивается."""
+    base = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    atoms: list[Atom] = []
+    for index, atom in enumerate(base.atoms):
+        position = list(atom.position)
+        if index == atom_index:
+            position[axis] += delta_angstrom
+        atoms.append(Atom(symbol=atom.symbol, position=(position[0], position[1], position[2])))
+    return Molecule(atoms=tuple(atoms), name="water")
+
+
+@pytest.mark.parametrize("basis_name", ["sto-3g", "6-31g", "cc-pvdz"])
+def test_basis_hessian_matches_finite_differences(basis_name: str) -> None:
+    """Гессиан базисных функций совпадает с конечными разностями градиента.
+
+    Вторые производные нужны только обменно-корреляционному градиенту GGA, и
+    энергия от них не зависит: ошибка здесь не проявилась бы ни в SCF, ни в
+    энергии, поэтому проверка отдельная.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    basis = build_basis(basis_name, molecule)
+    points = np.random.default_rng(11).normal(size=(30, 3)) * 1.5
+    step = 1e-5
+    worst = 0.0
+    for center in range(len(molecule.atoms)):
+        columns: list[int] = []
+        offset = 0
+        for shell in basis.shells:
+            width = len(cartesian_powers(shell.angular_momentum))
+            if shell.center == center:
+                columns.extend(range(offset, offset + width))
+            offset += width
+        hessian = evaluate_basis_hessian_for_center(basis, molecule, points, center)
+        assert hessian.shape == (points.shape[0], len(columns), 3, 3)
+        for axis in range(3):
+            plus = points.copy()
+            plus[:, axis] += step
+            minus = points.copy()
+            minus[:, axis] -= step
+            _, grad_plus = evaluate_basis_with_gradients(basis, molecule, plus)
+            _, grad_minus = evaluate_basis_with_gradients(basis, molecule, minus)
+            numeric = (grad_plus - grad_minus) / (2 * step)
+            worst = max(
+                worst, float(np.max(np.abs(numeric[:, columns, :] - hessian[:, :, axis, :])))
+            )
+    assert worst < 1e-8
+
+
+def test_hessian_contraction_is_not_summed_over_the_wrong_axis() -> None:
+    """Регрессия на подпись einsum: ось дифференцирования срезается до свёртки.
+
+    В ``np.einsum("pjab,jp->pb", ...)`` индекс ``a`` отсутствует в выходной
+    части, и einsum считает его суммируемым: свёртка сложит производные по всем
+    трём осям и даст неверный ``∂σ/∂R``. Знакомая ловушка — энергия при этом
+    остаётся правильной. Проверка сравнивает einsum с явным циклом.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    basis = build_basis("sto-3g", molecule)
+    points = np.random.default_rng(3).normal(size=(12, 3)) * 1.2
+    density = np.eye(basis.n_functions) * 0.5
+    values, _ = evaluate_basis_with_gradients(basis, molecule, points)
+    contracted = np.asarray(density @ values.T)
+    hessian = evaluate_basis_hessian_for_center(basis, molecule, points, 0)
+    columns = np.flatnonzero(_function_owner(basis) == 0)
+    for axis in range(3):
+        via_einsum = np.einsum("pjb,jp->pb", hessian[:, :, axis, :], contracted[columns])
+        via_loop = np.zeros((points.shape[0], 3))
+        for local, function in enumerate(columns):
+            for other in range(basis.n_functions):
+                via_loop += (
+                    density[function, other]
+                    * hessian[:, local, axis, :]
+                    * values[:, other][:, None]
+                )
+        assert np.max(np.abs(via_einsum - via_loop)) < 1e-12
+
+
+@pytest.mark.parametrize("functional_name", ["svwn", "pbe", "pbe0"])
+def test_rks_gradient_matches_finite_differences(functional_name: str) -> None:
+    """Аналитический градиент RKS совпадает с численной производной энергии.
+
+    КР берётся на **замороженной** сетке: аналитический градиент точен именно
+    для неподвижной в пространстве сетки (см. ``xc_gradient``). Сетка
+    перестраивается по-другому, и расхождение между поверхностями измерено
+    отдельно — оно в 64 раза ниже порога сходимости по силе.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    functional = get_functional(functional_name)
+    grid = build_grid(molecule, GridPreset.COARSE)
+    basis = build_basis("sto-3g", molecule)
+    result = run_rks(basis, molecule, functional, grid=grid)
+    analytic = rks_gradient(basis, molecule, result, grid, functional).gradient
+
+    step_angstrom = _STEP_BOHR / float(angstrom_to_bohr(1.0))
+    numeric = np.zeros((len(molecule.atoms), 3))
+    for atom_index in range(len(molecule.atoms)):
+        for axis in range(3):
+            energies = []
+            for sign in (1.0, -1.0):
+                shifted = _displace_water(atom_index, axis, sign * step_angstrom)
+                energies.append(
+                    run_rks(
+                        build_basis("sto-3g", shifted), shifted, functional, grid=grid
+                    ).total_energy
+                )
+            numeric[atom_index, axis] = (energies[0] - energies[1]) / (2 * _STEP_BOHR)
+
+    deviation = float(np.max(np.abs(analytic - numeric)))
+    assert deviation < 1e-6, deviation
+
+
+def test_density_and_sigma_derivatives_match_finite_differences() -> None:
+    """``∂ρ/∂R`` и ``∂σ/∂R`` при фиксированной плотности — против КР.
+
+    Проверка изолирует именно то, что входит в XC-градиент: если она проходит,
+    расхождение в градиенте может быть только в потенциале ``v_ρ``/``v_σ``, а
+    не в производных базиса.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    basis = build_basis("sto-3g", molecule)
+    points = np.random.default_rng(3).normal(size=(12, 3)) * 1.2
+    density = np.eye(basis.n_functions) * 0.5
+    bohr = float(angstrom_to_bohr(1.0))
+    values, grads = evaluate_basis_with_gradients(basis, molecule, points)
+    rho_gradient = density_gradient_at_points(values, grads, density)
+    contracted = np.asarray(density @ values.T)
+    gradient_contracted = np.einsum("nm,pnb->mpb", density, grads)
+    owner = _function_owner(basis)
+    step = 1e-6
+    for atom_index in (0, 1):
+        columns = np.flatnonzero(owner == atom_index)
+        hessian = evaluate_basis_hessian_for_center(basis, molecule, points, atom_index)
+        for axis in range(3):
+            shifted = []
+            for sign in (1.0, -1.0):
+                moved = _displace_water(atom_index, axis, sign * step)
+                basis_moved = build_basis("sto-3g", moved)
+                v, g = evaluate_basis_with_gradients(basis_moved, moved, points)
+                grad = density_gradient_at_points(v, g, density)
+                shifted.append((v, grad))
+            # производная плотности
+            rho_plus = np.einsum("pg,g,pg->p", shifted[0][0], np.diag(density), shifted[0][0])
+            rho_minus = np.einsum("pg,g,pg->p", shifted[1][0], np.diag(density), shifted[1][0])
+            numeric_rho = (rho_plus - rho_minus) / (2 * step)
+            analytic_rho = (
+                -2.0 * np.sum(grads[:, columns, axis] * contracted[columns].T, axis=1) * bohr
+            )
+            assert np.max(np.abs(numeric_rho - analytic_rho)) < 1e-6
+            # производная сигмы
+            numeric_sigma = (
+                np.sum(shifted[0][1] ** 2, axis=1) - np.sum(shifted[1][1] ** 2, axis=1)
+            ) / (2 * step)
+            first = np.einsum("pjb,jp->pb", hessian[:, :, axis, :], contracted[columns])
+            second = np.einsum("pj,jpb->pb", grads[:, columns, axis], gradient_contracted[columns])
+            analytic_sigma = -4.0 * np.sum(rho_gradient * (first + second), axis=1) * bohr
+            assert np.max(np.abs(numeric_sigma - analytic_sigma)) < 1e-5

@@ -53,7 +53,7 @@ from quantumlab.engine.functional import (
     evaluate_basis,
     get_functional,
 )
-from quantumlab.engine.gradients import rhf_gradient
+from quantumlab.engine.gradients import rhf_gradient, rks_gradient
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -428,18 +428,30 @@ class ReferenceEngine:
         budget = max(options.max_steps, 1)
         timings: list[TimingRecord] = []
 
+        method = spec.method
+        if method is not None and method.theory is TheoryFamily.DFT:
+            if method.functional is None:
+                msg = "DFT-расчёт требует явного обменно-корреляционного функционала."
+                raise ValueError(msg)
+            functional = get_functional(method.functional)
+        else:
+            functional = None
+
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
             basis = build_basis(basis_name, molecule)
-            scf = run_rhf(basis, molecule, _scf_settings(spec))
-            if not scf.converged:
-                # Градиент по несошедшейся плотности неверен, а оптимизация по
-                # неверному градиенту уходит в случайную точку. Прерываем явно.
-                raise ScfNotConvergedError(
-                    iterations=scf.iterations,
-                    residual=max(scf.history[-1].energy_change, 0.0) if scf.history else 0.0,
-                    attempts=scf.strategies_used,
-                )
-            gradient = rhf_gradient(basis, molecule, scf).gradient
+            if functional is not None:
+                # Сетка перестраивается на каждой геометрии, чтобы энергия
+                # оставалась той же величиной, что и в расчёте в одной точке.
+                grid = build_grid(molecule, spec.grid.preset)
+                rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+                _require_converged(rks)
+                gradient = rks_gradient(basis, molecule, rks, grid, functional).gradient
+                total_energy = rks.total_energy
+            else:
+                rhf = run_rhf(basis, molecule, _scf_settings(spec))
+                _require_converged(rhf)
+                gradient = rhf_gradient(basis, molecule, rhf).gradient
+                total_energy = rhf.total_energy
             done.append(1)
             _report(
                 progress,
@@ -447,7 +459,7 @@ class ReferenceEngine:
                 "optimization",
                 step=len(done),
             )
-            return scf.total_energy, gradient
+            return total_energy, gradient
 
         done: list[int] = []
         started = time.perf_counter()
@@ -462,12 +474,36 @@ class ReferenceEngine:
         basis = build_basis(basis_name, final)
         prepared = build_integrals(basis, final)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
-        rhf = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
+        final_solution: RhfResult | RksResult
+        if functional is not None:
+            grid = build_grid(final, spec.grid.preset)
+            basis_values = evaluate_basis(basis, final, grid.points)
+            rks_final = run_rks(
+                basis, final, functional, _scf_settings(spec), integrals=prepared, grid=grid
+            )
+            final_solution = rks_final
+        else:
+            rhf_final = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
+            final_solution = rhf_final
         timings.append(_timing("final-scf", started))
 
         started = time.perf_counter()
-        properties = _properties(rhf, final, dipole_integrals)
-        checks = _quality_checks(rhf, basis, final, prepared) + _optimization_check(optimization)
+        properties = _properties(final_solution, final, dipole_integrals)
+        # Проверки и предупреждения различаются: у RKS к ним добавляются
+        # квадратурные. Вычисляются внутри своей ветви, где конкретный тип
+        # результата известен, а не по общему объединению.
+        if functional is not None:
+            checks = _quality_checks_rks(
+                rks_final, basis, final, prepared, grid, basis_values
+            ) + _optimization_check(optimization)
+            extra_warnings = _warnings_rks(
+                rks_final, basis, final, grid, pruning_requested=spec.grid.prune
+            )
+        else:
+            checks = _quality_checks(rhf_final, basis, final, prepared) + _optimization_check(
+                optimization
+            )
+            extra_warnings = _warnings(rhf_final, basis, final)
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -476,17 +512,17 @@ class ReferenceEngine:
             molecule=final,
             basis=basis,
             scf=_ScfSummary(
-                total_energy=rhf.total_energy,
-                iterations=rhf.iterations,
-                converged=rhf.converged,
+                total_energy=final_solution.total_energy,
+                iterations=final_solution.iterations,
+                converged=final_solution.converged,
             ),
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings(rhf, basis, request.molecule) + _optimization_warnings(optimization),
+            warnings=extra_warnings + _optimization_warnings(optimization),
             final_molecule=final,
             initial_molecule=request.molecule,
-            converged=rhf.converged and optimization.converged,
+            converged=final_solution.converged and optimization.converged,
             optimization_steps=optimization.steps,
         )
 
@@ -571,11 +607,6 @@ class ReferenceEngine:
                 # градиент по RHF-формулам для открытой оболочки означало бы
                 # выдать неверные силы под видом результата (§54 ТЗ).
                 raise MethodNotAvailableError("uhf-optimization")
-            if spec.method is not None and spec.method.theory is TheoryFamily.DFT:
-                # Энергия RKS есть, а аналитического XC-вклада в градиент нет.
-                # Численный градиент зависел бы от качества сетки, то есть
-                # дал бы силы, в корректности которых нельзя поручиться.
-                raise MethodNotAvailableError("dft-optimization")
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -603,6 +634,21 @@ def _timing(stage: str, started: float) -> TimingRecord:
     """Запись времени этапа. CPU-время не измеряется отдельно — один поток."""
     wall = time.perf_counter() - started
     return TimingRecord(stage=stage, wall_seconds=wall, cpu_seconds=wall)
+
+
+def _require_converged(solution: RhfResult | RksResult) -> None:
+    """Прерывает расчёт, если SCF не сошёлся.
+
+    Градиент по несошедшейся плотности неверен, а оптимизация по неверному
+    градиенту уходит в случайную точку — поэтому прерываем явно, а не
+    возвращаем силы, в корректности которых нельзя поручиться.
+    """
+    if not solution.converged:
+        raise ScfNotConvergedError(
+            iterations=solution.iterations,
+            residual=max(solution.history[-1].energy_change, 0.0) if solution.history else 0.0,
+            attempts=solution.strategies_used,
+        )
 
 
 def _scf_settings(spec: CalculationSpec) -> ScfSettings:
@@ -671,7 +717,7 @@ def _report(progress: ProgressReporter | None, percent: float, stage: str, **ext
 
 
 def _properties(
-    rhf: RhfResult,
+    rhf: RhfResult | RksResult,
     molecule: Molecule,
     dipole_integrals: tuple[np.ndarray, np.ndarray, np.ndarray],
 ) -> _Properties:
@@ -892,7 +938,10 @@ def _warnings_uhf(uhf: UhfResult, basis: BasisSet, molecule: Molecule) -> tuple[
 
 
 def _quality_checks(
-    rhf: RhfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
+    rhf: RhfResult | RksResult,
+    basis: BasisSet,
+    molecule: Molecule,
+    prepared: PrecomputedIntegrals,
 ) -> tuple[QualityCheck, ...]:
     """Проверки, которые движок выполняет над собственным результатом (§26 ТЗ).
 
@@ -1187,7 +1236,7 @@ def _angular_scheme_warning(basis: BasisSet) -> str | None:
     )
 
 
-def _warnings(rhf: RhfResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
+def _warnings(rhf: RhfResult | RksResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
     """Предупреждения, которые обязан увидеть пользователь."""
     warnings: list[str] = []
     if not rhf.converged:
