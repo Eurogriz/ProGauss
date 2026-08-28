@@ -84,32 +84,96 @@ def test_plan_only_recommends_what_the_engine_can_run(water: Molecule) -> None:
 
 
 def test_profiles_never_promise_what_the_engine_cannot_do(water: Molecule) -> None:
-    """Профиль разворачивается в HF, если недоступна любая часть его обещания.
+    """Каждая часть обещания профиля либо выполнена, либо явно снята решением.
 
     Инвариант сформулирован по правилу, а не по списку нереализованного,
     поэтому он не устареет при появлении D3 или нового функционала.
 
-    Сейчас у «Скрининга» реализован PBE, но нет D3(BJ), а у
-    «Исследовательского» нет ωB97X-D — и тот и другой обязаны откатиться.
-    Учитывать только функционал было бы ошибкой: план пообещал бы
-    дисперсионную поправку, которой не существует, и расчёт выполнился бы как
-    другой (§54 ТЗ).
+    Прежняя формулировка («недоступна любая часть обещания — значит HF») была
+    строже, чем требует §54 ТЗ: запрет скрывать превратился в запрет
+    сообщать. Из-за неё все четыре профиля разворачивались в HF при живых PBE
+    и PBE0. Сейчас недоступная дисперсия снимается отдельным решением, а
+    недоступный функционал заменяется ближайшим доступным — и то и другое
+    обязано быть видно в списке решений.
     """
     registry = default_registry()
     for profile in PrecisionProfile:
-        functional_ok = registry.is_available(f"functional:{_PROFILE_FUNCTIONAL[profile]}")
-        dispersion_ok = registry.is_available(f"dispersion:{_PROFILE_DISPERSION[profile].value}")
-        method = resolve_profile(profile, task=Task.SINGLE_POINT, molecule=water).spec.method
+        resolution = resolve_profile(profile, task=Task.SINGLE_POINT, molecule=water)
+        method = resolution.spec.method
         assert method is not None
-        if functional_ok and dispersion_ok:
+        parameters = {decision.parameter for decision in resolution.decisions}
+
+        dispersion = _PROFILE_DISPERSION[profile]
+        if dispersion.value != "none" and not registry.is_available(
+            f"dispersion:{dispersion.value}"
+        ):
+            assert method.dispersion.value == "none", profile
+            assert "dispersion" in parameters, profile
+        else:
+            assert method.dispersion is dispersion, profile
+
+        functional = _PROFILE_FUNCTIONAL[profile]
+        if registry.is_available(f"functional:{functional}"):
+            assert method.functional == functional, profile
             assert method.theory is TheoryFamily.DFT, profile
         else:
-            assert method.theory is TheoryFamily.HF, profile
+            # Запрошенного функционала нет: либо ближайший доступный, либо HF,
+            # и в обоих случаях — с явным решением, а не молча.
+            assert "functional" in parameters, profile
+            if method.theory is TheoryFamily.DFT:
+                assert method.functional is not None
+                assert registry.is_available(f"functional:{method.functional}")
 
 
-def test_hf_fallback_is_explained_not_silent(water: Molecule) -> None:
-    """Откат виден в обоснованиях: профиль обещает точность DFT, а даёт HF."""
-    resolution = resolve_profile(PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water)
+def test_substitution_prefers_dft_over_hartree_fock(water: Molecule) -> None:
+    """Недоступный функционал не утаскивает профиль сразу на HF.
+
+    PBE0 без дисперсии точнее HF всегда, а не только там, где дисперсия не
+    важна, поэтому откат на HF допустим лишь тогда, когда реализованных
+    функционалов не осталось вовсе. «Исследовательский» профиль просит
+    ωB97X-D, которого в ядре нет, — и обязан получить ближайший гибрид.
+    """
+    registry = default_registry()
+    resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
+    method = resolution.spec.method
+    assert method is not None
+    assert not registry.is_available(f"functional:{_PROFILE_FUNCTIONAL[PrecisionProfile.RESEARCH]}")
+    assert method.theory is TheoryFamily.DFT
+    assert method.functional is not None
+    assert registry.is_available(f"functional:{method.functional}")
+    substituted = next(
+        decision
+        for decision in resolution.decisions
+        if decision.parameter == "functional" and decision.reason_key.endswith("substituted")
+    )
+    assert substituted.value == method.functional
+    assert "не реализован" in substituted.render("ru")
+
+
+def test_hf_fallback_still_happens_without_any_functional(water: Molecule) -> None:
+    """Откат на HF не исчез: он срабатывает, когда реализованных DFT нет вовсе.
+
+    Проверка идёт на искусственном реестре без ``method:dft`` и без
+    функционалов — иначе путь отката оказался бы непокрытым ровно в тот
+    момент, когда он снова понадобится.
+    """
+    from quantumlab.engine.capabilities import CapabilityKind
+    from quantumlab.engine.registry import CapabilityRegistry
+
+    registry = CapabilityRegistry(
+        capability
+        for capability in default_registry().list_capabilities()
+        if capability.kind is not CapabilityKind.FUNCTIONAL and capability.id != "method:dft"
+    )
+    assert not registry.is_available("method:dft")
+    resolution = resolve_profile(
+        PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water, registry=registry
+    )
+    method = resolution.spec.method
+    assert method is not None
+    assert method.theory is TheoryFamily.HF
+    assert method.functional is None
+    assert method.dispersion.value == "none"
     assert any("не реализован" in line for line in resolution.explain("ru"))
     assert any(
         decision.parameter == "functional" and decision.value == "hf"
@@ -117,12 +181,40 @@ def test_hf_fallback_is_explained_not_silent(water: Molecule) -> None:
     )
 
 
+def test_functional_substitution_chain_cannot_loop() -> None:
+    """Цепочка замен односторонняя: зацикливание дало бы бесконечный подбор."""
+    from quantumlab.recommend.profiles import _FUNCTIONAL_SUBSTITUTES
+
+    for start in _FUNCTIONAL_SUBSTITUTES:
+        seen: set[str] = set()
+        current = start
+        while current:
+            assert current not in seen, f"цикл в цепочке замен: {start} -> {current}"
+            seen.add(current)
+            current = _FUNCTIONAL_SUBSTITUTES.get(current, "")
+
+
+def test_unavailable_dispersion_is_explained_not_silent(water: Molecule) -> None:
+    """Снятая дисперсия видна в обоснованиях вместе с тем, что это значит.
+
+    Профиль «Стандартный расчёт» обещает PBE0-D3(BJ). D3(BJ) в ядре нет, и
+    расчёт идёт без поправки; пользователь обязан увидеть и факт, и следствие,
+    иначе «стандартный расчёт» означал бы не то, что написано (§8 ТЗ).
+    """
+    resolution = resolve_profile(PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water)
+    lines = resolution.explain("ru")
+    assert any("Дисперсионная поправка" in line and "не реализована" in line for line in lines)
+    assert resolution.spec.method is not None
+    assert resolution.spec.method.dispersion.value == "none"
+    # Объяснение не дублируется строкой «Дисперсионная поправка: none».
+    assert sum("Дисперсионная поправка" in line for line in lines) == 1
+
+
 def test_high_accuracy_matches_documented_example(water: Molecule) -> None:
     """Пример из ТЗ: «Выбран PBE0/def2-TZVP, потому что профиль Высокая точность».
 
-    Пример станет буквально верен, когда появится DFT. До тех пор проверяется
-    честное поведение: базис тот же, а вместо недоступного функционала — HF с
-    явным объяснением, а не молчаливая подмена.
+    PBE0 реализован, поэтому пример проверяется буквально: функционал и базис
+    те, что обещаны профилем, а снятая дисперсия объяснена отдельно.
     """
     resolution = resolve_profile(
         PrecisionProfile.HIGH_ACCURACY, task=Task.OPTIMIZATION, molecule=water
@@ -132,20 +224,15 @@ def test_high_accuracy_matches_documented_example(water: Molecule) -> None:
     assert "Выбран базисный набор def2-tzvp" in lines
     method = resolution.spec.method
     assert method is not None
-    # Профиль обещает «функционал + базис + дисперсия» целиком, поэтому условие
-    # отката обязано учитывать всё обещание, а не только функционал. PBE0
-    # реализован, но профиль «Высокая точность» требует ещё и D3(BJ), которой
-    # в ядре нет, — и профиль честно разворачивается в HF.
-    functional, _, _, dispersion = _base_choice(PrecisionProfile.HIGH_ACCURACY)
     registry = default_registry()
-    promised = registry.is_available(f"functional:{functional}") and registry.is_available(
-        f"dispersion:{dispersion.value}"
-    )
-    if promised:
-        assert f"Выбран функционал {functional}" in lines
-    else:
-        assert method.theory is TheoryFamily.HF
-        assert any("не реализован" in line for line in lines)
+    functional, _, _, dispersion = _base_choice(PrecisionProfile.HIGH_ACCURACY)
+    assert registry.is_available(f"functional:{functional}")
+    assert f"Выбран функционал {functional}" in lines
+    assert method.theory is TheoryFamily.DFT
+    # D3(BJ) в ядре нет: расчёт идёт без поправки, и это объяснено, а не спрятано.
+    if not registry.is_available(f"dispersion:{dispersion.value}"):
+        assert method.dispersion.value == "none"
+        assert any("не реализована" in line and "Дисперсионная" in line for line in lines)
 
 
 def test_frequencies_tighten_numerics(water: Molecule) -> None:

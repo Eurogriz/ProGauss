@@ -186,16 +186,27 @@ def test_plan_never_recommends_unimplemented_method(client: TestClient, hydrogen
             )
 
 
-def test_plan_explains_the_hf_fallback(client: TestClient, hydrogen_id: str) -> None:
-    """Откат с DFT на HF виден пользователю, а не происходит молча."""
+def test_plan_explains_unavailable_dispersion(client: TestClient, hydrogen_id: str) -> None:
+    """Снятая часть обещания профиля видна в плане, а не происходит молча.
+
+    Профиль «Стандартный расчёт» обещает PBE0-D3(BJ). Функционал реализован,
+    дисперсионной поправки в ядре нет — и план обязан показать и выбранный
+    функционал, и факт отсутствия поправки. Прежде профиль в этой ситуации
+    разворачивался в HF целиком; тест проверял именно откат, поэтому
+    переписан под текущее правило: недоступное снимается явно, а не утаскивает
+    за собой весь план (§8, §54 ТЗ).
+    """
     body = client.post(
         "/calculations/plan",
         json={"task": "single_point", "profile": "standard", "moleculeId": hydrogen_id},
         headers={"Accept-Language": "ru"},
     ).json()
-    assert body["spec"]["method"]["theory"] == "hf"
-    reasons = [d["text"] for d in body["decisions"] if d["parameter"] == "functional"]
-    assert "не реализован" in reasons[0]
+    assert body["spec"]["method"]["theory"] == "dft"
+    assert body["spec"]["method"]["functional"] == "pbe0"
+    assert body["spec"]["method"]["dispersion"] == "none"
+    reasons = [d["text"] for d in body["decisions"] if d["parameter"] == "dispersion"]
+    assert len(reasons) == 1
+    assert "не реализована" in reasons[0]
 
 
 def test_plan_is_localized(client: TestClient, hydrogen_id: str) -> None:

@@ -134,8 +134,8 @@ def test_cli_plan_explains_automatic_choices(
     # Профиль обещает PBE0 + D3(BJ); PBE0 реализован, а дисперсионной поправки
     # нет, поэтому рекомендатель обязан сказать об этом вслух, а не выдать план,
     # который выполнится как расчёт без обещанной поправки (§54 ТЗ).
-    assert "ещё не реализован" in output
-    assert "pbe0" not in output
+    assert "pbe0" in output
+    assert "ещё не реализована" in output
 
 
 def test_cli_runs_the_recommended_plan(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

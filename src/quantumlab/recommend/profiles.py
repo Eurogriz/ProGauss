@@ -54,6 +54,25 @@ _LARGE_SYSTEM_ATOMS: Final = 80
 #: возможностей сообщает о том же (``coordinates:cartesian`` = partial).
 _COORDINATES: Final = "cartesian"
 
+#: Чем заменить функционал, которого в ядре нет: каждый шаг — на ближайший
+#: реализованный того же или соседнего уровня точности.
+#:
+#: Цепочка односторонняя и обрывается отсутствием ключа, поэтому зациклиться
+#: не может (``seen`` в :func:`_resolve_functional` — страховка, а не механизм).
+#: Порядок обоснован близостью, а не алфавитом: range-separated гибрид ближе
+#: всего к глобальному гибриду, гибрид — к GGA, GGA — к LDA.
+_FUNCTIONAL_SUBSTITUTES: Final[dict[str, str]] = {
+    "wb97x-d": "pbe0",
+    "wb97x": "pbe0",
+    "m062x": "pbe0",
+    "m06": "pbe0",
+    "tpssh": "pbe0",
+    "b3lyp": "pbe0",
+    "blyp": "pbe",
+    "pbe0": "pbe",
+    "pbe": "svwn",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Decision:
@@ -133,6 +152,45 @@ def _estimate_memory_mb(n_basis_functions: int) -> int:
     return max(1024, math.ceil(dense_bytes / 1_000_000))
 
 
+def _resolve_functional(
+    requested: str, capabilities: CapabilityRegistry
+) -> tuple[str | None, str | None]:
+    """Возвращает запрошенный функционал или ближайший доступный по цепочке.
+
+    Отступать на HF сразу, как только недоступен «фирменный» функционал
+    профиля, — значит терять больше точности, чем требует честность: PBE0 без
+    дисперсии точнее HF всегда, а не только там, где дисперсия не важна.
+    Поэтому сначала делается шаг по цепочке :data:`_FUNCTIONAL_SUBSTITUTES`
+    и только потом, когда реализованных функционалов не осталось вовсе,
+    происходит откат на HF.
+
+    Returns:
+        Пара ``(выбранный, заменённый)``. ``выбранный`` равен ``None``, если
+        доступных функционалов в цепочке нет. ``заменённый`` — имя, которое
+        профиль просил изначально, если пришлось отступить; иначе ``None``.
+    """
+    seen: set[str] = set()
+    current = requested
+    while current and current not in seen:
+        seen.add(current)
+        if capabilities.is_available(f"functional:{current}"):
+            return (current, requested) if current != requested else (current, None)
+        current = _FUNCTIONAL_SUBSTITUTES.get(current, "")
+    return None, requested
+
+
+def _functional_class_from_registry(
+    functional: str, capabilities: CapabilityRegistry
+) -> FunctionalClass:
+    """Класс функционала из реестра.
+
+    Второй таблицы «имя → класс» здесь намеренно нет: реестр уже хранит класс
+    в метаданных, а две копии разошлись бы при первом же новом функционале.
+    """
+    metadata = capabilities.assert_available(f"functional:{functional}").metadata
+    return FunctionalClass(str(metadata["class"]))
+
+
 def resolve_profile(
     profile: PrecisionProfile,
     *,
@@ -164,27 +222,46 @@ def resolve_profile(
     functional_class: FunctionalClass | None
     functional, functional_class, basis, dispersion = _base_choice(profile)
     theory = TheoryFamily.DFT
+
+    # Дисперсия — поправка к теории, а не сама теория. Её отсутствие меняет
+    # точность на дисперсионно-связанных системах, но не превращает расчёт в
+    # другой метод, поэтому недоступная поправка снимается **отдельным
+    # видимым решением**, а не утаскивает профиль на HF (§8 ТЗ). Прежнее
+    # правило «недоступна любая часть обещания — значит HF» было строже, чем
+    # требует §54: оно запрещало не скрывать, а честно сообщать, и из-за него
+    # все четыре профиля разворачивались в HF при реализованных PBE и PBE0.
+    dispersion_dropped = dispersion is not DispersionCorrection.NONE and not (
+        capabilities.is_available(f"dispersion:{dispersion.value}")
+    )
+    if dispersion_dropped:
+        dispersion = DispersionCorrection.NONE
+        decisions.append(
+            Decision("dispersion", dispersion.value, "profile.decision.dispersion_unavailable")
+        )
+
     # Проверяем не только семейство методов, но и конкретный функционал: DFT
     # может быть реализован частично (например, есть только LDA), и тогда
-    # профиль, обещающий PBE0, обязан откатиться, а не обещать точность,
+    # профиль, обещающий PBE0, обязан отступить, а не обещать точность,
     # которой в коде нет (§54 ТЗ).
-    if (
-        not capabilities.is_available("method:dft")
-        or not capabilities.is_available(f"functional:{functional}")
-        # Дисперсия входит в обещание профиля так же, как функционал: профиль
-        # «Скрининг» обещает PBE-D3(BJ), и выполнить его наполовину нельзя.
-        or not capabilities.is_available(f"dispersion:{dispersion.value}")
-    ):
-        # Откат на HF с явным объяснением: профиль обещает точность DFT, а ядро
-        # её пока не даёт. Молча подставить HF нельзя — это было бы обманом
-        # про точность; скрыть выбор — нарушением объяснимости (§8 ТЗ).
+    chosen, substituted_from = _resolve_functional(functional, capabilities)
+    if chosen is None or not capabilities.is_available("method:dft"):
+        # Откат на HF с явным объяснением: реализованных функционалов не
+        # осталось. Молча подставить HF нельзя — это было бы обманом про
+        # точность; скрыть выбор — нарушением объяснимости (§8 ТЗ).
         theory = TheoryFamily.HF
         functional = None
         functional_class = None
         dispersion = DispersionCorrection.NONE
         decisions.append(Decision("functional", "hf", "profile.decision.functional_fallback"))
     else:
-        decisions.append(Decision("functional", functional, "profile.decision.functional"))
+        functional = chosen
+        if substituted_from is not None:
+            functional_class = _functional_class_from_registry(chosen, capabilities)
+            decisions.append(
+                Decision("functional", functional, "profile.decision.functional_substituted")
+            )
+        else:
+            decisions.append(Decision("functional", functional, "profile.decision.functional"))
 
     is_large = molecule.n_atoms > _LARGE_SYSTEM_ATOMS
     if is_large and basis != "def2-svp":
@@ -200,7 +277,10 @@ def resolve_profile(
     else:
         decisions.append(Decision("basis", basis, "profile.decision.basis"))
 
-    decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
+    if not dispersion_dropped:
+        # Строка «Дисперсионная поправка: none» после только что показанного
+        # объяснения её отсутствия была бы дублем, а не информацией.
+        decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
 
     grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities)
     if stability_omitted:
