@@ -12,6 +12,7 @@ import re
 import pytest
 
 from quantumlab.domain.spec import PrecisionProfile, Task
+from quantumlab.engine.reference import WARNING_KEYS
 from quantumlab.errors import ErrorCode
 from quantumlab.i18n import (
     DEFAULT_LOCALE,
@@ -154,3 +155,30 @@ def test_error_explanation_has_all_three_sections() -> None:
     english = error.explain("en")
     assert "What happened" in english
     assert "Retry automatically" in english
+
+
+def test_every_engine_warning_key_is_translated_in_both_locales() -> None:
+    """Каждое предупреждение движка переводится на оба языка.
+
+    Движок возвращает ключ, а не текст, поэтому пропущенный перевод вылез бы не
+    в тесте, а у пользователя: ``t()`` бросает исключение, и интерфейс упал бы
+    на предупреждении. Проверяем прямо: ключ обязан рендериться и подставлять
+    параметры.
+    """
+    placeholders = {
+        "warning.scf_not_converged": {"iterations": "12"},
+        "warning.basis_spherical_scheme": {"basis": "cc-pvdz"},
+        "warning.dipole_origin_charged": {"charge": "+1"},
+        "warning.grid_prune_unimplemented": {},
+        "warning.grid_xc_integration": {"points": "5904", "preset": "fine"},
+        "warning.frequencies_off_stationary": {"max_force": "6.1e-02", "threshold": "4.5e-04"},
+        "warning.frequencies_imaginary": {"values": "-512.3"},
+        "warning.optimization_not_converged": {"steps": "64", "max_force": "1.2e-03"},
+    }
+    assert set(placeholders) == set(WARNING_KEYS), "список ключей разошёлся с тестом"
+    for locale in ("ru", "en"):
+        for key, params in placeholders.items():
+            rendered = t(key, locale, **params)
+            assert rendered != key
+            assert "{" not in rendered, (locale, key)
+            assert rendered.strip()

@@ -37,6 +37,7 @@ from quantumlab.domain.fingerprint import build_fingerprint
 from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.result import (
     CalculationResult,
+    CalculationWarning,
     EnvironmentInfo,
     OrbitalInfo,
     QualityCheck,
@@ -448,16 +449,24 @@ class ReferenceEngine:
         max_force = float(np.max(np.abs(gradient)))
         if max_force > _STATIONARY_FORCE_TOLERANCE:
             warnings.append(
-                f"Частоты посчитаны вне стационарной точки: максимальная сила "
-                f"{max_force:.3e} э/бор больше порога "
-                f"{_STATIONARY_FORCE_TOLERANCE:.1e}. Значения не имеют обычного "
-                f"физического смысла — сначала выполните оптимизацию геометрии."
+                CalculationWarning(
+                    key="warning.frequencies_off_stationary",
+                    params={
+                        "max_force": f"{max_force:.3e}",
+                        "threshold": f"{_STATIONARY_FORCE_TOLERANCE:.1e}",
+                    },
+                )
             )
         if vibrations.imaginary_frequencies:
             warnings.append(
-                "Найдены мнимые частоты: "
-                + ", ".join(f"{value:.1f}" for value in vibrations.imaginary_frequencies)
-                + " см⁻¹. Это не минимум, а седловая точка поверхности энергии."
+                CalculationWarning(
+                    key="warning.frequencies_imaginary",
+                    params={
+                        "values": ", ".join(
+                            f"{value:.1f}" for value in vibrations.imaginary_frequencies
+                        )
+                    },
+                )
             )
         _report(progress, 100.0, "frequencies", modes=len(vibrations.frequencies_cm1))
 
@@ -602,7 +611,7 @@ class ReferenceEngine:
         properties: _Properties,
         checks: tuple[QualityCheck, ...],
         timings: list[TimingRecord],
-        warnings: tuple[str, ...],
+        warnings: tuple[CalculationWarning, ...],
         final_molecule: Molecule | None,
         initial_molecule: Molecule | None = None,
         converged: bool | None = None,
@@ -734,6 +743,23 @@ def _solve_energy_and_gradient(
     return rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
 
 
+#: Все ключи предупреждений, которые может выдать движок.
+#:
+#: Тест сверяет этот список с каталогами переводов: предупреждение, у которого
+#: нет английского варианта, в английском интерфейсе либо исчезнет, либо
+#: останется русским — и то и другое нарушает §3 ТЗ.
+WARNING_KEYS: tuple[str, ...] = (
+    "warning.scf_not_converged",
+    "warning.basis_spherical_scheme",
+    "warning.dipole_origin_charged",
+    "warning.grid_prune_unimplemented",
+    "warning.grid_xc_integration",
+    "warning.frequencies_off_stationary",
+    "warning.frequencies_imaginary",
+    "warning.optimization_not_converged",
+)
+
+
 def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:
     """Прерывает расчёт, если SCF не сошёлся.
 
@@ -794,7 +820,7 @@ def _optimization_check(optimization: object) -> tuple[QualityCheck, ...]:
     )
 
 
-def _optimization_warnings(optimization: object) -> tuple[str, ...]:
+def _optimization_warnings(optimization: object) -> tuple[CalculationWarning, ...]:
     """Предупреждения оптимизации — пользователь обязан увидеть несходимость."""
     from quantumlab.engine.optimizer import OptimizationResult
 
@@ -802,9 +828,13 @@ def _optimization_warnings(optimization: object) -> tuple[str, ...]:
     if optimization.converged:
         return ()
     return (
-        f"Оптимизация геометрии не сошлась за {optimization.steps} шагов: "
-        f"max|F| = {optimization.max_force:.3e} э/бор. Приведённая геометрия — "
-        "последняя достигнутая точка, а не равновесная структура.",
+        CalculationWarning(
+            key="warning.optimization_not_converged",
+            params={
+                "steps": str(optimization.steps),
+                "max_force": f"{optimization.max_force:.3e}",
+            },
+        ),
     )
 
 
@@ -1021,11 +1051,17 @@ def _quality_checks_uhf(
     )
 
 
-def _warnings_uhf(uhf: UhfResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
+def _warnings_uhf(
+    uhf: UhfResult, basis: BasisSet, molecule: Molecule
+) -> tuple[CalculationWarning, ...]:
     """Предупреждения UHF: несошедшийся SCF, схема базиса, начало отсчёта диполя."""
-    warnings: list[str] = []
+    warnings: list[CalculationWarning] = []
     if not uhf.converged:
-        warnings.append(f"SCF не сошёлся за {uhf.iterations} итераций; энергия приведена как есть")
+        warnings.append(
+            CalculationWarning(
+                key="warning.scf_not_converged", params={"iterations": str(uhf.iterations)}
+            )
+        )
     warning = _angular_scheme_warning(basis)
     if warning:
         warnings.append(warning)
@@ -1280,11 +1316,15 @@ def _warnings_rks(
     grid: QuadratureGrid,
     *,
     pruning_requested: bool = False,
-) -> tuple[str, ...]:
+) -> tuple[CalculationWarning, ...]:
     """Предупреждения RKS: всё из RHF плюс качество сетки и границы метода."""
-    warnings: list[str] = []
+    warnings: list[CalculationWarning] = []
     if not rks.converged:
-        warnings.append(f"SCF не сошёлся за {rks.iterations} итераций; энергия приведена как есть")
+        warnings.append(
+            CalculationWarning(
+                key="warning.scf_not_converged", params={"iterations": str(rks.iterations)}
+            )
+        )
     scheme = _angular_scheme_warning(basis)
     if scheme:
         warnings.append(scheme)
@@ -1292,19 +1332,17 @@ def _warnings_rks(
     if dipole:
         warnings.append(dipole)
     if pruning_requested:
-        warnings.append(
-            "Прореживание угловой сетки (grid.prune) не реализовано: угловая сетка "
-            "полная у каждого атома. Расчёт корректен, но точек больше, чем нужно."
-        )
+        warnings.append(CalculationWarning(key="warning.grid_prune_unimplemented"))
     warnings.append(
-        f"XC-интегрирование: {grid.n_points} точек сетки (пресет {grid.preset.value}); "
-        "результат зависит от пресета — сравнение с другими программами корректно "
-        "только при сопоставимой сетке"
+        CalculationWarning(
+            key="warning.grid_xc_integration",
+            params={"points": str(grid.n_points), "preset": grid.preset.value},
+        )
     )
     return tuple(warnings)
 
 
-def _dipole_origin_warning(molecule: Molecule) -> str | None:
+def _dipole_origin_warning(molecule: Molecule) -> CalculationWarning | None:
     """Предупреждение о начале отсчёта диполя у заряженной системы.
 
     Дипольный момент нейтральной системы от начала отсчёта не зависит, а у
@@ -1314,31 +1352,33 @@ def _dipole_origin_warning(molecule: Molecule) -> str | None:
     """
     if molecule.charge == 0:
         return None
-    return (
-        f"Система заряжена (q = {molecule.charge:+d}): дипольный момент зависит от "
-        "начала отсчёта и приведён относительно начала координат."
+    return CalculationWarning(
+        key="warning.dipole_origin_charged", params={"charge": f"{molecule.charge:+d}"}
     )
 
 
-def _angular_scheme_warning(basis: BasisSet) -> str | None:
+def _angular_scheme_warning(basis: BasisSet) -> CalculationWarning | None:
     """Предупреждение о декартовой схеме, если базис опубликован в сферической.
 
-    Общая для RHF и UHF: текст один, и расхождение в формулировках означало бы,
+    Общая для RHF и UHF: ключ один, и расхождение в формулировках означало бы,
     что пользователь видит разное предупреждение для одного и того же базиса.
     """
     if basis_angular_scheme(basis.name) == "cartesian":
         return None
-    return (
-        f"Базис {basis.name} опубликован в сферической схеме, расчёт выполнен в "
-        "декартовой. Энергия отличается от табличных значений примерно на 1e-4 Eh."
-    )
+    return CalculationWarning(key="warning.basis_spherical_scheme", params={"basis": basis.name})
 
 
-def _warnings(rhf: RhfResult | RksResult, basis: BasisSet, molecule: Molecule) -> tuple[str, ...]:
+def _warnings(
+    rhf: RhfResult | RksResult, basis: BasisSet, molecule: Molecule
+) -> tuple[CalculationWarning, ...]:
     """Предупреждения, которые обязан увидеть пользователь."""
-    warnings: list[str] = []
+    warnings: list[CalculationWarning] = []
     if not rhf.converged:
-        warnings.append(f"SCF не сошёлся за {rhf.iterations} итераций; энергия приведена как есть")
+        warnings.append(
+            CalculationWarning(
+                key="warning.scf_not_converged", params={"iterations": str(rhf.iterations)}
+            )
+        )
     warning = _angular_scheme_warning(basis)
     if warning:
         warnings.append(warning)

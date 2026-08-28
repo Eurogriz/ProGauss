@@ -253,7 +253,7 @@ def test_frequencies_task_warns_off_stationary_point() -> None:
     )
     assert len(result.frequencies_cm1) == 3
     assert result.zero_point_energy_hartree is not None
-    assert any("стационарн" in warning for warning in result.warnings)
+    assert any(warning.key == "warning.frequencies_off_stationary" for warning in result.warnings)
 
 
 def test_atomic_mass_unit_conversion_is_codata() -> None:

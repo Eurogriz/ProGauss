@@ -235,7 +235,11 @@ def test_spherical_basis_runs_but_warns_about_the_scheme() -> None:
     assert check.verdict is QualityVerdict.WARNING
     assert check.detail is not None and "сферической" in check.detail
     assert len(result.warnings) == 1
-    assert "сферической" in result.warnings[0]
+    # Проверка по ключу, а не по тексту: предупреждение локализуется, и
+    # привязывать тест к русскому варианту значило бы сломать его при
+    # переключении языка.
+    assert result.warnings[0].key == "warning.basis_spherical_scheme"
+    assert result.warnings[0].params["basis"] == "cc-pvdz"
 
 
 def test_unsupported_task_is_rejected_before_any_computation() -> None:
@@ -493,7 +497,7 @@ def test_exhausted_optimization_is_reported_not_hidden() -> None:
     )
     assert not result.converged
     assert result.final_molecule is not None
-    assert any("не сошлась" in warning for warning in result.warnings)
+    assert any(warning.key == "warning.optimization_not_converged" for warning in result.warnings)
     assert result.checks_by_name()["optimization_converged"].verdict is QualityVerdict.FAIL
 
 

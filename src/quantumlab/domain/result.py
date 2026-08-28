@@ -104,6 +104,27 @@ class QualityCheck(BaseModel):
     detail: str | None = None
 
 
+class CalculationWarning(BaseModel):
+    """Предупреждение расчёта: ключ перевода и подстановки, а не готовая строка.
+
+    Движок не знает языка пользователя, поэтому возвращает ``key`` и ``params``,
+    а текст собирает граница (CLI, REST) в нужной локали. Хранить в результате
+    русскую строку означало бы, что английский интерфейс либо её не покажет,
+    либо получит второй, способный разойтись перевод того же факта (§3 ТЗ).
+
+    Параметры — строки: предупреждение не место для арифметики, форматирование
+    числа выполняется там, где возник факт, и в результат уходит готовая
+    подстановка.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str = Field(description="Dotted-ключ каталога переводов (``warning.*``).")
+    params: dict[str, str] = Field(
+        default_factory=dict, description="Подстановки для плейсхолдеров шаблона."
+    )
+
+
 class CalculationResult(BaseModel):
     """Результат завершённого расчёта.
 
@@ -169,7 +190,7 @@ class CalculationResult(BaseModel):
     quality_checks: tuple[QualityCheck, ...] = ()
     timings: tuple[TimingRecord, ...] = ()
     artifacts: tuple[ArtifactRef, ...] = ()
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[CalculationWarning, ...] = ()
     environment: EnvironmentInfo
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

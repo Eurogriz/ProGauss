@@ -291,7 +291,7 @@ def test_engine_warns_that_pruning_is_not_implemented(water: Molecule) -> None:
     result = ReferenceEngine().run(
         EngineRequest(job_id="dft", spec=_dft_spec(), molecule=water, threads=1)
     )
-    assert any("Прореживание" in warning for warning in result.warnings)
+    assert any(warning.key == "warning.grid_prune_unimplemented" for warning in result.warnings)
 
 
 def test_engine_refuses_dft_without_explicit_functional(water: Molecule) -> None:

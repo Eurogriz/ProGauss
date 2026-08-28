@@ -434,7 +434,9 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
     if result.warnings:
         print(f"  {t('cli.run.warnings', locale)}")
         for warning in result.warnings:
-            print(f"    ! {warning}")
+            # Предупреждение приходит ключом, а не текстом: язык выбирает
+            # пользователь, а не движок (§3 ТЗ).
+            print(f"    ! {t(warning.key, locale, **warning.params)}")
     print(f"  {t('cli.run.result_saved', locale, path=result_path)}")
     if geometry_note is not None:
         print(f"  {geometry_note}")
