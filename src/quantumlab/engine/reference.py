@@ -53,7 +53,7 @@ from quantumlab.engine.functional import (
     evaluate_basis,
     get_functional,
 )
-from quantumlab.engine.gradients import rhf_gradient, rks_gradient
+from quantumlab.engine.gradients import rhf_gradient, rks_gradient, uhf_gradient
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -71,7 +71,7 @@ from quantumlab.engine.scf import (
     spin_population,
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
-from quantumlab.errors import MethodNotAvailableError, ScfNotConvergedError
+from quantumlab.errors import ScfNotConvergedError
 from quantumlab.version import __version__
 
 #: Имя ядра — попадает в отпечаток расчёта и в журнал.
@@ -436,6 +436,7 @@ class ReferenceEngine:
             functional = get_functional(method.functional)
         else:
             functional = None
+        is_uhf = method is not None and method.spin is SpinTreatment.UHF
 
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
             basis = build_basis(basis_name, molecule)
@@ -447,6 +448,11 @@ class ReferenceEngine:
                 _require_converged(rks)
                 gradient = rks_gradient(basis, molecule, rks, grid, functional).gradient
                 total_energy = rks.total_energy
+            elif is_uhf:
+                uhf = run_uhf(basis, molecule, _scf_settings(spec))
+                _require_converged(uhf)
+                gradient = uhf_gradient(basis, molecule, uhf).gradient
+                total_energy = uhf.total_energy
             else:
                 rhf = run_rhf(basis, molecule, _scf_settings(spec))
                 _require_converged(rhf)
@@ -474,7 +480,7 @@ class ReferenceEngine:
         basis = build_basis(basis_name, final)
         prepared = build_integrals(basis, final)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
-        final_solution: RhfResult | RksResult
+        final_solution: RhfResult | RksResult | UhfResult
         if functional is not None:
             grid = build_grid(final, spec.grid.preset)
             basis_values = evaluate_basis(basis, final, grid.points)
@@ -482,24 +488,35 @@ class ReferenceEngine:
                 basis, final, functional, _scf_settings(spec), integrals=prepared, grid=grid
             )
             final_solution = rks_final
+        elif is_uhf:
+            uhf_final = run_uhf(basis, final, _scf_settings(spec), integrals=prepared)
+            final_solution = uhf_final
         else:
             rhf_final = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
             final_solution = rhf_final
         timings.append(_timing("final-scf", started))
 
         started = time.perf_counter()
-        properties = _properties(final_solution, final, dipole_integrals)
-        # Проверки и предупреждения различаются: у RKS к ним добавляются
-        # квадратурные. Вычисляются внутри своей ветви, где конкретный тип
-        # результата известен, а не по общему объединению.
+        # Свойства, проверки и предупреждения различаются по методу: у RKS к ним
+        # добавляются квадратурные, у UHF — второй спиновой канал и <S^2>.
+        # Вычисляются внутри своей ветви, где конкретный тип результата известен,
+        # а не по общему объединению.
         if functional is not None:
+            properties = _properties(rks_final, final, dipole_integrals)
             checks = _quality_checks_rks(
                 rks_final, basis, final, prepared, grid, basis_values
             ) + _optimization_check(optimization)
             extra_warnings = _warnings_rks(
                 rks_final, basis, final, grid, pruning_requested=spec.grid.prune
             )
+        elif is_uhf:
+            properties = _properties_uhf(uhf_final, final, dipole_integrals)
+            checks = _quality_checks_uhf(uhf_final, basis, final, prepared) + _optimization_check(
+                optimization
+            )
+            extra_warnings = _warnings_uhf(uhf_final, basis, final)
         else:
+            properties = _properties(rhf_final, final, dipole_integrals)
             checks = _quality_checks(rhf_final, basis, final, prepared) + _optimization_check(
                 optimization
             )
@@ -511,10 +528,16 @@ class ReferenceEngine:
             request,
             molecule=final,
             basis=basis,
+            # У UHF на сводке лежат ещё <S^2> и границы канала beta: без них
+            # оптимизация открытой оболочки вернула бы результат, из которого
+            # молча исчезло спиновое загрязнение (§54 ТЗ).
             scf=_ScfSummary(
                 total_energy=final_solution.total_energy,
                 iterations=final_solution.iterations,
                 converged=final_solution.converged,
+                spin_squared=uhf_final.s_squared if is_uhf else None,
+                beta_homo=properties.beta_homo,
+                beta_lumo=properties.beta_lumo,
             ),
             properties=properties,
             checks=checks,
@@ -602,11 +625,6 @@ class ReferenceEngine:
         if spec.task is Task.OPTIMIZATION:
             coordinates = spec.optimization.coordinates
             self._registry.assert_available(f"coordinates:{coordinates}")
-            if spec.method is not None and spec.method.spin is SpinTreatment.UHF:
-                # UHF-энергия есть, а аналитических градиентов UHF нет. Считать
-                # градиент по RHF-формулам для открытой оболочки означало бы
-                # выдать неверные силы под видом результата (§54 ТЗ).
-                raise MethodNotAvailableError("uhf-optimization")
         method = spec.method
         if method is None:
             self._registry.assert_available("method:hf")
@@ -636,7 +654,7 @@ def _timing(stage: str, started: float) -> TimingRecord:
     return TimingRecord(stage=stage, wall_seconds=wall, cpu_seconds=wall)
 
 
-def _require_converged(solution: RhfResult | RksResult) -> None:
+def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:
     """Прерывает расчёт, если SCF не сошёлся.
 
     Градиент по несошедшейся плотности неверен, а оптимизация по неверному

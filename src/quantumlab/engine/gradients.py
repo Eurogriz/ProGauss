@@ -51,7 +51,7 @@ from quantumlab.engine.functional import (
     evaluate_basis_with_gradients,
 )
 from quantumlab.engine.quadrature import QuadratureGrid
-from quantumlab.engine.scf import ScfResult
+from quantumlab.engine.scf import ScfResult, UhfResult, spin_population
 
 Array = npt.NDArray[np.float64]
 
@@ -129,8 +129,10 @@ def _function_owner(basis: BasisSet) -> Array:
 def _orbital_gradient(
     basis: BasisSet,
     molecule: Molecule,
-    solution: OrbitalSolution,
     *,
+    density: Array,
+    exchange_densities: tuple[Array, ...],
+    weight: Array,
     exchange_coefficient: float,
 ) -> Array:
     """Аналитический градиент электронной части, хартри/бор.
@@ -140,14 +142,21 @@ def _orbital_gradient(
     вызывающим кодом, а не здесь — движок решает, что делать с несошедшимся
     расчётом (прервать или сообщить).
 
-    ``exchange_coefficient`` — множитель при обменном вкладе ``Σ DD·(μλ|νσ)'``.
-    У RHF это ``¼``; у гибридного функционала обмен точный лишь частично, и
-    множитель равен ``α/4``. Чистые функционалы DFT передают ``0``: у них обмен
-    целиком содержится в ``E_xc`` и входит через отдельное слагаемое.
+    Параметры разделены по смыслу, а не по методу, чтобы один цикл служил RHF,
+    RKS и UHF:
+
+    * ``density`` — та, что входит в одноэлектронную часть и в кулоновский член.
+      У UHF это сумма каналов ``D^α + D^β``.
+    * ``exchange_densities`` — плотности, по которым строится обмен. У RHF и RKS
+      одна (полная), у UHF две (по каналу на каждый): электрон обменивается
+      только с электронами своего спина.
+    * ``exchange_coefficient`` — множитель при ``Σ DD·(μλ|νσ)'``. У RHF и UHF
+      это ``¼``; у гибридного функционала обмен точный лишь частично, и
+      множитель равен ``α/4``. Чистые функционалы DFT передают ``0``: у них
+      обмен целиком содержится в ``E_xc`` и входит через отдельное слагаемое.
+    * ``weight`` — энерговзвешенная плотность, входящая в член релаксации
+      орбиталей ``Σ W·S'``.
     """
-    n_occupied = molecule.n_electrons // 2
-    density = solution.density
-    weight = energy_weighted_density(solution, n_occupied)
     owner = _function_owner(basis)
     n_functions = basis.n_functions
 
@@ -187,7 +196,13 @@ def _orbital_gradient(
 
             one_electron = float(np.sum(density * core))
             coulomb = float(np.einsum("uv,ls,uvls", density, density, derivative))
-            exchange = float(np.einsum("uv,ls,ulvs", density, density, derivative, optimize=True))
+            exchange = 0.0
+            for exchange_density in exchange_densities:
+                exchange += float(
+                    np.einsum(
+                        "uv,ls,ulvs", exchange_density, exchange_density, derivative, optimize=True
+                    )
+                )
             orbital_relaxation = float(np.sum(weight * overlap))
 
             gradient[atom_index, axis] += (
@@ -207,8 +222,57 @@ def _orbital_gradient(
 
 def rhf_gradient(basis: BasisSet, molecule: Molecule, scf: ScfResult) -> RhfGradient:
     """Аналитический градиент RHF-энергии по координатам всех ядер."""
-    gradient = _orbital_gradient(basis, molecule, scf, exchange_coefficient=0.25)
+    n_occupied = molecule.n_electrons // 2
+    gradient = _orbital_gradient(
+        basis,
+        molecule,
+        density=scf.density,
+        exchange_densities=(scf.density,),
+        weight=energy_weighted_density(scf, n_occupied),
+        exchange_coefficient=0.25,
+    )
     return RhfGradient(energy_hartree=scf.total_energy, gradient=gradient)
+
+
+def uhf_gradient(basis: BasisSet, molecule: Molecule, uhf: UhfResult) -> RhfGradient:
+    """Аналитический градиент UHF-энергии по координатам всех ядер.
+
+    Одноэлектронная и кулоновская части строятся на полной плотности
+    ``D = D^α + D^β``, а обменная — на односпиновых:
+
+    ``E = Σ D·H + ½ ΣΣ DD·(μν|λσ) − ½ ΣΣ D^αD^α·(μλ|νσ) − ½ ΣΣ D^βD^β·(μλ|νσ)``
+
+    Складывать каналы в одну плотность **до** обмена нельзя: это добавило бы
+    межспиновое обменное взаимодействие ``−½ ΣΣ D^αD^β·(μλ|νσ)``, которого в
+    UHF нет.
+
+    Коэффициент при обмене — **½ на канал**, а не ¼ как в RHF. Это следует из
+    фокиана ``F^σ = H + J − K(D^σ)`` (в RHF — ``H + J − ½K``): спин-орбиталь
+    занята один раз, а не двумя электронами. Проверка — закрытая оболочка, где
+    ``D^α = D^β = D/2`` и оба выражения обязаны совпасть:
+    ``−½·2·(D/2)K(D/2) = −¼ D·K(D)``.
+
+    Член релаксации орбиталей берётся с множителем 1 на спин-орбиталь по той же
+    причине.
+
+    Требует сошедшегося расчёта по той же причине, что и ``rhf_gradient``.
+    """
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    alpha_occupied = uhf.alpha_coefficients[:, :n_alpha]
+    beta_occupied = uhf.beta_coefficients[:, :n_beta]
+    weight = np.asarray(
+        (alpha_occupied * np.asarray(uhf.alpha_energies[:n_alpha])) @ alpha_occupied.T
+        + (beta_occupied * np.asarray(uhf.beta_energies[:n_beta])) @ beta_occupied.T
+    )
+    gradient = _orbital_gradient(
+        basis,
+        molecule,
+        density=uhf.density_alpha + uhf.density_beta,
+        exchange_densities=(uhf.density_alpha, uhf.density_beta),
+        weight=weight,
+        exchange_coefficient=0.5,
+    )
+    return RhfGradient(energy_hartree=uhf.total_energy, gradient=gradient)
 
 
 def xc_gradient(
@@ -306,6 +370,14 @@ def rks_gradient(
     вклад, вычисленный на той же сетке, что и сама энергия.
     """
     alpha = float(rks.exact_exchange_fraction)
-    gradient = _orbital_gradient(basis, molecule, rks, exchange_coefficient=0.25 * alpha)
+    n_occupied = molecule.n_electrons // 2
+    gradient = _orbital_gradient(
+        basis,
+        molecule,
+        density=rks.density,
+        exchange_densities=(rks.density,),
+        weight=energy_weighted_density(rks, n_occupied),
+        exchange_coefficient=0.25 * alpha,
+    )
     gradient = gradient + xc_gradient(basis, molecule, grid, rks.density, functional)
     return RhfGradient(energy_hartree=rks.total_energy, gradient=gradient)

@@ -99,12 +99,15 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
     assert not registry.is_available("spin:rohf")
 
     # UHF реализован, но не целиком: ограничения обязаны быть перечислены,
-    # иначе «partial» выглядело бы как «готово» (§54 ТЗ).
+    # иначе «partial» выглядело бы как «готово» (§54 ТЗ). Аналитические
+    # градиенты UHF появились, поэтому про них здесь больше не утверждаем —
+    # проверяются те ограничения, что действительно остались.
     uhf = registry.get("spin:uhf")
     assert uhf.availability is Availability.PARTIAL
     assert uhf.is_usable
     assert uhf.limitations
-    assert any("градиент" in text for text in uhf.limitations)
+    assert any("декартов" in text for text in uhf.limitations)
+    assert any("S^2" in text for text in uhf.limitations)
 
 
 def test_assert_available_raises_localized_error(registry: CapabilityRegistry) -> None:

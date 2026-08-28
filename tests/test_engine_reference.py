@@ -299,6 +299,37 @@ def test_uhf_computes_open_shell_single_point() -> None:
     assert result.beta_lumo_energy_hartree is not None
 
 
+def test_uhf_optimization_of_an_open_shell_converges() -> None:
+    """Оптимизация открытой оболочки доходит до конца и меняет геометрию.
+
+    Раньше такой запрос отклонялся через ``MethodNotAvailableError``
+    (``uhf-optimization``): энергии UHF были, а аналитических градиентов не
+    было. Теперь они есть, и продолжать отклонять означало бы занижать реальные
+    возможности (§54 ТЗ).
+    """
+    ch = Molecule.from_xyz(
+        (Path(__file__).parent / "fixtures" / "ch-radical.xyz").read_text(encoding="utf-8"),
+        name="ch",
+        multiplicity=2,
+    )
+    result = _run(
+        molecule=ch,
+        spec=CalculationSpec(
+            task=Task.OPTIMIZATION,
+            method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.UHF),
+            # По умолчанию спецификация просит избыточные внутренние координаты,
+            # а они не реализованы: без явного указания запрос отклонился бы
+            # совсем не по той причине, которую проверяет тест.
+            optimization=OptimizationSpec(coordinates="cartesian"),
+        ),
+    )
+    assert result.converged
+    assert result.final_molecule is not None
+    assert result.optimization_steps is not None and result.optimization_steps > 0
+    # Свойства открытой оболочки доходят до результата: <S^2> скрывать нельзя.
+    assert result.spin_squared is not None
+
+
 def test_uhf_reproduces_rhf_on_closed_shell() -> None:
     """Для замкнутой оболочки UHF обязан дать ровно RHF-решение."""
     water = Molecule.from_xyz(

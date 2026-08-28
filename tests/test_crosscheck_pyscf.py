@@ -34,7 +34,7 @@ from quantumlab.engine.basis import build_basis
 from quantumlab.engine.constants import angstrom_to_bohr
 from quantumlab.engine.dft import run_rks
 from quantumlab.engine.functional import get_functional
-from quantumlab.engine.gradients import rks_gradient
+from quantumlab.engine.gradients import rks_gradient, uhf_gradient
 from quantumlab.engine.integrals import build_dipole_integrals, build_overlap
 from quantumlab.engine.quadrature import build_grid
 from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
@@ -307,3 +307,24 @@ def test_dft_nuclear_gradient_matches_pyscf(ours: str, theirs: str) -> None:
 
     deviation = float(np.max(np.abs(ours_gradient - theirs_gradient)))
     assert deviation < 5e-6, deviation
+
+
+def test_uhf_nuclear_gradient_matches_pyscf() -> None:
+    """Ядерный градиент UHF против независимого оракула.
+
+    Радикал CH (дублет): каналы α и β разные, поэтому проверка покрывает именно
+    открытую оболочку. На закрытой оболочке градиент UHF совпал бы с RHF и
+    ошибка в обменном коэффициенте осталась бы незамеченной.
+    """
+    molecule = Molecule.from_xyz(
+        (FIXTURES / "ch-radical.xyz").read_text(encoding="utf-8"), name="ch", multiplicity=2
+    )
+    basis = build_basis("sto-3g", molecule)
+    result = run_uhf(basis, molecule, TIGHT)
+    ours_gradient = uhf_gradient(basis, molecule, result).gradient
+
+    reference = pyscf.scf.UHF(_pyscf_molecule(molecule, "STO-3G")).run(conv_tol=1e-12)
+    theirs_gradient = np.asarray(reference.nuc_grad_method().kernel())
+
+    deviation = float(np.max(np.abs(ours_gradient - theirs_gradient)))
+    assert deviation < 1e-6, deviation

@@ -38,15 +38,17 @@ from quantumlab.engine.gradients import (
     nuclear_repulsion_gradient,
     rhf_gradient,
     rks_gradient,
+    uhf_gradient,
 )
 from quantumlab.engine.quadrature import build_grid
-from quantumlab.engine.scf import ScfSettings, run_rhf
+from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 
 #: Шаг конечных разностей в ангстремах. Меньше — хуже из-за округления
 #: (энергия ~1e-16 относительных), больше — из-за отбрасывания членов ряда.
 _STEP_ANGSTROM = 1e-4
+_TIGHT = ScfSettings(energy_tolerance=1e-11, density_tolerance=1e-9, max_iterations=200)
 
 
 def _h2(distance: float = 0.7414) -> Molecule:
@@ -447,3 +449,103 @@ def test_density_and_sigma_derivatives_match_finite_differences() -> None:
             second = np.einsum("pj,jpb->pb", grads[:, columns, axis], gradient_contracted[columns])
             analytic_sigma = -4.0 * np.sum(rho_gradient * (first + second), axis=1) * bohr
             assert np.max(np.abs(numeric_sigma - analytic_sigma)) < 1e-5
+
+
+# --------------------------------------------------------------------------- #
+# UHF: градиент открытой оболочки
+# --------------------------------------------------------------------------- #
+CH_RADICAL = Path(__file__).parent / "fixtures" / "ch-radical.xyz"
+
+
+def _displace_keep_state(base: Molecule, atom_index: int, axis: int, delta: float) -> Molecule:
+    """Смещает атом, сохраняя заряд и мультиплетность: без них домен не соберётся."""
+    atoms: list[Atom] = []
+    for index, atom in enumerate(base.atoms):
+        position = list(atom.position)
+        if index == atom_index:
+            position[axis] += delta
+        atoms.append(Atom(symbol=atom.symbol, position=(position[0], position[1], position[2])))
+    return Molecule(
+        atoms=tuple(atoms),
+        name=base.name,
+        charge=base.charge,
+        multiplicity=base.multiplicity,
+    )
+
+
+def test_uhf_gradient_matches_finite_differences() -> None:
+    """Аналитический градиент UHF совпадает с численной производной энергии.
+
+    Проверка на радикале CH (дублет): там каналы α и β разные, и ошибка в
+    обменном коэффициенте или в члене релаксации сразу видна. На закрытой
+    оболочке она бы не проявилась.
+    """
+    molecule = Molecule.from_xyz(CH_RADICAL.read_text(encoding="utf-8"), name="ch", multiplicity=2)
+    basis = build_basis("sto-3g", molecule)
+    result = run_uhf(basis, molecule, _TIGHT)
+    assert result.converged
+    analytic = uhf_gradient(basis, molecule, result).gradient
+
+    step_angstrom = _STEP_BOHR / float(angstrom_to_bohr(1.0))
+    numeric = np.zeros_like(analytic)
+    for atom_index in range(len(molecule.atoms)):
+        for axis in range(3):
+            energies = []
+            for sign in (1.0, -1.0):
+                shifted = _displace_keep_state(molecule, atom_index, axis, sign * step_angstrom)
+                energies.append(
+                    run_uhf(build_basis("sto-3g", shifted), shifted, _TIGHT).total_energy
+                )
+            numeric[atom_index, axis] = (energies[0] - energies[1]) / (2 * _STEP_BOHR)
+
+    deviation = float(np.max(np.abs(analytic - numeric)))
+    assert deviation < 1e-6, deviation
+
+
+def test_uhf_gradient_reduces_to_rhf_for_a_closed_shell() -> None:
+    """На закрытой оболочке градиент UHF обязан совпасть с градиентом RHF.
+
+    Это инвариант, а не приближение: при ``D^α = D^β = D/2`` выражение
+    ``−½ ΣΣ (D^αD^α + D^βD^β)·(μλ|νσ)`` сворачивается ровно в ``−¼ ΣΣ DD``.
+    Проверка ловит подмену обменного коэффициента ½ на ¼ — ошибка, при которой
+    энергия остаётся правильной, а силы расходятся в разы.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    basis = build_basis("sto-3g", molecule)
+    from_uhf = uhf_gradient(basis, molecule, run_uhf(basis, molecule, _TIGHT)).gradient
+    from_rhf = rhf_gradient(basis, molecule, run_rhf(basis, molecule, _TIGHT)).gradient
+    assert float(np.max(np.abs(from_uhf - from_rhf))) < 1e-10
+
+
+def test_uhf_gradient_of_stretched_hydrogen_matches_finite_differences() -> None:
+    """Растянутый H₂ в триплете: градиент вдоль связи против конечных разностей.
+
+    Другой режим, чем радикал CH: каналы различаются сильно, а градиент
+    ненулевой именно по одной координате.
+    """
+    stretched = Molecule(
+        atoms=(
+            Atom(symbol="H", position=(0.0, 0.0, 0.0)),
+            Atom(symbol="H", position=(0.0, 0.0, 2.0)),
+        ),
+        name="h2-stretched",
+        multiplicity=3,
+    )
+    basis = build_basis("sto-3g", stretched)
+    result = run_uhf(basis, stretched, _TIGHT)
+    assert result.converged
+    analytic = uhf_gradient(basis, stretched, result).gradient
+
+    step_angstrom = _STEP_BOHR / float(angstrom_to_bohr(1.0))
+    numeric = np.zeros_like(analytic)
+    for atom_index in range(2):
+        for axis in range(3):
+            energies = []
+            for sign in (1.0, -1.0):
+                shifted = _displace_keep_state(stretched, atom_index, axis, sign * step_angstrom)
+                energies.append(
+                    run_uhf(build_basis("sto-3g", shifted), shifted, _TIGHT).total_energy
+                )
+            numeric[atom_index, axis] = (energies[0] - energies[1]) / (2 * _STEP_BOHR)
+
+    assert float(np.max(np.abs(analytic - numeric))) < 1e-6
