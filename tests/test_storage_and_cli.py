@@ -22,7 +22,12 @@ from quantumlab.domain.spec import (
     Task,
     TheoryFamily,
 )
+from quantumlab.engine.basis import build_basis
+from quantumlab.engine.capabilities import Availability
+from quantumlab.engine.contracts import EngineRequest
+from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import default_registry
+from quantumlab.engine.scf import ScfSettings, run_rhf
 from quantumlab.errors import InvalidJobTransitionError
 from quantumlab.jobs.state_machine import JobStatus
 from quantumlab.storage.local_jobs import LocalJobStore
@@ -30,6 +35,10 @@ from quantumlab.storage.local_jobs import LocalJobStore
 FIXTURES = Path(__file__).parent / "fixtures"
 WATER = FIXTURES / "water.xyz"
 HYDROGEN = FIXTURES / "hydrogen.xyz"
+
+#: Жёсткие допуски: тесты сверяют число итераций, поэтому сходимость обязана
+#: определяться физикой, а не слишком свободным порогом.
+_TIGHT_SETTINGS = ScfSettings(energy_tolerance=1e-11, density_tolerance=1e-9, max_iterations=200)
 
 
 def make_job(name: str = "water-opt") -> Job:
@@ -529,4 +538,77 @@ def test_job_resume_is_refused_while_checkpoints_do_not_exist(tmp_path: Path) ->
 
     assert code == 2
     assert store.load(job_id).status is JobStatus.PAUSED, "статус не должен меняться"
-    assert not default_registry().get("job:checkpoint").availability.is_usable
+    # Контрольные точки реализованы, но не для всех расчётов — поэтому
+    # partial. Утверждение про «недоступно» стало бы неправдой.
+    checkpoint = default_registry().get("job:checkpoint")
+    assert checkpoint.availability is Availability.PARTIAL
+    assert checkpoint.limitations, "partial без перечисленных ограничений — это «готово»"
+
+
+def _paused_with_checkpoint(tmp_path: Path) -> tuple[LocalJobStore, str, int]:
+    """Приостановленное задание с настоящей контрольной точкой.
+
+    Контрольная точка создаётся настоящим движком, а не пишется в файл
+    вручную: иначе тест проверял бы умение теста сочинять JSON, а не
+    способность расчёта продолжиться. Статусы меняются штатными переходами.
+
+    Возвращает и число итераций «с нуля» — без него нельзя отличить
+    продолжение от повторного полного расчёта.
+    """
+    store, job_id = _queued_job(tmp_path, final=JobStatus.PAUSED)
+    job = store.load(job_id)
+    molecule = Molecule.from_xyz(
+        store.molecule_path(job_id).read_text(encoding="utf-8"), name=job.name
+    )
+    baseline = run_rhf(build_basis("sto-3g", molecule), molecule, _TIGHT_SETTINGS)
+
+    def persist(payload: str) -> None:
+        reference = store.save_checkpoint(job_id, job.attempt, payload)
+        store.update(job_id, lambda item: setattr(item, "checkpoint_uri", reference.uri))
+
+    ReferenceEngine(default_registry()).run(
+        EngineRequest(job_id=job_id, molecule=molecule, spec=job.spec),
+        checkpoint_sink=persist,
+    )
+    assert store.load(job_id).status is JobStatus.PAUSED
+    return store, job_id, baseline.iterations
+
+
+def test_job_resume_continues_from_the_checkpoint(tmp_path: Path) -> None:
+    """«Продолжить расчёт» продолжает, а не пересчитывает заново.
+
+    Проверяется ровно то, что отличает продолжение от нового запуска: итераций
+    заметно меньше, чем с нуля, а энергия та же. Команда, которая выполняла бы
+    полный расчёт под видом продолжения, прошла бы проверку статуса, но не эту.
+    """
+    store, job_id, baseline = _paused_with_checkpoint(tmp_path)
+    assert store.load(job_id).checkpoint_uri is not None
+
+    code = main(["--data-dir", str(tmp_path), "job", "resume", job_id])
+
+    after = store.load(job_id)
+    assert code == 0
+    assert after.status is JobStatus.COMPLETED
+    result = json.loads(Path(store.result_path(job_id)).read_text(encoding="utf-8"))
+    assert result["scf_iterations"] < baseline
+    assert result["energy_hartree"] == pytest.approx(-74.9630296563, abs=1e-9)
+
+
+def test_job_resume_detects_a_tampered_checkpoint(tmp_path: Path) -> None:
+    """Подменённая контрольная точка обнаруживается по контрольной сумме.
+
+    Без проверки расчёт сошёлся бы на изменённой плотности и выдал число,
+    которому нельзя доверять, — при этом статус выглядел бы успешным. Задание
+    обязано остаться приостановленным: оно не выполнено.
+    """
+    store, job_id, _ = _paused_with_checkpoint(tmp_path)
+    path = store.checkpoint_path(job_id, 0)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["density"][0][0] += 0.25
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    code = main(["--data-dir", str(tmp_path), "job", "resume", job_id])
+
+    assert code == 2
+    assert store.load(job_id).status is JobStatus.PAUSED
+    assert not Path(store.result_path(job_id)).exists()

@@ -323,12 +323,24 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
 #: повтора: повтор выполняется, а продолжать прерванный расчёт не с чего —
 #: чекпоинты не пишутся. Разделять их нужно, чтобы «Продолжить расчёт» (§14 ТЗ)
 #: не выглядело доступным там, где его нет.
-_JOB_OPTIONS: tuple[tuple[str, bool, str], ...] = (
-    ("retry", True, ""),
+#: Управление заданиями. Доступность задаётся перечислением, а не булевым
+#: флагом: «контрольные точки» реализованы не для всех расчётов, и булев флаг
+#: не отличил бы это от «реализовано полностью».
+_JOB_OPTIONS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
+    ("retry", Availability.IMPLEMENTED, ()),
     (
         "checkpoint",
-        False,
-        "Контрольные точки не пишутся, поэтому прерванный расчёт нельзя продолжить.",
+        Availability.PARTIAL,
+        (
+            "Пишутся только для RHF в одной точке: для UHF, ROHF, DFT и "
+            "оптимизации геометрии контрольные точки не создаются, и "
+            "«Продолжить расчёт» для них честно отказывает.",
+            "Восстанавливается плотность, а не история DIIS: рестарт — это "
+            "продолжение с сохранённой волновой функции, а не побитовое "
+            "воспроизведение прерванной последовательности итераций.",
+            "Контрольная точка привязана к геометрии и базису: при их "
+            "изменении рестарт отклоняется, а не выполняется с чужой плотностью.",
+        ),
     ),
 )
 
@@ -559,17 +571,17 @@ def default_registry() -> CapabilityRegistry:
             )
         )
 
-    for name, available, note in _JOB_OPTIONS:
+    for name, availability, limitations in _JOB_OPTIONS:
         capabilities.append(
             Capability(
                 id=f"job:{name}",
                 kind=CapabilityKind.JOB,
                 name=name,
-                availability=(
-                    Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
+                availability=availability,
+                since_version=(
+                    __version__ if availability is not Availability.NOT_IMPLEMENTED else None
                 ),
-                since_version=__version__ if available else None,
-                limitations=() if available else (note,),
+                limitations=limitations,
             )
         )
 

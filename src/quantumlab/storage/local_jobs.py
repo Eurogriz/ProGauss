@@ -22,6 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from quantumlab.domain.job import Job
+from quantumlab.domain.result import ArtifactKind, ArtifactRef
+from quantumlab.engine.checkpoint import (
+    CHECKPOINT_ARTIFACT_SCHEMA,
+    checkpoint_uri,
+    payload_sha256,
+    sha256_from_uri,
+)
+from quantumlab.errors import JobCheckpointInvalidError
 from quantumlab.jobs.state_machine import JobStatus
 
 
@@ -110,6 +118,51 @@ class LocalJobStore:
         temporary.write_text(payload, encoding="utf-8")
         temporary.replace(target)
         return target
+
+    def save_checkpoint(self, job_id: str, attempt: int, payload: str) -> ArtifactRef:
+        """Атомарно сохраняет контрольную точку и возвращает ссылку на артефакт.
+
+        Атомарность та же, что у результата: временный файл и ``rename``. Это
+        принципиально именно здесь — контрольную точку пишут посреди расчёта,
+        то есть ровно тогда, когда процесс чаще всего и падает.
+
+        Путь зависит от попытки, поэтому повтор не затирает состояние
+        предыдущего запуска: при разборе падения нужно видеть оба.
+        """
+        target = self.checkpoint_path(job_id, attempt)
+        temporary = target.with_suffix(f".tmp-{os.getpid()}")
+        temporary.write_text(payload, encoding="utf-8")
+        temporary.replace(target)
+        digest = payload_sha256(payload)
+        return ArtifactRef(
+            kind=ArtifactKind.CHECKPOINT,
+            uri=checkpoint_uri(target.name, digest),
+            sha256=digest,
+            size_bytes=len(payload.encode("utf-8")),
+            schema_version=CHECKPOINT_ARTIFACT_SCHEMA,
+        )
+
+    def load_checkpoint(self, job_id: str, attempt: int, uri: str | None = None) -> str | None:
+        """Возвращает содержимое контрольной точки либо ``None``, если её нет.
+
+        Если передан ``uri``, контрольная сумма из него сверяется с содержимым.
+        Несовпадение — ошибка, а не повод считать с тем, что лежит на диске:
+        подменённый или обрезанный файл дал бы расчёт, относящийся к другой
+        задаче. Отсутствие файла — нормальная ситуация: задание могло не
+        дожить до записи.
+        """
+        path = self.checkpoint_path(job_id, attempt)
+        if not path.exists():
+            return None
+        payload = path.read_text(encoding="utf-8")
+        expected = sha256_from_uri(uri) if uri is not None else None
+        if expected is not None and payload_sha256(payload) != expected:
+            msg = (
+                f"Контрольная сумма файла {path.name} не совпадает с сохранённой "
+                "в ссылке на артефакт. Файл изменён после записи."
+            )
+            raise JobCheckpointInvalidError(msg)
+        return payload
 
     def store_molecule(self, job_id: str, xyz_text: str) -> Path:
         """Сохраняет структуру задания как XYZ-файл."""

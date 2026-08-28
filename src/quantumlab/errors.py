@@ -36,6 +36,7 @@ class ErrorCode(StrEnum):
     VALENCE_VIOLATION = "molecule.valence_violation"
     INVALID_JOB_TRANSITION = "job.invalid_transition"
     JOB_NOT_RESUMABLE = "job.not_resumable"
+    JOB_CHECKPOINT_INVALID = "job.checkpoint_invalid"
     SCF_NOT_CONVERGED = "scf.not_converged"
     OPTIMIZATION_NOT_CONVERGED = "optimization.not_converged"
     IMAGINARY_FREQUENCIES = "frequencies.imaginary_modes"
@@ -395,6 +396,23 @@ class ImaginaryFrequenciesError(DiagnosisError):
         )
         self.count = count
         self.lowest = lowest
+
+
+class JobCheckpointInvalidError(QuantumLabError):
+    """Контрольная точка есть, но доверять ей нельзя (§14 ТЗ).
+
+    Отдельный код отличает «продолжать не с чего» от «продолжать можно, но
+    сохранённое состояние не соответствует расчёту или повреждено». Второе
+    требует внимания человека: автоматический повтор с такой контрольной
+    точкой дал бы число, относящееся к другой задаче.
+    """
+
+    code = ErrorCode.JOB_CHECKPOINT_INVALID
+
+    def __init__(self, reason: str) -> None:
+        """Создаёт ошибку с текстовой причиной ``reason``."""
+        super().__init__({"reason": reason})
+        self.reason = reason
 
 
 class ArtifactMissingError(QuantumLabError):

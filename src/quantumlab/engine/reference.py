@@ -27,7 +27,7 @@ import os
 import platform
 import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +54,12 @@ from quantumlab.domain.spec import (
 )
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet, basis_angular_scheme, build_basis
+from quantumlab.engine.checkpoint import (
+    CheckpointError,
+    assert_matches_job,
+    read_scf_checkpoint,
+    write_scf_checkpoint,
+)
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
 from quantumlab.engine.dft import RksResult, run_rks
 from quantumlab.engine.functional import (
@@ -82,7 +88,7 @@ from quantumlab.engine.scf import (
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
 from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
-from quantumlab.errors import ScfNotConvergedError
+from quantumlab.errors import JobCheckpointInvalidError, ScfNotConvergedError
 from quantumlab.version import __version__
 
 #: Имя ядра — попадает в отпечаток расчёта и в журнал.
@@ -184,6 +190,14 @@ class _Properties:
     beta_lumo: float | None = None
 
 
+CheckpointSink = Callable[[str], None]
+"""Приёмник контрольной точки.
+
+Движок отдаёт сериализованное состояние и не знает, куда оно попадёт: выбор
+хранилища — забота Job Manager'а.
+"""
+
+
 class ReferenceEngine:
     """NumPy-реализация ядра: RHF в точке (single point)."""
 
@@ -214,7 +228,11 @@ class ReferenceEngine:
     # Основной вход
     # ------------------------------------------------------------------ #
     def run(
-        self, request: EngineRequest, *, progress: ProgressReporter | None = None
+        self,
+        request: EngineRequest,
+        *,
+        progress: ProgressReporter | None = None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """Выполняет расчёт и возвращает результат с проверками качества.
 
@@ -229,15 +247,47 @@ class ReferenceEngine:
             return self._run_optimization(request, basis_name, progress=progress)
         if spec.task is Task.FREQUENCIES:
             return self._run_frequencies(request, basis_name, progress=progress)
-        return self._run_single_point(request, basis_name, progress=progress)
+        return self._run_single_point(
+            request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+        )
+
+    def _restore_density(
+        self, request: EngineRequest, basis_name: str, prepared: PrecomputedIntegrals
+    ) -> np.ndarray | None:
+        """Извлекает стартовую плотность из контрольной точки.
+
+        Возвращает ``None``, если контрольной точки нет: это обычная ситуация,
+        а не ошибка. А вот непригодная контрольная точка — ошибка штатная и
+        локализуемая: молча считать с ней нельзя, потому что расчёт сошёлся бы
+        и выдал число, относящееся к другой системе.
+        """
+        if request.checkpoint is None:
+            return None
+        try:
+            state = read_scf_checkpoint(request.checkpoint, overlap=prepared.overlap)
+            assert_matches_job(state, molecule=request.molecule, basis=basis_name)
+        except CheckpointError as error:
+            raise JobCheckpointInvalidError(str(error)) from error
+        return state.density
 
     # ------------------------------------------------------------------ #
     # Одноточечный расчёт
     # ------------------------------------------------------------------ #
     def _run_single_point(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
-        """Одноточечный расчёт в фиксированной геометрии."""
+        """Одноточечный расчёт в фиксированной геометрии.
+
+        Контрольные точки поддерживаются только в ветке RHF. Для остальных
+        ``checkpoint_sink`` не вызывается: это значит, что рестарт для них
+        недоступен, и ``job resume`` честно откажет, а не начнёт расчёт заново,
+        выдавая его за продолжение.
+        """
         method = request.spec.method
         if method is not None and method.theory is TheoryFamily.DFT:
             return self._run_single_point_rks(request, basis_name, progress=progress)
@@ -245,7 +295,9 @@ class ReferenceEngine:
             return self._run_single_point_uhf(request, basis_name, progress=progress)
         if method is not None and method.spin is SpinTreatment.ROHF:
             return self._run_single_point_rohf(request, basis_name, progress=progress)
-        return self._run_single_point_rhf(request, basis_name, progress=progress)
+        return self._run_single_point_rhf(
+            request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+        )
 
     def _run_single_point_rks(
         self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
@@ -327,7 +379,12 @@ class ReferenceEngine:
         )
 
     def _run_single_point_rhf(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """RHF в фиксированной геометрии."""
         spec = request.spec
@@ -345,9 +402,28 @@ class ReferenceEngine:
         _report(progress, 45.0, "integrals")
 
         started = time.perf_counter()
-        rhf = run_rhf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
+        rhf = run_rhf(
+            basis,
+            request.molecule,
+            _scf_settings(spec),
+            integrals=prepared,
+            initial_density=self._restore_density(request, basis_name, prepared),
+        )
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=rhf.iterations, converged=rhf.converged)
+        if checkpoint_sink is not None:
+            # Пишем состояние, даже если SCF не сошёлся: частично сошедшаяся
+            # плотность — лучшее начальное приближение для продолжения, чем
+            # догадка по остову.
+            checkpoint_sink(
+                write_scf_checkpoint(
+                    molecule=request.molecule,
+                    basis=basis_name,
+                    density=rhf.density,
+                    total_energy=rhf.total_energy,
+                    iterations=rhf.iterations,
+                )
+            )
 
         started = time.perf_counter()
         properties = _properties(rhf, request.molecule, dipole_integrals)

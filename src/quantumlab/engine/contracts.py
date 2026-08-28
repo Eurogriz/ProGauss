@@ -85,6 +85,13 @@ class EngineRequest(BaseModel):
     )
     molecule: Molecule
     spec: CalculationSpec
+    checkpoint: str | None = Field(
+        default=None,
+        description=(
+            "Содержимое контрольной точки для рестарта SCF. Ядро не знает, "
+            "откуда она взялась: хранилище — забота Job Manager'а."
+        ),
+    )
     threads: int = Field(default=1, ge=1)
     memory_mb: int = Field(default=2048, ge=1)
     resume_from: str | None = Field(default=None, description="URI чекпоинта для рестарта")

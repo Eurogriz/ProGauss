@@ -37,7 +37,7 @@ from quantumlab.engine.capabilities import CapabilityKind
 from quantumlab.engine.contracts import EngineRequest
 from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
-from quantumlab.errors import QuantumLabError
+from quantumlab.errors import JobNotResumableError, QuantumLabError
 from quantumlab.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, t
 from quantumlab.jobs.state_machine import JobStatus
 from quantumlab.recommend.profiles import HardwareContext, Resolution, resolve_profile
@@ -357,10 +357,16 @@ def _execute_job(
 ) -> int:
     """Исполняет задание и печатает итог.
 
-    Общий путь для ``run`` и ``job retry``. Держать две копии исполнения значило
-    бы, что они разойдутся, и повтор считался бы иначе, чем первый запуск.
-    Молекула перечитывается из хранилища: повтор обязан работать с той же
-    структурой, что и исходное задание, а не с той, что лежит в аргументах CLI.
+    Общий путь для ``run``, ``job retry`` и ``job resume``. Держать три копии
+    исполнения значило бы, что они разойдутся, и повтор считался бы иначе, чем
+    первый запуск. Молекула перечитывается из хранилища: повтор обязан работать
+    с той же структурой, что и исходное задание, а не с той, что лежит в
+    аргументах CLI.
+
+    Если у задания есть контрольная точка, расчёт продолжается с неё, а не
+    начинается заново. Это и есть «Продолжить расчёт» из §14 ТЗ: без такой
+    подстановки команда ``resume`` выполняла бы полный расчёт и выдавала его за
+    продолжение.
     """
     job = store.load(job_id)
     molecule = Molecule.from_xyz(
@@ -368,6 +374,19 @@ def _execute_job(
     )
     spec = job.spec
     engine = ReferenceEngine(registry)
+
+    # Контрольная точка читается до начала расчёта. Если она непригодна,
+    # ошибка всплывёт ниже штатной и локализуемой — молча считать с чужой
+    # плотностью нельзя.
+    stored_checkpoint: str | None = None
+    if job.checkpoint_uri is not None:
+        stored_checkpoint = store.load_checkpoint(job.id, job.attempt, job.checkpoint_uri)
+
+    attempt = job.attempt
+
+    def _persist_checkpoint(payload: str) -> None:
+        reference = store.save_checkpoint(job.id, attempt, payload)
+        store.update(job.id, lambda item: setattr(item, "checkpoint_uri", reference.uri))
 
     # Честная проверка доступности ДО запуска (§54 ТЗ): вместо имитации расчёта
     # сообщаем, чего именно не хватает. Задание остаётся в очереди — это правда:
@@ -390,11 +409,22 @@ def _execute_job(
             basis=basis_name,
         )
     )
-    store.update(job.id, lambda item: item.transition_to(JobStatus.STARTING, actor="cli"))
-    store.update(job.id, lambda item: item.transition_to(JobStatus.RUNNING, actor="cli"))
+    if store.load(job.id).status is JobStatus.PAUSED:
+        # Из PAUSED машина состояний разрешает только RUNNING: промежуточный
+        # STARTING там недопустим, и попытка перейти в него уронила бы
+        # продолжение расчёта.
+        store.update(job.id, lambda item: item.transition_to(JobStatus.RUNNING, actor="cli"))
+    else:
+        store.update(job.id, lambda item: item.transition_to(JobStatus.STARTING, actor="cli"))
+        store.update(job.id, lambda item: item.transition_to(JobStatus.RUNNING, actor="cli"))
 
     try:
-        result = engine.run(EngineRequest(job_id=job.id, molecule=molecule, spec=spec))
+        result = engine.run(
+            EngineRequest(
+                job_id=job.id, molecule=molecule, spec=spec, checkpoint=stored_checkpoint
+            ),
+            checkpoint_sink=_persist_checkpoint,
+        )
     except QuantumLabError as error:
         # Имя из «except ... as» удаляется по выходе из блока, поэтому диагноз
         # переводим в данные сразу: замыкание не должно ссылаться на переменную,
@@ -518,17 +548,23 @@ def _command_job(args: argparse.Namespace, registry: CapabilityRegistry, locale:
             print(t("cli.job.cancelled", locale, id=job_id))
             return 0
         if command == "resume":
-            # Контрольные точки не пишутся, поэтому продолжать не с чего.
-            # Прежняя версия просто переводила статус в RUNNING и печатала
-            # «Продолжен» — то есть сообщала о расчёте, которого не существует
-            # (§54 ТЗ). Проверка стоит до смены статуса: когда запись чекпоинтов
-            # появится, эта команда заработает без переделки.
-            store.load(job_id).ensure_resumable()
-            job = store.update(
-                job_id, lambda item: item.transition_to(JobStatus.RUNNING, actor="cli")
-            )
+            # Проверка стоит до любых изменений: задание без контрольной точки
+            # продолжать нечем, и оно обязано остаться в прежнем статусе.
+            # Прежняя версия переводила статус в RUNNING и печатала
+            # «Продолжен», не запуская ничего (§54 ТЗ).
+            job = store.load(job_id)
+            job.ensure_resumable()
+            # Файл проверяется до сообщения об успехе. ``ensure_resumable``
+            # знает только о ссылке в метаданных: если сам файл пропал,
+            # напечатать «Продолжен» означало бы пообещать расчёт, которого
+            # нет (§54 ТЗ).
+            if store.load_checkpoint(job.id, job.attempt, job.checkpoint_uri) is None:
+                raise JobNotResumableError(job.id)
+            # Расчёт продолжается с сохранённой плотности: _execute_job сам
+            # подставит контрольную точку. Сообщение печатается только теперь,
+            # когда продолжение действительно начнётся.
             print(t("cli.job.resumed", locale, id=job.id))
-            return 0
+            return _execute_job(store, job_id, registry, locale)
         if command == "retry":
             job = store.update(job_id, lambda item: item.retry(actor="cli"))
             print(t("cli.job.retried", locale, id=job.id, attempt=job.attempt))

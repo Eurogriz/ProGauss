@@ -219,6 +219,7 @@ def run_rhf(
     settings: ScfSettings | None = None,
     *,
     integrals: PrecomputedIntegrals | None = None,
+    initial_density: np.ndarray | None = None,
 ) -> ScfResult:
     """Выполняет RHF-расчёт.
 
@@ -232,6 +233,11 @@ def run_rhf(
 
     Интегралы можно передать готовыми через ``integrals`` — тогда их стоимость
     относится к этапу вызывающей стороны, а не к ``scf``.
+
+    ``initial_density`` задаёт стартовую плотность вместо догадки по
+    гамильтониану остова — это путь рестарта из контрольной точки. DIIS- и
+    сдвиговая истории при этом начинаются пустыми: экстраполяция по ошибкам
+    чужой последовательности не имеет смысла.
     """
     config = settings or ScfSettings()
     started = time.perf_counter()
@@ -258,10 +264,33 @@ def run_rhf(
         energies, coefficients_prime = np.linalg.eigh(symmetric)
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
-    energies, coefficients, coefficients_prime = diagonalize(
-        orthogonalizer.T @ core @ orthogonalizer
-    )
-    density = density_from_coefficients(coefficients, n_occupied)
+    if initial_density is not None:
+        # Рестарт из контрольной точки. Симметрия и число электронов
+        # проверяются при чтении чекпоинта, а не здесь: движок не должен
+        # знать о схеме файла. Размер матрицы проверяется на месте, потому
+        # что несоответствие базису — ошибка вызывающей стороны.
+        candidate = np.asarray(initial_density, dtype=float)
+        if candidate.shape != overlap.shape:
+            msg = (
+                f"Начальная плотность имеет размер {candidate.shape}, а базис "
+                f"требует {overlap.shape}."
+            )
+            raise ValueError(msg)
+        density = candidate
+        strategies = ["checkpoint-restart"]
+        # Цикл ниже строит коммутатор DIIS по C', а контрольная точка хранит
+        # только плотность. Приходится сделать одну диагонализацию фокиана,
+        # собранного по принятой плотности. Сама плотность при этом не
+        # переписывается: иначе рестарт потерял бы то, ради чего он затеян.
+        restart_fock = build_fock(core, density, eri)
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ restart_fock @ orthogonalizer
+        )
+    else:
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ core @ orthogonalizer
+        )
+        density = density_from_coefficients(coefficients, n_occupied)
 
     fock_history: list[np.ndarray] = []
     error_history: list[np.ndarray] = []
