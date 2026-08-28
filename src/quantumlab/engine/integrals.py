@@ -1184,21 +1184,37 @@ def _quartet_block(
     qx, qy, qz = arrays.q
     rx, ry, rz = arrays.r
 
+    # Бра-коэффициенты зависят только от пары (A, B), кет-коэффициенты — только
+    # от пары (C, D). Прежний цикл вычислял бра внутри обхода по ic, idx и ib,
+    # то есть |A|·|B|·|C|·|D| раз вместо |A|·|B|: для квартета d-оболочек это
+    # 1296 вычислений вместо 36, и каждый вызов — это три рекурсии Хельгакера
+    # по малым массивам, где стоимость определяет накладной расход NumPy, а не
+    # арифметика. Кэширование повторяет одни и те же вызовы, поэтому числа
+    # совпадают бит в бит; меняется только их количество.
+    ket_table = {
+        (ic, idx): _hermite_product_arrays(pc, pd, rx, ry, rz, arrays.c, arrays.d, alternating=True)
+        for ic, pc in enumerate(powers_c)
+        for idx, pd in enumerate(powers_d)
+    }
+    # Если кет-сторона пуста целиком, бра считать незачем: прежний цикл в этом
+    # случае не доходил до неё ни разу.
+    if not any(ket_table.values()):
+        return np.zeros((len(powers_a), len(powers_b), len(powers_c), len(powers_d)))
+    bra_table = {
+        (ia, ib): _hermite_product_arrays(pa, pb, qx, qy, qz, arrays.a, arrays.b)
+        for ia, pa in enumerate(powers_a)
+        for ib, pb in enumerate(powers_b)
+    }
+
     block = np.zeros((len(powers_a), len(powers_b), len(powers_c), len(powers_d)))
-    for ib, pb in enumerate(powers_b):
-        for ic, pc in enumerate(powers_c):
-            for idx, pd in enumerate(powers_d):
-                ket = _hermite_product_arrays(
-                    pc, pd, rx, ry, rz, arrays.c, arrays.d, alternating=True
-                )
-                if not ket:
-                    continue
-                for ia, pa in enumerate(powers_a):
-                    bra = _hermite_product_arrays(pa, pb, qx, qy, qz, arrays.a, arrays.b)
-                    values = _contract(bra, ket, arrays.coulomb)
-                    block[ia, ib, ic, idx] = float(
-                        arrays.coefficients @ (arrays.prefactor * values)
-                    ) * (scales[0][ia] * scales[1][ib] * scales[2][ic] * scales[3][idx])
+    for (ic, idx), ket in ket_table.items():
+        if not ket:
+            continue
+        for (ia, ib), bra in bra_table.items():
+            values = _contract(bra, ket, arrays.coulomb)
+            block[ia, ib, ic, idx] = float(arrays.coefficients @ (arrays.prefactor * values)) * (
+                scales[0][ia] * scales[1][ib] * scales[2][ic] * scales[3][idx]
+            )
     return block
 
 
