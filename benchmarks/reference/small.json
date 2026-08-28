@@ -1,25 +1,25 @@
 {
   "suite": "small",
-  "measured_at": "2026-08-27T14:54:54+0000",
+  "measured_at": "2026-08-28T17:16:20+0000",
   "hardware": "x86_64, 2 CPU, Linux 6.1.158+",
   "versions": {
     "python": "3.11.2",
     "numpy": "2.4.6",
     "blas": "scipy-openblas 0.3.31.188.0",
-    "git": "975cacf"
+    "git": "4ae57da"
   },
   "cases": {
     "hydrogen-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 0.2653,
+        "value": 0.312,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.3681,
+        "value": 0.4145,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 48.3,
+        "value": 49.6,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -29,15 +29,15 @@
     },
     "water-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 0.4475,
+        "value": 0.3699,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.5503,
+        "value": 0.4727,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 49.2,
+        "value": 50.8,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -47,15 +47,15 @@
     },
     "water-rhf-sto3g-grad": {
       "wall_s": {
-        "value": 1.4127,
+        "value": 0.5389,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 1.5147,
+        "value": 0.6393,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 49.2,
+        "value": 51.5,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -65,15 +65,15 @@
     },
     "water-rhf-631g-sp": {
       "wall_s": {
-        "value": 1.7616,
+        "value": 0.8774,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 1.8633,
+        "value": 0.98,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 49.9,
+        "value": 51.5,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -83,15 +83,15 @@
     },
     "water-rhf-sto3g-opt": {
       "wall_s": {
-        "value": 12.1281,
+        "value": 2.7905,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 12.2216,
+        "value": 2.8932,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 61.4,
+        "value": 64.7,
         "tolerance": 0.25
       },
       "scf_iterations": {

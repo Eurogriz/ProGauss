@@ -12,11 +12,11 @@ spec:
   grid: { preset: ultrafine }
 expect:
   energy_hartree:
-    value: -74.7320493297
+    value: -74.7320493283
     tol: 1.0e-7
     source: >-
       internal-reference (reference-cpu); независимо сверено с PySCF 2.14
-      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 4.0e-08 э
+      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 4.1e-08 э
   dipole_debye:
     value: 1.728787
     tol: 1.0e-5

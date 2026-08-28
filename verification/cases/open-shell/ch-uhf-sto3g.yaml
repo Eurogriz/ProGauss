@@ -10,11 +10,11 @@ spec:
   method: { theory: hf, basis: sto-3g, spin: uhf }
 expect:
   energy_hartree:
-    value: -37.7697682041
+    value: -37.7697681979
     tol: 1.0e-8
     source: >-
       internal-reference (reference-cpu); независимо сверено с PySCF 2.14
-      UHF/STO-3G, расхождение 9.8e-09 э
+      UHF/STO-3G, расхождение 1.6e-08 э
   spin_squared:
     value: 0.753182
     tol: 1.0e-5

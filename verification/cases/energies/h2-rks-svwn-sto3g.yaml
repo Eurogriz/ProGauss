@@ -16,7 +16,7 @@ expect:
     tol: 1.0e-7
     source: >-
       internal-reference (reference-cpu); независимо сверено с PySCF 2.14
-      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 1.4e-08 э
+      dft.RKS xc=LDA,VWN сетка (120,974), расхождение 1.37e-08 э
 quality:
   scf_converged: true
   electron_count: true

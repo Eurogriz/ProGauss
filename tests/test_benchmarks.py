@@ -42,12 +42,20 @@ def test_cases_are_valid_and_have_suites() -> None:
 
 
 def test_blocked_cases_state_a_reason() -> None:
-    """Заблокированный кейс обязан объяснять причину, а не просто отсутствовать."""
-    blocked = [case for case in runner.load_cases() if case.blocked_reason]
-    assert blocked, "ожидались заблокированные кейсы medium"
-    for case in blocked:
-        assert case.blocked_reason and len(case.blocked_reason) > 30, case.id
-        assert case.suite == "medium"
+    """Заблокированный кейс обязан объяснять причину, а не просто отсутствовать.
+
+    Прежнее требование «хотя бы один заблокированный кейс существует» снято:
+    оно заставляло бы держать кейс заблокированным и после устранения причины.
+    Бензол/6-31G был заблокирован из-за 245 с на сборку ERI; пакетная сборка
+    квартетов сократила её до ~12 с, и кейс измеряется наравне с остальными.
+    """
+    cases = runner.load_cases()
+    for case in cases:
+        if case.blocked_reason:
+            assert len(case.blocked_reason) > 30, case.id
+            assert case.suite == "medium"
+    measurable = {case.id for case in cases if not case.blocked_reason}
+    assert "benzene-rhf-631g-sp" in measurable
 
 
 def test_reference_matches_cases_and_is_parseable() -> None:

@@ -12,11 +12,11 @@ spec:
   grid: { preset: ultrafine }
 expect:
   energy_hartree:
-    value: -75.2457116792
+    value: -75.2457116778
     tol: 5.0e-6
     source: >-
       internal-reference (reference-cpu); сверено с PySCF 2.14 dft.RKS xc=PBE0
-      сетка (120,974), расхождение 1.1e-06 э — то же, что у PBE, потому что
+      сетка (120,974), расхождение 1.10e-06 э — то же, что у PBE, потому что
       остаток общий и происходит от корреляции PBE
   dipole_debye:
     value: 1.696875

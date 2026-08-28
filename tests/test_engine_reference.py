@@ -48,7 +48,7 @@ WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 
 #: Энергия RHF воды в STO-3G, независимо подтверждённая сверкой с PySCF
 #: (расхождение 9.0e-08 Eh, см. tests/test_crosscheck_pyscf.py).
-WATER_STO3G_ENERGY = -74.9630296563
+WATER_STO3G_ENERGY = -74.9630296542
 
 #: Диполь воды в STO-3G, дебай: совпадает с PySCF до 1e-7 a.u.
 WATER_STO3G_DIPOLE = 1.7253

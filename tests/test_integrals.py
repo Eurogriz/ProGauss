@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -361,3 +362,133 @@ def test_eri_build_is_not_repeated_by_quality_checks(
         )
     )
     assert len(calls) == 1, f"ERI собрана {len(calls)} раз вместо одного"
+
+
+# --------------------------------------------------------------------------- #
+# Функция Бойса против независимого эталона
+# --------------------------------------------------------------------------- #
+def _boys_reference(order: int, x: float) -> float:
+    r"""``F_n(x) = ∫₀¹ t^{2n} e^{−x t²} dt`` квадратурой Гаусса–Лежандра.
+
+    Эталон намеренно не использует ни ряд Тейлора, ни ``erf``: обе эти ветви
+    входят в проверяемую реализацию, и сравнение с ними ловило бы только ошибку
+    копирования. Подынтегральная функция аналитична на ``[0, 1]``, поэтому 96
+    узлов дают ~1e-15; точность самой квадратуры сверена с
+    ``scipy.special.hyp1f1(n+½, n+3/2, −x)/(2n+1)`` на всей сетке аргументов
+    теста (расхождение ≤ 1.6e-15).
+    """
+    nodes, weights = np.polynomial.legendre.leggauss(96)
+    t = 0.5 * (nodes + 1.0)
+    return float(np.sum(0.5 * weights * t ** (2 * order) * np.exp(-x * t * t)))
+
+
+#: Аргументы покрывают обе ветви и окрестность границы между ними.
+_BOYS_ARGUMENTS = (
+    0.0,
+    1e-9,
+    0.5,
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    5.5,
+    5.9,
+    5.999,
+    6.0,
+    6.5,
+    12.0,
+    80.0,
+    1000.0,
+)
+
+
+@pytest.mark.parametrize("order", range(9))
+def test_boys_matches_independent_quadrature(order: int) -> None:
+    """Обе ветви функции Бойса совпадают с квадратурой определяющего интеграла.
+
+    Регрессия, которую тест обязан ловить: при фиксированных 25 членах ряда
+    обрыв давал 1.2e-12 при ``x = 4`` и 2.8e-8 при ``x → 6`` — то есть ровно на
+    границе ветвей функция теряла семь знаков. Сравнение «векторный путь против
+    скалярного» этого не видело: оба пути ошибались одинаково.
+    """
+    for x in _BOYS_ARGUMENTS:
+        expected = _boys_reference(order, x)
+        assert integrals._boys(order, x) == pytest.approx(expected, abs=1e-13), x
+
+    arguments = np.asarray(_BOYS_ARGUMENTS)
+    reference = np.asarray([_boys_reference(order, x) for x in _BOYS_ARGUMENTS])
+    assert np.abs(integrals._boys_array(order, arguments) - reference).max() < 1e-13
+
+
+def test_boys_table_computes_all_orders_at_once() -> None:
+    """Таблица порядков совпадает с поштучным счётом и с квадратурой."""
+    arguments = np.asarray(_BOYS_ARGUMENTS)
+    table = integrals._boys_table(8, arguments)
+    assert len(table) == 9
+    for order in range(9):
+        expected = np.asarray([_boys_reference(order, x) for x in _BOYS_ARGUMENTS])
+        assert np.abs(table[order] - expected).max() < 1e-13, order
+
+
+@pytest.mark.parametrize("x_max", [0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 5.999])
+def test_series_terms_guarantees_truncation_bound(x_max: float) -> None:
+    """Подобранное число членов действительно обеспечивает заявленную точность.
+
+    Ряд знакочередующийся, поэтому остаток не больше первого отброшенного члена;
+    проверяем именно это неравенство, а не «число выглядит большим».
+    """
+    terms = integrals._series_terms(x_max)
+    remainder = x_max**terms / (math.factorial(terms) * (2 * terms + 1))
+    assert remainder < 1e-17, (x_max, terms, remainder)
+    # И что меньше брать нельзя: иначе тест не отличал бы запас от необходимости.
+    previous = (x_max ** (terms - 1)) / (math.factorial(terms - 1) * (2 * terms - 1))
+    assert previous >= 1e-17, (x_max, terms, previous)
+
+
+# --------------------------------------------------------------------------- #
+# Пакетная сборка ERI против поквартиетной
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("basis_name", ["sto-3g", "6-31g"])
+def test_batched_eri_matches_quartetwise_assembly(water: Molecule, basis_name: str) -> None:
+    """Пакетная сборка тензора совпадает с поквартиетной на всём тензоре.
+
+    Сравнение по всему тензору, а не по отдельным блокам: так ловятся ошибки
+    размещения (порядок сторон, набор перестановок) и ошибки группировки по
+    классам — например, пачка из квартетов с разным угловым моментом.
+    ``6-31g`` обязателен: в ``sto-3g`` все оболочки ``s``-типа, и путь
+    ``p``-оболочек остался бы непокрытым.
+    """
+    basis = build_basis(basis_name, water)
+    batched = build_electron_repulsion(basis, water)
+    reference = integrals._build_electron_repulsion_quartetwise(basis, water)
+    worst = float(np.abs(batched - reference).max())
+    assert worst < 1e-12, worst
+
+
+def test_batched_eri_derivative_matches_quartetwise_assembly(water: Molecule) -> None:
+    """То же для производной: у неё свой набор перестановок (только ``λ ↔ σ``)."""
+    basis = build_basis("sto-3g", water)
+    for axis in range(3):
+        batched = integrals.build_electron_repulsion_derivative(basis, water, axis)
+        reference = integrals._build_electron_repulsion_derivative_quartetwise(basis, water, axis)
+        worst = float(np.abs(batched - reference).max())
+        assert worst < 1e-12, (axis, worst)
+
+
+@pytest.mark.parametrize("target", [1, 7, 4096])
+def test_batch_size_does_not_change_eri(
+    water: Molecule, target: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Размер пачки — параметр производительности, а не точности.
+
+    При ``target = 1`` в пачке ровно один квартет, то есть пакетный код
+    проходит тот же путь, что и поквартиетная сборка, но с полным аппаратом
+    классификации и размещения.
+    """
+    basis = build_basis("6-31g", water)
+    reference = build_electron_repulsion(basis, water)
+    monkeypatch.setattr(integrals, "_TARGET_BATCH_ELEMENTS", target)
+    obtained = build_electron_repulsion(basis, water)
+    worst = float(np.abs(obtained - reference).max())
+    assert worst < 1e-12, (target, worst)

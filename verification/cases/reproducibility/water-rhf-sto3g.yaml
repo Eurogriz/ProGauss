@@ -7,7 +7,7 @@ spec:
   method: { theory: hf, basis: sto-3g }
 expect:
   energy_hartree:
-    value: -74.9630296563
+    value: -74.9630296542
     tol: 1.0e-8
     source: internal-reference (reference-cpu)
 reproducibility:

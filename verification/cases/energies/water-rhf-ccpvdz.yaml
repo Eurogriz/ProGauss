@@ -8,7 +8,7 @@ spec:
   method: { theory: hf, basis: cc-pvdz }
 expect:
   energy_hartree:
-    value: -76.0271119695
+    value: -76.0271119674
     tol: 1.0e-8
     source: internal-reference (reference-cpu)
   dipole_debye:
