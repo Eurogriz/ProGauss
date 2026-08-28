@@ -14,8 +14,10 @@
 
 from __future__ import annotations
 
+import importlib
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -39,13 +41,18 @@ from quantumlab.engine.contracts import EngineRequest
 from quantumlab.engine.dft import run_rks
 from quantumlab.engine.functional import (
     FUNCTIONALS,
+    B3lyp,
+    BeckeExchange,
+    Blyp,
     LdaExchange,
+    LypCorrelation,
     Pbe0,
     PbeCorrelation,
     PbeExchange,
     PwCorrelation,
     Svwn,
     VwnCorrelation,
+    VwnRpaCorrelation,
     density_at_points,
     evaluate_basis,
     evaluate_basis_with_gradients,
@@ -202,7 +209,7 @@ def test_get_functional_rejects_unimplemented() -> None:
     assert get_functional("svwn").name == "svwn"
     assert get_functional("pbe").name == "pbe"
     with pytest.raises(FunctionalNotFoundError):
-        get_functional("b3lyp")
+        get_functional("tpssh")
 
 
 def test_functional_registry_and_capabilities_agree() -> None:
@@ -211,7 +218,7 @@ def test_functional_registry_and_capabilities_agree() -> None:
     for name in FUNCTIONALS:
         assert registry.availability(f"functional:{name}").is_usable, name
     # Заявленное в ТЗ, но не реализованное — по-прежнему честно недоступно.
-    assert not registry.availability("functional:b3lyp").is_usable
+    assert not registry.availability("functional:tpssh").is_usable
     assert not registry.availability("functional:wb97x-d").is_usable
 
 
@@ -328,11 +335,11 @@ def test_engine_runs_dft_geometry_optimization(water: Molecule) -> None:
 
 
 def test_engine_refuses_unimplemented_functional(water: Molecule) -> None:
-    """B3LYP заявлен в ТЗ, но не реализован — честный отказ вместо числа."""
+    """TPSSh заявлен в ТЗ, но не реализован — честный отказ вместо числа."""
     with pytest.raises(FunctionalNotFoundError):
         ReferenceEngine().run(
             EngineRequest(
-                job_id="dft", spec=_dft_spec(functional="b3lyp"), molecule=water, threads=1
+                job_id="dft", spec=_dft_spec(functional="tpssh"), molecule=water, threads=1
             )
         )
 
@@ -747,3 +754,133 @@ def test_exact_exchange_deepens_the_homo(water: Molecule) -> None:
     gga_homo = gga.orbital_energies[water.n_electrons // 2 - 1]
     hybrid_homo = hybrid.orbital_energies[water.n_electrons // 2 - 1]
     assert hybrid_homo < gga_homo
+
+
+# --------------------------------------------------------------------------- #
+# B88, LYP, BLYP и B3LYP
+# --------------------------------------------------------------------------- #
+
+
+def _grid(seed: int = 7, size: int = 300) -> tuple[np.ndarray, np.ndarray]:
+    """Случайные, но воспроизводимые плотность и градиент для сверки с LibXC."""
+    generator = np.random.default_rng(seed)
+    rho = generator.uniform(0.05, 4.0, size)
+    return rho, generator.uniform(0.0, 3.0, (size, 3))
+
+
+@pytest.mark.parametrize(
+    ("factory", "code"),
+    [
+        (BeckeExchange, "GGA_X_B88"),
+        (LypCorrelation, "GGA_C_LYP"),
+    ],
+)
+def test_b88_and_lyp_match_libxc(factory: Any, code: str) -> None:
+    """B88 и LYP совпадают с LibXC по энергии и по обоим потенциалам.
+
+    Проверяются именно потенциалы, а не только энергия: расчёт с верной энергией
+    и неверным потенциалом сошёлся бы к другой плотности, и ошибка проявилась бы
+    как «просто другая энергия» без видимой причины.
+
+    Отдельно здесь фиксируется соглашение, которое легко перепутать: поправка
+    B88 считается по спиновым каналам ``ρ_σ = ρ/2``, а LDA-слагаемое — по полной
+    плотности. Попытка удвоить и LDA по каналам расходится на 2.4e-01.
+    """
+    pyscf = pytest.importorskip("pyscf")
+    importlib.import_module("pyscf.dft")
+    libxc = pyscf.dft.libxc
+
+    rho, gradient = _grid()
+    raw = np.zeros((1, 4, rho.size))
+    raw[0, 0] = rho
+    raw[0, 1:] = gradient.T
+    reference_energy, reference_potential, _, _ = libxc.eval_xc(code, raw)
+
+    got = factory().evaluate(np.zeros((rho.size, 3)), rho, gradient)
+
+    assert np.max(np.abs(got.energy_density - reference_energy)) < 1e-12
+    assert got.vsigma is not None
+    assert np.max(np.abs(got.vrho - reference_potential[0])) < 1e-12
+    assert np.max(np.abs(got.vsigma - reference_potential[1])) < 1e-12
+
+
+def test_blyp_and_b3lyp_match_libxc() -> None:
+    """Смеси совпадают с LibXC целиком, включая вес точного обмена.
+
+    Для B3LYP это одновременно проверка разложения: ``0.08·LDA + 0.72·B88``
+    раскрывается в ``0.80·LDA + 0.72·ΔB88``, а корреляция обязана быть смесью
+    ``0.81·LYP + 0.19·VWN(RPA)``. Совпадение с эталоном до машинной точности
+    означает, что все четыре веса и выбор RPA-параметризации верны.
+    """
+    pyscf = pytest.importorskip("pyscf")
+    importlib.import_module("pyscf.dft")
+    libxc = pyscf.dft.libxc
+
+    rho, gradient = _grid()
+    raw = np.zeros((1, 4, rho.size))
+    raw[0, 0] = rho
+    raw[0, 1:] = gradient.T
+
+    exchange, _, _ = libxc.eval_xc("GGA_X_B88", raw)[:3]
+    correlation = libxc.eval_xc("GGA_C_LYP", raw)
+    blyp = Blyp().evaluate(np.zeros((rho.size, 3)), rho, gradient)
+    assert np.max(np.abs(blyp.energy_density - (exchange + correlation[0]))) < 1e-12
+
+    reference_energy, reference_potential, _, _ = libxc.eval_xc("B3LYP", raw)
+    functional = B3lyp()
+    b3lyp = functional.evaluate(np.zeros((rho.size, 3)), rho, gradient)
+    assert np.max(np.abs(b3lyp.energy_density - reference_energy)) < 1e-12
+    assert functional.exact_exchange_fraction == pytest.approx(0.20)
+    assert b3lyp.vsigma is not None
+    assert np.max(np.abs(b3lyp.vrho - reference_potential[0])) < 1e-12
+    assert np.max(np.abs(b3lyp.vsigma - reference_potential[1])) < 1e-12
+
+
+def test_b3lyp_needs_the_rpa_parametrization_of_vwn() -> None:
+    """B3LYP смешивает LYP с VWN именно в RPA-параметризации.
+
+    Проверка на конкретную причину, а не на «совпало»: подстановка VWN5 меняет
+    корреляционную энергию заметно сильнее, чем расхождение с эталоном у всех
+    прочих функционалов, то есть ошибка была бы видна как необъяснимый сдвиг.
+    """
+    pyscf = pytest.importorskip("pyscf")
+    importlib.import_module("pyscf.dft")
+    libxc = pyscf.dft.libxc
+
+    rho = np.linspace(0.1, 4.0, 50)
+    reference = libxc.eval_xc("LDA_C_VWN_RPA", rho)[0] * rho
+    rpa = VwnRpaCorrelation().evaluate(np.zeros((rho.size, 3)), rho)
+    assert np.max(np.abs(rpa.energy_density * rho - reference)) < 1e-12
+
+    vwn5 = VwnCorrelation().evaluate(np.zeros((rho.size, 3)), rho)
+    assert np.max(np.abs(vwn5.energy_density - rpa.energy_density)) > 1e-4
+
+
+@pytest.mark.parametrize(("name", "pyscf_xc"), [("blyp", "BLYP"), ("b3lyp", "B3LYP")])
+def test_blyp_and_b3lyp_energies_match_pyscf(water: Molecule, name: str, pyscf_xc: str) -> None:
+    """Энергии BLYP и B3LYP совпадают с независимой реализацией.
+
+    Сквозная проверка: квадратурная сетка, XC-матрица и SCF вместе. Допуск
+    такой же, как у PBE и PBE0 — расхождение определяется сеткой, а не
+    формулами, и его величина известна по остальным функционалам.
+    """
+    pyscf = pytest.importorskip("pyscf")
+
+    spec = CalculationSpec(
+        task=Task.SINGLE_POINT,
+        method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional=name),
+    )
+    result = ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water))
+
+    atom_string = "; ".join(
+        f"{atom.symbol} {atom.position[0]} {atom.position[1]} {atom.position[2]}"
+        for atom in water.atoms
+    )
+    reference = pyscf.dft.RKS(pyscf.gto.M(atom=atom_string, basis="sto-3g", cart=True, verbose=0))
+    reference.xc = pyscf_xc
+    reference.conv_tol = 1e-12
+    reference.grids.atom_grid = (120, 974)
+    expected = float(reference.kernel())
+
+    assert result.converged
+    assert result.energy_hartree == pytest.approx(expected, abs=1e-6)

@@ -297,7 +297,7 @@ def test_cli_run_rejects_unimplemented_functional(
             "--method",
             "dft",
             "--functional",
-            "b3lyp",
+            "tpssh",
             "--basis",
             "sto-3g",
         ]

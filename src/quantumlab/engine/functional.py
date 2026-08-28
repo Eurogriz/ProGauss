@@ -893,17 +893,382 @@ class Pbe0:
         )
 
 
+# --------------------------------------------------------------------------- #
+# B88 и LYP: ингредиенты BLYP и B3LYP
+# --------------------------------------------------------------------------- #
+
+#: Параметр Беке (1988). Единственный параметр B88; подобран на атомах.
+_B88_BETA = 0.0042
+
+#: Константы Colle–Salvetti в записи LYP (Lee, Yang, Parr 1988). В литературе
+#: ``a`` и ``b`` встречаются и в обратном порядке, поэтому значения сверены с
+#: LibXC численно, а не переписаны по названию: форма с ``a = 0.04918`` перед
+#: первым членом воспроизводит ``GGA_C_LYP`` до 2.8e-16.
+_LYP_A = 0.04918
+_LYP_B = 0.132
+_LYP_C = 0.2533
+_LYP_D = 0.349
+
+#: ``C_F = (3/10)(3π²)^(2/3)`` — коэффициент кинетической энергии Томаса–Ферми.
+_LYP_CF = (3.0 / 10.0) * (3.0 * np.pi**2) ** (2.0 / 3.0)
+
+
+class BeckeExchange:
+    """Обмен B88: LDA плюс градиентная поправка Беке (1988).
+
+    ``ε_x^σ = ε_x^{LDA}(ρ_σ) − β ρ_σ^{4/3} x_σ²/(1 + 6β x_σ asinh x_σ)``,
+    ``x_σ = |∇ρ_σ|/ρ_σ^{4/3}``, ``β = 0.0042``.
+
+    Поправка считается по спиновым каналам: ``ρ_σ = ρ/2``, ``|∇ρ_σ| = |∇ρ|/2``,
+    результат суммируется по двум каналам. Это не формальность: подстановка
+    полной плотности вместо ``ρ/2`` расходится с LibXC на 1.5e-02, тогда как
+    спиновая запись совпадает до 5.6e-16.
+
+    Класс возвращает обмен **целиком**, включая LDA, — так же устроен
+    ``GGA_X_B88`` в LibXC. Именно поэтому B3LYP собирается как
+    ``0.08·LDA + 0.72·B88``: слагаемые LDA дают ``0.08 + 0.72 = 0.80``, что и
+    есть ``(1 − a₀)`` при ``a₀ = 0.20``, а от B88 остаётся только градиентная
+    поправка с весом ``0.72``.
+    """
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "b88_x"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "gga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы обмена B88."""
+        del points, spin_polarized
+        if density_gradient is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient) ** 2, axis=1)
+        valid = rho > _DENSITY_FLOOR
+
+        safe_rho = np.where(valid, rho, 1.0)
+        safe_sigma = np.where(valid, sigma, 0.0)
+
+        # Спиновый канал: rho_s = rho/2, |grad rho_s| = |grad rho|/2.
+        channel = 0.5 * safe_rho
+        gradient = 0.5 * np.sqrt(safe_sigma)
+        x = np.zeros_like(rho)
+        x[valid] = gradient[valid] / channel[valid] ** (4.0 / 3.0)
+
+        denominator = 1.0 + 6.0 * _B88_BETA * x * np.arcsinh(x)
+        # F(x) = x²/(1 + 6βx·asinh x) и её производная по x.
+        correction = x**2 / denominator
+        d_correction = (
+            2.0 * x * denominator
+            - x**2 * 6.0 * _B88_BETA * (np.arcsinh(x) + x / np.sqrt(1.0 + x**2))
+        ) / denominator**2
+
+        # k — энергия на единицу объёма. Слагаемые собраны по-разному, и это не
+        # произвол: LDA берётся по полной плотности, а градиентная поправка — по
+        # спиновым каналам. Именно так устроен GGA_X_B88 в LibXC; попытка удвоить
+        # и LDA по каналам даёт расхождение 2.4e-01.
+        base = channel ** (4.0 / 3.0)
+        k = -0.75 * _SLATER_FACTOR * safe_rho ** (4.0 / 3.0) - 2.0 * _B88_BETA * base * correction
+
+        # Производные по rho и sigma через цепочку x -> (rho_s, |grad rho_s|).
+        dx_drho = np.zeros_like(rho)
+        dx_drho[valid] = -(4.0 / 3.0) * gradient[valid] / channel[valid] ** (7.0 / 3.0) * 0.5
+        dx_dsigma = np.zeros_like(rho)
+        nonzero = valid & (safe_sigma > 0.0)
+        dx_dsigma[nonzero] = (
+            1.0 / channel[nonzero] ** (4.0 / 3.0) / (4.0 * np.sqrt(safe_sigma[nonzero]))
+        )
+
+        vrho = -_SLATER_FACTOR * safe_rho ** (1.0 / 3.0) - 2.0 * _B88_BETA * (
+            (4.0 / 3.0) * channel ** (1.0 / 3.0) * 0.5 * correction + base * d_correction * dx_drho
+        )
+        vsigma = -2.0 * _B88_BETA * base * d_correction * dx_dsigma
+
+        energy = np.zeros_like(rho)
+        energy[valid] = k[valid] / rho[valid]
+        return XcEvaluation(
+            energy_density=energy,
+            vrho=np.where(valid, vrho, 0.0),
+            vsigma=np.where(valid, vsigma, 0.0),
+        )
+
+
+class LypCorrelation:
+    """Корреляция LYP (Colle–Salvetti в форме Lee–Yang–Parr, 1988).
+
+    Запись через полную плотность и ``σ = |∇ρ|²`` — та, что воспроизводит
+    ``GGA_C_LYP`` из LibXC::
+
+        k = −a ρ Z − a b ω ρ² [ C_F ρ^{8/3} − σ (1/24 + 7δ/72) ]
+        Z = (1 + d ρ^{−1/3})^{−1},  δ = (c + d Z) ρ^{−1/3}
+        ω = e^{−c ρ^{−1/3}} Z ρ^{−11/3}
+
+    Локальная часть (``σ = 0``) совпадает с эталоном до 2.8e-16. Коэффициент
+    при ``σ`` и определение ``δ`` восстановлены по эталону и проверены на сетке
+    из 40 плотностей от 0.05 до 20: разложение по базису ``{1, δ, δ²}`` даёт
+    1/24 и 7/72 при остатке 3.8e-11, то есть форма определена однозначно.
+    ``δ`` здесь — величина из спин-поляризованной записи Molpro,
+    ``(c + dZ) ρ^{−1/3}``, а не ``c ρ^{−1/3} Z`` из замкнутой: при ``σ = 0`` обе
+    дают одинаковую энергию, поэтому локальная часть выбрать между ними не
+    может, и подстановка «замкнутого» ``δ`` расходится на десятки процентов.
+
+    Здесь ``k`` — энергия на единицу объёма, то есть ``ρ ε_c``. Лапласиан
+    плотности, присутствующий в исходной формуле Colle–Salvetti, исключён
+    интегрированием по частям: поэтому функционал остаётся GGA и не требует
+    вторых производных плотности на сетке.
+    """
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "lyp_c"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "gga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы корреляции LYP."""
+        del points, spin_polarized
+        if density_gradient is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient) ** 2, axis=1)
+        valid = rho > _DENSITY_FLOOR
+
+        r = np.where(valid, rho, 1.0)
+        s = np.where(valid, sigma, 0.0)
+
+        cube_root = r ** (1.0 / 3.0)
+        inverse = 1.0 / cube_root
+        z_factor = 1.0 / (1.0 + _LYP_D * inverse)
+        delta = (_LYP_C + _LYP_D * z_factor) * inverse
+        omega = np.exp(-_LYP_C * inverse) * z_factor * r ** (-11.0 / 3.0)
+        bracket = 1.0 / 24.0 + 7.0 * delta / 72.0
+
+        k = (
+            -_LYP_A * r * z_factor
+            - _LYP_A * _LYP_B * _LYP_CF * omega * r ** (14.0 / 3.0)
+            + _LYP_A * _LYP_B * omega * r**2 * s * bracket
+        )
+
+        # Производные по rho. Обозначения совпадают с формулами выше.
+        d_z = _LYP_D * z_factor**2 / (3.0 * r ** (4.0 / 3.0))
+        # dδ/dρ для δ = (c + dZ) ρ^{−1/3}; dZ/dρ = d Z²/(3 ρ^{4/3}).
+        d_delta = (_LYP_D**2 * z_factor**2 * inverse - (_LYP_C + _LYP_D * z_factor)) / (
+            3.0 * r ** (4.0 / 3.0)
+        )
+        d_bracket = (7.0 / 72.0) * d_delta
+        d_omega = omega * (
+            (_LYP_C + _LYP_D * z_factor) / (3.0 * r ** (4.0 / 3.0)) - (11.0 / 3.0) / r
+        )
+
+        product = _LYP_A * _LYP_B
+        vrho = (
+            -_LYP_A * (z_factor + r * d_z)
+            - product
+            * _LYP_CF
+            * (d_omega * r ** (14.0 / 3.0) + omega * (14.0 / 3.0) * r ** (11.0 / 3.0))
+            + product
+            * s
+            * (d_omega * r**2 * bracket + omega * 2.0 * r * bracket + omega * r**2 * d_bracket)
+        )
+        vsigma = product * omega * r**2 * bracket
+
+        energy = np.zeros_like(rho)
+        energy[valid] = k[valid] / rho[valid]
+        return XcEvaluation(
+            energy_density=energy,
+            vrho=np.where(valid, vrho, 0.0),
+            vsigma=np.where(valid, vsigma, 0.0),
+        )
+
+
+class VwnRpaCorrelation(VwnCorrelation):
+    """Корреляция VWN в параметризации IV (RPA).
+
+    Отличается от :class:`VwnCorrelation` только тремя коэффициентами
+    разложения. Это не косметика: B3LYP по построению смешивает LYP именно с
+    RPA-параметризацией, и подстановка VWN5 меняет энергию на 3.8e-03 э —
+    заметно больше, чем расхождение с эталоном у всех прочих функционалов.
+    """
+
+    X0: float = -0.409286
+    B: float = 13.0720
+    C: float = 42.7198
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "vwn_rpa"
+
+
+class Blyp:
+    """BLYP: обмен B88 плюс корреляция LYP."""
+
+    name: str = "blyp"
+    functional_class: str = "gga"
+    is_hybrid: bool = False
+    exact_exchange_fraction: float = 0.0
+
+    def __init__(self) -> None:
+        """Собирает обменную и корреляционную части."""
+        self._exchange = BeckeExchange()
+        self._correlation = LypCorrelation()
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Сумма обмена B88 и корреляции LYP."""
+        del spin_polarized
+        exchange = self._exchange.evaluate(points, density, density_gradient)
+        correlation = self._correlation.evaluate(points, density, density_gradient)
+        vsigma = None
+        if exchange.vsigma is not None:
+            vsigma = exchange.vsigma + (
+                correlation.vsigma if correlation.vsigma is not None else 0.0
+            )
+        return XcEvaluation(
+            energy_density=exchange.energy_density + correlation.energy_density,
+            vrho=exchange.vrho + correlation.vrho,
+            vsigma=vsigma,
+        )
+
+
+class B3lyp:
+    """B3LYP (Becke 1993, три параметра).
+
+    ``E_xc = 0.80·E_x^LSDA + 0.20·E_x^HF + 0.72·ΔE_x^B88 + 0.81·E_c^LYP + 0.19·E_c^VWN(RPA)``
+
+    В коде обмен собран иначе, но тождественно: ``B88`` здесь возвращается
+    вместе со своим LDA-слагаемым, поэтому ``0.08·LDA + 0.72·B88`` раскрывается
+    в ``0.80·LDA + 0.72·ΔB88``.
+
+    Две детали, которые легко упустить. Во-первых, LYP смешивается с VWN через
+    коэффициент 0.81, а не добавляется к уже имеющейся корреляции: LYP сам
+    содержит локальную часть, и двойной учёт завысил бы корреляцию. Во-вторых,
+    VWN обязан быть в RPA-параметризации — с VWN5 энергия уходит на 3.8e-03 э.
+    """
+
+    name: str = "b3lyp"
+    functional_class: str = "hybrid"
+    is_hybrid: bool = True
+    exact_exchange_fraction: float = 0.20
+
+    #: Вес LDA-обмена сверх того, что уже входит в B88.
+    lda_exchange_fraction: float = 0.08
+    #: Вес обмена B88 (вместе с его LDA-частью).
+    dft_exchange_fraction: float = 0.72
+    #: Вес корреляции LYP; остаток до единицы — VWN(RPA).
+    lyp_fraction: float = 0.81
+
+    def __init__(self) -> None:
+        """Собирает четыре полунелокальные части."""
+        self._lda = LdaExchange()
+        self._becke = BeckeExchange()
+        self._lyp = LypCorrelation()
+        self._vwn = VwnRpaCorrelation()
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """Полунелокальная часть B3LYP; точный обмен подставляет решатель."""
+        del spin_polarized
+        lda = self._lda.evaluate(points, density)
+        becke = self._becke.evaluate(points, density, density_gradient)
+        lyp = self._lyp.evaluate(points, density, density_gradient)
+        vwn = self._vwn.evaluate(points, density)
+
+        w_lda, w_becke, w_lyp = (
+            self.lda_exchange_fraction,
+            self.dft_exchange_fraction,
+            self.lyp_fraction,
+        )
+        w_vwn = 1.0 - w_lyp
+
+        vsigma = None
+        if becke.vsigma is not None:
+            vsigma = w_becke * becke.vsigma + w_lyp * (
+                lyp.vsigma if lyp.vsigma is not None else 0.0
+            )
+        return XcEvaluation(
+            energy_density=(
+                w_lda * lda.energy_density
+                + w_becke * becke.energy_density
+                + w_lyp * lyp.energy_density
+                + w_vwn * vwn.energy_density
+            ),
+            vrho=(w_lda * lda.vrho + w_becke * becke.vrho + w_lyp * lyp.vrho + w_vwn * vwn.vrho),
+            vsigma=vsigma,
+        )
+
+
 #: Функционалы, которые ядро действительно умеет считать. Реестр обращается к
 #: этому словарю, поэтому «заявлено» и «реализовано» не могут разойтись.
-FUNCTIONALS: dict[str, type[Svwn] | type[Pbe] | type[Pbe0]] = {
+FUNCTIONALS: dict[str, type[Svwn] | type[Pbe] | type[Pbe0] | type[Blyp] | type[B3lyp]] = {
     "svwn": Svwn,
     "lda": Svwn,
     "pbe": Pbe,
+    "blyp": Blyp,
     "pbe0": Pbe0,
+    "b3lyp": B3lyp,
 }
 
 
-def get_functional(name: str) -> Svwn | Pbe | Pbe0:
+def get_functional(name: str) -> Svwn | Pbe | Pbe0 | Blyp | B3lyp:
     """Возвращает реализованный функционал по имени.
 
     Бросает ``FunctionalNotFoundError`` — ту же ошибку, что и реестр
