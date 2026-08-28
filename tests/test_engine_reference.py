@@ -258,7 +258,7 @@ def test_unimplemented_theory_is_rejected() -> None:
         _run(
             spec=CalculationSpec(
                 task=Task.SINGLE_POINT,
-                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="pbe0"),
+                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="b3lyp"),
             )
         )
 

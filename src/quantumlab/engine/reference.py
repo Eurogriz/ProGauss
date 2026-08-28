@@ -1014,6 +1014,13 @@ def _quality_checks_rks(
     kinetic = float(np.sum(density * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(density * integrals.build_nuclear_attraction(basis, molecule)))
     coulomb = float(np.einsum("uv,ls,uvls", density, density, prepared.eri))
+    # Гибрид добавляет долю точного обмена и в фокиан, и в разложение энергии.
+    # Без обоих членов проверка выдала бы FAIL на корректном гибриде — или, что
+    # хуже, PASS на гибриде, где точный обмен потерялся.
+    alpha = rks.exact_exchange_fraction
+    exchange_integral = (
+        float(np.einsum("uv,ls,ulvs", density, density, prepared.eri)) if alpha > 0.0 else 0.0
+    )
 
     rho = density_at_points(basis_values, density)
     grid_electrons = float(np.sum(grid.weights * rho))
@@ -1023,6 +1030,8 @@ def _quality_checks_rks(
         msg = "RKS-результат без обменно-корреляционного потенциала: проверки невозможны."
         raise ValueError(msg)
     fock = prepared.core + coulomb_matrix(density, prepared.eri) + v_xc
+    if alpha > 0.0:
+        fock = fock - 0.5 * alpha * exchange_matrix(density, prepared.eri)
     commutator_error = float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock)))
 
     decomposition_error = abs(
@@ -1030,6 +1039,7 @@ def _quality_checks_rks(
         + attraction
         + 0.5 * coulomb
         + rks.xc_energy
+        - 0.25 * alpha * exchange_integral
         + rks.nuclear_repulsion
         - rks.total_energy
     )

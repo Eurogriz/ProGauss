@@ -92,7 +92,9 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
     assert any("градиент" in text for text in dft.limitations)
     # Реализованный функционал виден в реестре, заявленный без кода — нет.
     assert registry.is_available("functional:svwn")
-    assert not registry.is_available("functional:pbe0")
+    assert registry.is_available("functional:pbe")
+    assert registry.is_available("functional:pbe0")
+    assert not registry.is_available("functional:b3lyp")
     assert not registry.is_available("method:ccsd_t")
     assert not registry.is_available("spin:rohf")
 
@@ -118,7 +120,7 @@ def test_assert_available_distinguishes_error_types(registry: CapabilityRegistry
     with pytest.raises(BasisNotFoundError):
         registry.assert_available("basis:unobtainium-qzvp")
     with pytest.raises(FunctionalNotFoundError):
-        registry.assert_available("functional:pbe0")
+        registry.assert_available("functional:b3lyp")
     # optimization реализована, поэтому примером недоступной задачи служат
     # частоты: для них нужен гессиан, которого нет.
     with pytest.raises(MethodNotAvailableError):

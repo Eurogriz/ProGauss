@@ -132,10 +132,17 @@ def test_high_accuracy_matches_documented_example(water: Molecule) -> None:
     assert "Выбран базисный набор def2-tzvp" in lines
     method = resolution.spec.method
     assert method is not None
-    # Условие привязано к доступности самого функционала, а не к семейству
-    # методов: DFT может быть реализован частично, и тогда обещать PBE0 нельзя.
-    if default_registry().is_available("functional:pbe0"):
-        assert "Выбран функционал pbe0" in lines
+    # Профиль обещает «функционал + базис + дисперсия» целиком, поэтому условие
+    # отката обязано учитывать всё обещание, а не только функционал. PBE0
+    # реализован, но профиль «Высокая точность» требует ещё и D3(BJ), которой
+    # в ядре нет, — и профиль честно разворачивается в HF.
+    functional, _, _, dispersion = _base_choice(PrecisionProfile.HIGH_ACCURACY)
+    registry = default_registry()
+    promised = registry.is_available(f"functional:{functional}") and registry.is_available(
+        f"dispersion:{dispersion.value}"
+    )
+    if promised:
+        assert f"Выбран функционал {functional}" in lines
     else:
         assert method.theory is TheoryFamily.HF
         assert any("не реализован" in line for line in lines)

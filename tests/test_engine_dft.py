@@ -40,6 +40,7 @@ from quantumlab.engine.dft import run_rks
 from quantumlab.engine.functional import (
     FUNCTIONALS,
     LdaExchange,
+    Pbe0,
     PbeCorrelation,
     PbeExchange,
     PwCorrelation,
@@ -59,7 +60,7 @@ from quantumlab.engine.quadrature import (
 )
 from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import default_registry
-from quantumlab.engine.scf import build_integrals, run_rhf
+from quantumlab.engine.scf import build_integrals, coulomb_matrix, exchange_matrix, run_rhf
 from quantumlab.errors import FunctionalNotFoundError, MethodNotAvailableError
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
@@ -620,3 +621,118 @@ def test_registry_reports_dispersion_honestly() -> None:
     assert registry.is_available("dispersion:none")
     assert not registry.is_available("dispersion:d3bj")
     assert not registry.is_available("dispersion:d4")
+
+
+# --------------------------------------------------------------------------- #
+# Гибриды
+# --------------------------------------------------------------------------- #
+def test_pbe0_declares_its_exact_exchange_share() -> None:
+    """PBE0 — гибрид с долей точного обмена ¼ и классом ``hybrid``."""
+    functional = Pbe0()
+    assert functional.is_hybrid
+    assert functional.functional_class == "hybrid"
+    assert functional.exact_exchange_fraction == 0.25
+    # Доля полунелокального обмена обязана дополнять точную до единицы, иначе
+    # обменная энергия не сохранится при переходе LDA → гибрид.
+    assert functional.exact_exchange_fraction + functional.dft_exchange_fraction == 1.0
+
+
+def test_pbe0_scales_only_the_dft_exchange(
+    gradient_points: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """DFT-часть PBE0 — это ¾ обмена PBE плюс полная корреляция PBE."""
+    rho, grad = gradient_points
+    points = np.zeros((rho.size, 3))
+    hybrid = Pbe0().evaluate(points, rho, grad)
+    gga_exchange = PbeExchange().evaluate(points, rho, grad)
+    gga_correlation = PbeCorrelation().evaluate(points, rho, grad)
+    assert np.allclose(
+        hybrid.energy_density, 0.75 * gga_exchange.energy_density + gga_correlation.energy_density
+    )
+    assert hybrid.vsigma is not None and gga_exchange.vsigma is not None
+    assert gga_correlation.vsigma is not None
+    assert np.allclose(hybrid.vsigma, 0.75 * gga_exchange.vsigma + gga_correlation.vsigma)
+
+
+def test_hybrid_total_energy_matches_the_iteration_history(water: Molecule) -> None:
+    """Возвращённая энергия гибрида равна энергии последней итерации.
+
+    Регрессия на реальную ошибку: обменный член −¼α·D:K добавлялся в энергию
+    внутри цикла, но итоговая энергия пересобиралась на сошедшейся плотности
+    без него. В результате история итераций показывала одно число, а результат
+    — другое, отличающееся ровно на ¼α·D:K (для воды/STO-3G это 2.28 э).
+    Сравнение энергии с историей ловит расхождение напрямую.
+    """
+    basis = build_basis("sto-3g", water)
+    result = run_rks(basis, water, Pbe0(), grid_preset=GridPreset.ULTRAFINE)
+    assert result.exact_exchange_fraction == 0.25
+    assert result.history
+    assert result.total_energy == pytest.approx(result.history[-1].energy, abs=1e-9)
+
+
+def test_hybrid_fock_carries_half_alpha_exchange(water: Molecule) -> None:
+    """В фокиане гибрида стоит −½α·K, а не −α·K.
+
+    Из ``E_x^exact = −¼α·D:K`` следует ``∂E/∂D = −½α·K`` — тот же коэффициент ½,
+    что у RHF-обмена. Проверка строит оба варианта фокиана и смотрит на
+    коммутатор ``FDS − SDF``: при правильном ½ он равен нулю, при «просто α»
+    расходится на единицы. Только по энергии это не поймать — SCF сходится и
+    с неверным фокианом, просто к другой плотности.
+    """
+    basis = build_basis("sto-3g", water)
+    prepared = build_integrals(basis, water)
+    result = run_rks(basis, water, Pbe0(), grid_preset=GridPreset.ULTRAFINE)
+    v_xc = result.v_xc
+    assert v_xc is not None
+    density = result.density
+    overlap = prepared.overlap
+    alpha = result.exact_exchange_fraction
+    exchange = exchange_matrix(density, prepared.eri)
+    base = prepared.core + coulomb_matrix(density, prepared.eri) + v_xc - 0.5 * alpha * exchange
+    wrong = base - 0.5 * alpha * exchange  # ещё пол-члена, то есть полное −α·K
+
+    def commutator(fock: np.ndarray) -> float:
+        return float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock)))
+
+    assert commutator(base) < 1e-9
+    assert commutator(wrong) > 1e-3
+
+
+def test_pbe0_energy_matches_pyscf(water: Molecule) -> None:
+    """Полная энергия RKS/PBE0 сверяется с PySCF."""
+    pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
+    pyscf_dft = pytest.importorskip("pyscf.dft", reason="PySCF DFT нужен для независимой сверки")
+    basis = build_basis("sto-3g", water)
+    ours = run_rks(basis, water, Pbe0(), grid_preset=GridPreset.ULTRAFINE)
+
+    theirs = pyscf.gto.M(
+        atom=[
+            ["O", [0.0, 0.0, 0.0]],
+            ["H", [0.7571689334, 0.5865799573, 0.0]],
+            ["H", [-0.7571689334, 0.5865799573, 0.0]],
+        ],
+        basis="sto-3g",
+        cart=True,
+        verbose=0,
+    )
+    their_scf = pyscf_dft.RKS(theirs)
+    their_scf.xc = "PBE0"
+    their_scf.grids.atom_grid = (120, 974)
+    their_scf.verbose = 0
+    their_scf.run(conv_tol=1e-12)
+    assert ours.total_energy == pytest.approx(float(their_scf.e_tot), abs=5e-6)
+
+
+def test_exact_exchange_deepens_the_homo(water: Molecule) -> None:
+    """Точный обмен углубляет ВЗМО — физическая проверка знака доли обмена.
+
+    Если бы доля вошла с неверным знаком, SCF всё равно сошёлся бы, но ВЗМО
+    ушла бы вверх, а не вниз. Это независимый признак корректности, который
+    не сводится к сравнению чисел с эталоном.
+    """
+    basis = build_basis("sto-3g", water)
+    gga = run_rks(basis, water, get_functional("pbe"), grid_preset=GridPreset.FINE)
+    hybrid = run_rks(basis, water, Pbe0(), grid_preset=GridPreset.FINE)
+    gga_homo = gga.orbital_energies[water.n_electrons // 2 - 1]
+    hybrid_homo = hybrid.orbital_energies[water.n_electrons // 2 - 1]
+    assert hybrid_homo < gga_homo

@@ -114,8 +114,9 @@ def test_cli_plan_explains_automatic_choices(
     output = capsys.readouterr().out
     assert "Высокая точность" in output
     assert "def2-tzvp" in output
-    # Профиль предполагает PBE0, но DFT ещё не реализован: рекомендатель обязан
-    # сказать об этом вслух, а не выдать план, который упадёт (§54 ТЗ).
+    # Профиль обещает PBE0 + D3(BJ); PBE0 реализован, а дисперсионной поправки
+    # нет, поэтому рекомендатель обязан сказать об этом вслух, а не выдать план,
+    # который выполнится как расчёт без обещанной поправки (§54 ТЗ).
     assert "ещё не реализован" in output
     assert "pbe0" not in output
 
@@ -279,7 +280,7 @@ def test_cli_run_rejects_unimplemented_functional(
             "--method",
             "dft",
             "--functional",
-            "pbe0",
+            "b3lyp",
             "--basis",
             "sto-3g",
         ]

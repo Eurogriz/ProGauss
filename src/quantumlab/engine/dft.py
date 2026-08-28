@@ -58,6 +58,11 @@ class RksResult:
     converged: bool
     iterations: int
     grid_points: int
+    #: Доля точного обмена α. Хранится в результате, потому что энергия
+    #: гибрида без неё неоднозначна: одно и то же число можно прочесть и как
+    #: результат с α = 0, и как с α = 0.25. Проверки качества восстанавливают по
+    #: ней обменный член −¼α·D:K.
+    exact_exchange_fraction: float = 0.0
     #: Обменно-корреляционный потенциал на сошедшейся плотности. Хранится в
     #: результате, чтобы проверки качества могли восстановить настоящий фокиан
     #: RKS, не пересобирая сетку и не считая XC второй раз.
@@ -197,16 +202,27 @@ def run_rks(
         v_xc, xc_energy = xc_at(density)
         coulomb = coulomb_matrix(density, eri)
         fock = core + coulomb + v_xc
+        exact_exchange_energy = 0.0
         if alpha_exchange > 0.0:
             exchange = np.einsum("ls,ulvs->uv", density, eri, optimize=True)
-            fock = fock - alpha_exchange * exchange
+            # E_x^exact = −¼α·D:K, значит ∂E/∂D = −½α·K: в фокиане коэффициент ½
+            # при α — тот же, что у RHF-обмена, а не «просто α». Перепутать
+            # легко, потому что в энергию входит ¼α, а не ½α, и оба числа
+            # выглядят правдоподобно.
+            fock = fock - 0.5 * alpha_exchange * exchange
+            exact_exchange_energy = -0.25 * alpha_exchange * float(np.sum(density * exchange))
 
         # E = Σ D(H + ½J) + E_xc. Обменно-корреляционный потенциал входит в
         # фокиан, но в энергию — только E_xc: функционал нелинеен по плотности,
         # поэтому множителя ½, как у HF-обмена, здесь нет, а след D·V_xc брать
         # нельзя — он даёт совсем другую величину (для воды/STO-3G −11.69 вместо
         # −8.87) и удвоение даёт ошибку в десятки хартри.
-        energy = float(np.sum(density * (core + 0.5 * coulomb))) + xc_energy + v_nuc
+        energy = (
+            float(np.sum(density * (core + 0.5 * coulomb)))
+            + xc_energy
+            + exact_exchange_energy
+            + v_nuc
+        )
         energy_change = energy - previous_energy
 
         fock_prime = orthogonalizer.T @ fock @ orthogonalizer
@@ -279,11 +295,18 @@ def run_rks(
     v_xc, xc_energy = xc_at(density)
     coulomb = coulomb_matrix(density, eri)
     total = float(np.sum(density * (core + 0.5 * coulomb))) + xc_energy + v_nuc
+    if alpha_exchange > 0.0:
+        # Энергия пересобирается на сошедшейся плотности, поэтому обменный
+        # член нужно добавить и здесь — иначе он есть в истории итераций, но
+        # теряется в возвращаемом результате.
+        exchange = np.einsum("ls,ulvs->uv", density, eri, optimize=True)
+        total -= 0.25 * alpha_exchange * float(np.sum(density * exchange))
     return RksResult(
         total_energy=total,
         electronic_energy=total - v_nuc,
         nuclear_repulsion=v_nuc,
         xc_energy=xc_energy,
+        exact_exchange_fraction=alpha_exchange,
         orbital_energies=tuple(float(value) for value in energies),
         coefficients=coefficients,
         density=density,

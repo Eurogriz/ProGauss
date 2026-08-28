@@ -729,12 +729,78 @@ class Pbe:
         )
 
 
+class Pbe0:
+    """PBE0 (PBE1PBE): ¼ точного обмена + ¾ обмена PBE + корреляция PBE.
+
+    ``E_xc = ¼ E_x^exact + ¾ E_x^PBE + E_c^PBE``
+
+    Доля точного обмена не подгонялась: она следует из требования, чтобы
+    функционал четвёртого порядка градиентного разложения совпадал с
+    известным результатом теории возмущений. Это делает PBE0 «беспараметрическим»
+    гибридом — в отличие от B3LYP, где три коэффициента получены фитом.
+
+    Точный обмен здесь не считается: ``evaluate`` возвращает только DFT-часть,
+    а долю ``α`` решатель подставляет сам, собирая ``F = H + J + V_xc − αK`` и
+    добавляя в энергию ``−¼α·D:K``. Разделение такое потому, что K не зависит
+    от квадратурной сетки, и считать его внутри функционала означало бы
+    дублировать работу решателя.
+    """
+
+    name: str = "pbe0"
+    functional_class: str = "hybrid"
+    is_hybrid: bool = True
+    exact_exchange_fraction: float = 0.25
+
+    #: Доля полунелокального обмена PBE: дополняет точный обмен до единицы.
+    dft_exchange_fraction: float = 0.75
+
+    def __init__(self) -> None:
+        """Собирает обменную и корреляционную части."""
+        self._exchange = PbeExchange()
+        self._correlation = PbeCorrelation()
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+    ) -> XcEvaluation:
+        """DFT-часть PBE0; см. протокол.
+
+        Обмен умножается на ¾ — именно эта часть сочетается с ¼ точного обмена.
+        Корреляция входит целиком: в PBE0 её не масштабируют.
+        """
+        if spin_polarized:
+            msg = "Спиново-поляризованный XC требует UKS (отдельные плотности α и β)."
+            raise NotImplementedError(msg)
+        exchange = self._exchange.evaluate(points, density, density_gradient)
+        correlation = self._correlation.evaluate(points, density, density_gradient)
+        weight = self.dft_exchange_fraction
+        vsigma = None
+        if exchange.vsigma is not None:
+            vsigma = weight * exchange.vsigma + (
+                correlation.vsigma if correlation.vsigma is not None else 0.0
+            )
+        return XcEvaluation(
+            energy_density=weight * exchange.energy_density + correlation.energy_density,
+            vrho=weight * exchange.vrho + correlation.vrho,
+            vsigma=vsigma,
+        )
+
+
 #: Функционалы, которые ядро действительно умеет считать. Реестр обращается к
 #: этому словарю, поэтому «заявлено» и «реализовано» не могут разойтись.
-FUNCTIONALS: dict[str, type[Svwn] | type[Pbe]] = {"svwn": Svwn, "lda": Svwn, "pbe": Pbe}
+FUNCTIONALS: dict[str, type[Svwn] | type[Pbe] | type[Pbe0]] = {
+    "svwn": Svwn,
+    "lda": Svwn,
+    "pbe": Pbe,
+    "pbe0": Pbe0,
+}
 
 
-def get_functional(name: str) -> Svwn | Pbe:
+def get_functional(name: str) -> Svwn | Pbe | Pbe0:
     """Возвращает реализованный функционал по имени.
 
     Бросает ``FunctionalNotFoundError`` — ту же ошибку, что и реестр

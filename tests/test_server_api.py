@@ -86,7 +86,7 @@ def test_capabilities_reports_registry(client: TestClient) -> None:
     # точке), поэтому partial, а не not_implemented и не implemented.
     assert _availability(body, "method", "method:dft") == "partial"
     assert _availability(body, "functional", "functional:svwn") == "partial"
-    assert _availability(body, "functional", "functional:pbe0") == "not_implemented"
+    assert _availability(body, "functional", "functional:b3lyp") == "not_implemented"
     # Системы координат и спин — не методы: «База методов» в GUI строится отсюда.
     assert "coordinates" in body and "spin" in body
     assert not any(item["id"].startswith(("spin:", "coordinates:")) for item in body["method"])
