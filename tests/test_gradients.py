@@ -34,14 +34,16 @@ from quantumlab.engine.functional import (
 from quantumlab.engine.gradients import (
     RhfGradient,
     _function_owner,
+    _rohf_orbital_weight,
     energy_weighted_density,
     nuclear_repulsion_gradient,
     rhf_gradient,
     rks_gradient,
+    rohf_gradient,
     uhf_gradient,
 )
 from quantumlab.engine.quadrature import build_grid
-from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
+from quantumlab.engine.scf import RohfResult, ScfSettings, run_rhf, run_rohf, run_uhf
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 
@@ -549,3 +551,110 @@ def test_uhf_gradient_of_stretched_hydrogen_matches_finite_differences() -> None
             numeric[atom_index, axis] = (energies[0] - energies[1]) / (2 * _STEP_BOHR)
 
     assert float(np.max(np.abs(analytic - numeric))) < 1e-6
+
+
+# --------------------------------------------------------------------------- #
+# ROHF: градиент открытой оболочки
+# --------------------------------------------------------------------------- #
+def _rohf_numeric_gradient(molecule: Molecule, basis_name: str) -> np.ndarray:
+    """Численный градиент ROHF-энергии конечными разностями, хартри/бор."""
+    analytic = rohf_gradient(build_basis(basis_name, molecule), molecule, _rohf(molecule)).gradient
+    step_angstrom = _STEP_BOHR / float(angstrom_to_bohr(1.0))
+    numeric = np.zeros_like(analytic)
+    for atom_index in range(len(molecule.atoms)):
+        for axis in range(3):
+            energies = []
+            for sign in (1.0, -1.0):
+                shifted = _displace_keep_state(molecule, atom_index, axis, sign * step_angstrom)
+                energies.append(
+                    run_rohf(build_basis(basis_name, shifted), shifted, _TIGHT).total_energy
+                )
+            numeric[atom_index, axis] = (energies[0] - energies[1]) / (2 * _STEP_BOHR)
+    return numeric
+
+
+def _rohf(molecule: Molecule, basis_name: str = "sto-3g") -> RohfResult:
+    basis = build_basis(basis_name, molecule)
+    result = run_rohf(basis, molecule, _TIGHT)
+    assert result.converged
+    return result
+
+
+def test_rohf_gradient_matches_finite_differences() -> None:
+    """Радикал CH (дублет): аналитический градиент против численного.
+
+    Отличие от UHF-теста: орбитали каналов **общие**, поэтому проверка ловит
+    ошибки в сборке весов по замкнутым/открытым блокам, а не только в обмене.
+    """
+    molecule = Molecule.from_xyz(CH_RADICAL.read_text(encoding="utf-8"), name="ch", multiplicity=2)
+    result = _rohf(molecule)
+    analytic = rohf_gradient(build_basis("sto-3g", molecule), molecule, result).gradient
+    numeric = _rohf_numeric_gradient(molecule, "sto-3g")
+    assert float(np.max(np.abs(analytic - numeric))) < 1e-6
+
+
+def test_rohf_gradient_of_stretched_hydrogen_triplet_matches_finite_differences() -> None:
+    """Растянутый H₂ в триплете: n_β = 0, замкнутый блок пуст.
+
+    Краевой случай весов: в нём нет ни одного замкнутого орбитали, и формула
+    обязанена свестись к открытому блоку без деления на пустой массив.
+    """
+    stretched = Molecule(
+        atoms=(
+            Atom(symbol="H", position=(0.0, 0.0, 0.0)),
+            Atom(symbol="H", position=(0.0, 0.0, 2.0)),
+        ),
+        name="h2-stretched",
+        multiplicity=3,
+    )
+    result = _rohf(stretched)
+    analytic = rohf_gradient(build_basis("sto-3g", stretched), stretched, result).gradient
+    numeric = _rohf_numeric_gradient(stretched, "sto-3g")
+    assert float(np.max(np.abs(analytic - numeric))) < 1e-6
+
+
+def test_rohf_gradient_reduces_to_rhf_for_a_closed_shell() -> None:
+    """На закрытой оболочке градиент ROHF обязан совпасть с градиентом RHF.
+
+    Инвариант: при пустом открытом блоке вес сворачивается в ``2CεCᵀ``, а
+    обменные каналы дают тот же результат, что и RHF.
+    """
+    molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
+    basis = build_basis("sto-3g", molecule)
+    from_rohf = rohf_gradient(basis, molecule, run_rohf(basis, molecule, _TIGHT)).gradient
+    from_rhf = rhf_gradient(basis, molecule, run_rhf(basis, molecule, _TIGHT)).gradient
+    assert float(np.max(np.abs(from_rohf - from_rhf))) < 1e-10
+
+
+def test_rohf_weight_couples_closed_and_open_blocks() -> None:
+    """Вес ROHF не сводится к сохранённым ``orbital_energies``.
+
+    На NO/STO-3G блок связности ``C^cᵀF^αC^o`` имеет порядок 1e-2, поэтому
+    взвешенная плотность, собранная из энергий единого эффективного фокиана
+    Руттхана (``rohf.orbital_energies``), расходится с корректной на ~1e-2.
+    Тест фиксирует, что движок использует фокиан-зависимый вес.
+    """
+    molecule = Molecule(
+        atoms=(
+            Atom(symbol="N", position=(0.0, 0.0, 0.0)),
+            Atom(symbol="O", position=(0.0, 0.0, 1.15)),
+        ),
+        name="no",
+        multiplicity=2,
+    )
+    basis = build_basis("sto-3g", molecule)
+    result = run_rohf(basis, molecule, _TIGHT)
+    assert result.converged
+    weight = _rohf_orbital_weight(basis, molecule, result)
+    assert weight.shape == (basis.n_functions, basis.n_functions)
+    # Симметрия веса — обязательна для члена релаксации.
+    assert float(np.max(np.abs(weight - weight.T))) < 1e-12
+    # Энерги из одного эффективного фокиана не дают такого веса: разница заметна.
+    naive = np.asarray(
+        2.0
+        * (result.coefficients[:, :4] * np.asarray(result.orbital_energies[:4]))
+        @ result.coefficients[:, :4].T
+        + (result.coefficients[:, 4:5] * np.asarray(result.orbital_energies[4:5]))
+        @ result.coefficients[:, 4:5].T
+    )
+    assert float(np.max(np.abs(weight - naive))) > 1e-3

@@ -1,0 +1,14 @@
+id: ch-rohf-sto3g-gradient
+level: L2
+description: >-
+  Аналитический градиент ROHF/STO-3G радикала CH (дублет) против центральной
+  разности. Проверяет фокиан-зависимые веса релаксации: замкнутый блок по
+  Fc, открытый по F^α, плюс блок связности C^cᵀF^αC^o.
+molecule: tests/fixtures/ch-radical.xyz
+multiplicity: 2
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g, spin: rohf }
+gradient_vs_finite_difference:
+  step_angstrom: 1.0e-4
+  max_deviation_eh_bohr: 1.0e-6

@@ -5,16 +5,20 @@ NumPy-реализаций базисов, интегралов и RHF. Назн
 корректности** (ADR-002): любые будущие backend'ы (C++/OpenMP, CUDA, внешние
 пакеты) обязаны совпадать с ним в пределах заявленной точности.
 
-Что ядро умеет и чего не умеет
-------------------------------
-Умеет: ``single_point`` методом RHF в любом из зарегистрированных базисов.
+Что ядро умеет
+--------------
+RHF, UHF, ROHF и RKS (функционалы из реестра) — расчёт в одной точке,
+аналитический ядерный градиент, оптимизация геометрии (декартовы координаты)
+и колебательные частоты (численный гессиан из аналитических градиентов).
+Для не-HF-методов доступен дисперсионный поправочный член DFT-D3 (BJ и
+zero-затухание) с аналитическим вкладом в градиент.
 
 Не умеет — и сообщает об этом штатной ошибкой до начала вычислений, а не
 выдаёт правдоподобное число:
 
-* UHF/ROHF: только замкнутые оболочки, нечётное число электронов отклоняется;
-* DFT, MP2, CC: отсутствуют как код;
-* градиенты, оптимизация, частоты, сканирования;
+* UKS (спиново-поляризованный DFT): функционалы считаются только по полной
+  плотности, поэтому DFT с открытой оболочкой отклоняется;
+* MP2, CC, сканирования и поиск переходных состояний;
 * сферическая схема базисов: наборы, опубликованные с d/f в чистых угловых
   моментах, считаются в декартовой схеме (6 компонент вместо 5 для d). Это
   больший базис, энергии отличаются от табличных на ~1e-4 Eh; факт отражается
@@ -69,7 +73,7 @@ from quantumlab.engine.functional import (
     evaluate_basis,
     get_functional,
 )
-from quantumlab.engine.gradients import rhf_gradient, rks_gradient, uhf_gradient
+from quantumlab.engine.gradients import rhf_gradient, rks_gradient, rohf_gradient, uhf_gradient
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -480,8 +484,9 @@ class ReferenceEngine:
         """UHF в фиксированной геометрии.
 
         Интегралы ровно те же, что и в RHF: UHF отличается только построением
-        фокиана и наличием двух плотностей. Градиенты UHF не реализованы,
-        поэтому оптимизация геометрии для открытой оболочки отклоняется выше.
+        фокиана и наличием двух плотностей. Аналитический градиент UHF
+        реализован (``uhf_gradient``), поэтому оптимизация и частоты для
+        открытой оболочки проходят.
         """
         spec = request.spec
         timings: list[TimingRecord] = []
@@ -546,8 +551,8 @@ class ReferenceEngine:
         и предупреждения переиспользуются от UHF, потому что физика та же;
         расходиться они не должны.
 
-        Градиентов ROHF нет, поэтому оптимизация и частоты для него отклоняются
-        на уровне реестра, а не считаются по силам другого метода.
+        Аналитический градиент ROHF реализован (``rohf_gradient``), поэтому
+        оптимизация и частоты проходят и считают поверхность ROHF.
         """
         spec = request.spec
         timings: list[TimingRecord] = []
@@ -693,6 +698,7 @@ class ReferenceEngine:
         else:
             functional = None
         is_uhf = method is not None and method.spin is SpinTreatment.UHF
+        is_rohf = method is not None and method.spin is SpinTreatment.ROHF
 
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
             total_energy, gradient = _solve_energy_and_gradient(spec, basis_name, molecule)
@@ -718,7 +724,8 @@ class ReferenceEngine:
         basis = build_basis(basis_name, final)
         prepared = build_integrals(basis, final)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
-        final_solution: RhfResult | RksResult | UhfResult
+        final_solution: RhfResult | RksResult | UhfResult | RohfResult
+        open_shell_final: UhfResult | RohfResult | None = None
         if functional is not None:
             grid = build_grid(final, spec.grid.preset)
             basis_values = evaluate_basis(basis, final, grid.points)
@@ -729,6 +736,11 @@ class ReferenceEngine:
         elif is_uhf:
             uhf_final = run_uhf(basis, final, _scf_settings(spec), integrals=prepared)
             final_solution = uhf_final
+            open_shell_final = uhf_final
+        elif is_rohf:
+            rohf_final = run_rohf(basis, final, _scf_settings(spec), integrals=prepared)
+            final_solution = rohf_final
+            open_shell_final = rohf_final
         else:
             rhf_final = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
             final_solution = rhf_final
@@ -747,7 +759,7 @@ class ReferenceEngine:
 
         started = time.perf_counter()
         # Свойства, проверки и предупреждения различаются по методу: у RKS к ним
-        # добавляются квадратурные, у UHF — второй спиновой канал и <S^2>.
+        # добавляются квадратурные, у UHF/ROHF — второй спиновой канал и <S^2>.
         # Вычисляются внутри своей ветви, где конкретный тип результата известен,
         # а не по общему объединению.
         if functional is not None:
@@ -760,14 +772,14 @@ class ReferenceEngine:
             extra_warnings = _warnings_rks(
                 rks_final, basis, final, grid, pruning_requested=spec.grid.prune
             )
-        elif is_uhf:
-            properties = _properties_uhf(uhf_final, final, dipole_integrals)
+        elif open_shell_final is not None:
+            properties = _properties_uhf(open_shell_final, final, dipole_integrals)
             checks = (
-                _quality_checks_uhf(uhf_final, basis, final, prepared)
+                _quality_checks_uhf(open_shell_final, basis, final, prepared)
                 + _optimization_check(optimization)
                 + d3_checks
             )
-            extra_warnings = _warnings_uhf(uhf_final, basis, final)
+            extra_warnings = _warnings_uhf(open_shell_final, basis, final)
         else:
             properties = _properties(rhf_final, final, dipole_integrals)
             checks = (
@@ -790,7 +802,7 @@ class ReferenceEngine:
                 total_energy=final_solution.total_energy,
                 iterations=final_solution.iterations,
                 converged=final_solution.converged,
-                spin_squared=uhf_final.s_squared if is_uhf else None,
+                spin_squared=open_shell_final.s_squared if open_shell_final is not None else None,
                 beta_homo=properties.beta_homo,
                 beta_lumo=properties.beta_lumo,
             ),
@@ -912,9 +924,10 @@ class ReferenceEngine:
         про нечётное число электронов — то есть пользователь получал аварийный
         сбой вместо честного «недоступно» (§54 ТЗ).
 
-        То же с ROHF: реестр честно объявляет его пригодным только для энергии
-        в одной точке, но объявление без читателя ничего не значит — движок
-        проваливался в RHF и падал там. Проверка делает ограничение реальным.
+        Исторически здесь же отклонялась ROHF с оптимизацией/частотами:
+        аналитических градиентов ROHF не было. С введением градиента ROHF
+        ограничение снято — движок считает его аналитически, а не силами
+        другого метода.
         """
         method = spec.method
         if method is None:
@@ -931,13 +944,6 @@ class ReferenceEngine:
                 "считаются только по полной плотности. Для открытой оболочки "
                 "доступен метод HF с обработкой "
                 f"{method.spin.value}.",
-            )
-        if method.spin is SpinTreatment.ROHF and spec.task is not Task.SINGLE_POINT:
-            raise CombinationUnavailableError(
-                f"ROHF + {spec.task.value}",
-                "аналитических градиентов ROHF нет, поэтому нужны производные "
-                "энергии. Для открытой оболочки доступны UHF (оптимизация и "
-                "частоты) и ROHF (только энергия в одной точке).",
             )
 
     def assert_supported(self, spec: CalculationSpec) -> str:
@@ -1060,6 +1066,13 @@ def _solve_energy_and_gradient(
             uhf.total_energy,
             uhf_gradient(basis, molecule, uhf).gradient,
         )
+    elif method is not None and method.spin is SpinTreatment.ROHF:
+        rohf = run_rohf(basis, molecule, _scf_settings(spec))
+        _require_converged(rohf)
+        energy, gradient = (
+            rohf.total_energy,
+            rohf_gradient(basis, molecule, rohf).gradient,
+        )
     else:
         rhf = run_rhf(basis, molecule, _scf_settings(spec))
         _require_converged(rhf)
@@ -1093,7 +1106,7 @@ WARNING_KEYS: tuple[str, ...] = (
 )
 
 
-def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:
+def _require_converged(solution: RhfResult | RksResult | UhfResult | RohfResult) -> None:
     """Прерывает расчёт, если SCF не сошёлся.
 
     Градиент по несошедшейся плотности неверен, а оптимизация по неверному
@@ -1271,13 +1284,19 @@ def _properties_uhf(
 def _quality_checks_uhf(
     uhf: UhfResult | RohfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
 ) -> tuple[QualityCheck, ...]:
-    """Проверки качества для UHF.
+    """Проверки качества для UHF и ROHF.
 
     RHF-проверки здесь неприменимы дословно: разложение энергии и условие
     стационарности у открытой оболочки строятся по каждому каналу отдельно, а
     полная плотность входит только в кулоновский член. Кроме того, добавлена
     проверка ⟨Ŝ²⟩ — у UHF возможно спиновое загрязнение, и оно должно быть
-    видно в результате, а не оставаться внутри движка.
+    видно в результате, а не оставаться внутри движка (у ROHF оно отсутствует
+    в точности).
+
+    Коммутатор [F, D] трактуется по-разному: у UHF каждый канал диагонализует
+    свой фокиан, а у ROHF замкнутые орбитали диагонализируют
+    Fc = ½(F^α + F^β), открытые — F^α, поэтому сверка идёт по блокам, а не по
+    каналам.
     """
     n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
     overlap = prepared.overlap
@@ -1304,23 +1323,51 @@ def _quality_checks_uhf(
     idempotency_error = 0.0
     orthogonalizer = canonical_orthogonalizer(overlap)
     inverse = np.linalg.inv(orthogonalizer)
-    for density, n_occupied in ((uhf.density_alpha, n_alpha), (uhf.density_beta, n_beta)):
-        fock = (
-            prepared.core
-            + coulomb_matrix(density_total, repulsion)
-            - exchange_matrix(density, repulsion)
+
+    # Стационарность: коммутатор [F, D] обязан обращаться в ноль. У UHF каждый
+    # канал диагонализирует свой фокиан, поэтому проверяются [F^α, D^α] и
+    # [F^β, D^β]. У ROHF это не так: замкнутые орбитали диагонализируют
+    # Fc = ½(F^α + F^β), а открытые — F^α, и [F^α, D^α] было бы ненулевым
+    # (ложный FAIL). Поэтому для ROHF коммутатор берётся по замкнутому блоку
+    # (D^β) с Fc и по открытому (D^α − D^β) с F^α.
+    if isinstance(uhf, RohfResult):
+        base = prepared.core + coulomb_matrix(density_total, repulsion)
+        fock_alpha = base - exchange_matrix(uhf.density_alpha, repulsion)
+        fock_closed = 0.5 * (fock_alpha + (base - exchange_matrix(uhf.density_beta, repulsion)))
+        pairs = (
+            (fock_closed, uhf.density_beta),
+            (fock_alpha, uhf.density_alpha - uhf.density_beta),
         )
+        commutator_label = "худший из блоков (замкнутый с Fc, открытый с F^α)"
+    else:
+        commutator_label = "худший из каналов"
+        pairs = (
+            (
+                prepared.core
+                + coulomb_matrix(density_total, repulsion)
+                - exchange_matrix(uhf.density_alpha, repulsion),
+                uhf.density_alpha,
+            ),
+            (
+                prepared.core
+                + coulomb_matrix(density_total, repulsion)
+                - exchange_matrix(uhf.density_beta, repulsion),
+                uhf.density_beta,
+            ),
+        )
+    for fock, density in pairs:
         commutator_error = max(
             commutator_error,
             float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock))),
         )
+
+    for density in (uhf.density_alpha, uhf.density_beta):
         density_prime = inverse @ density @ inverse.T
         # Занятие канала равно 1, поэтому идемпотентность D'^2 = D' (без множителя 2).
         idempotency_error = max(
             idempotency_error,
             float(np.max(np.abs(density_prime @ density_prime - density_prime))),
         )
-        del n_occupied  # число занятых нужно только для построения плотности
 
     s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
     scheme = basis_angular_scheme(basis.name)
@@ -1358,7 +1405,7 @@ def _quality_checks_uhf(
                 if commutator_error < _FOCK_COMMUTATOR_TOLERANCE
                 else QualityVerdict.FAIL
             ),
-            detail=f"худший из каналов: max|FDS − SDF| = {commutator_error:.3e}",
+            detail=f"{commutator_label}: max|FDS − SDF| = {commutator_error:.3e}",
         ),
         QualityCheck(
             name_key="density_idempotency",

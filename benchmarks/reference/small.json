@@ -1,21 +1,21 @@
 {
   "suite": "small",
-  "measured_at": "2026-08-30T08:15:30+0000",
+  "measured_at": "2026-08-30T09:21:07+0000",
   "hardware": "x86_64, 2 CPU, Linux 6.1.158+",
   "versions": {
     "python": "3.11.2",
     "numpy": "2.4.6",
     "blas": "scipy-openblas 0.3.31.188.0",
-    "git": "01409a9"
+    "git": "53aa922"
   },
   "cases": {
     "hydrogen-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 0.315,
+        "value": 0.2776,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.4177,
+        "value": 0.3805,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
@@ -29,15 +29,15 @@
     },
     "water-rhf-sto3g-sp": {
       "wall_s": {
-        "value": 0.3503,
+        "value": 0.328,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.4531,
+        "value": 0.4305,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 50.8,
+        "value": 50.9,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -47,15 +47,15 @@
     },
     "water-rhf-sto3g-grad": {
       "wall_s": {
-        "value": 0.5895,
+        "value": 0.4866,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.6916,
+        "value": 0.589,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 51.8,
+        "value": 51.7,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -63,17 +63,35 @@
         "tolerance": 0.0
       }
     },
-    "water-rhf-631g-sp": {
+    "ch-rohf-sto3g-grad": {
       "wall_s": {
-        "value": 0.6424,
+        "value": 0.4588,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.745,
+        "value": 0.5612,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 51.8,
+        "value": 51.7,
+        "tolerance": 0.25
+      },
+      "scf_iterations": {
+        "value": 7.0,
+        "tolerance": 0.0
+      }
+    },
+    "water-rhf-631g-sp": {
+      "wall_s": {
+        "value": 0.659,
+        "tolerance": 0.1
+      },
+      "cpu_s": {
+        "value": 0.7615,
+        "tolerance": 0.1
+      },
+      "peak_rss_mb": {
+        "value": 51.7,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -83,15 +101,15 @@
     },
     "water-rhf-sto3g-sp-d3bj": {
       "wall_s": {
-        "value": 0.3859,
+        "value": 0.341,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 0.4885,
+        "value": 0.4438,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 51.8,
+        "value": 51.7,
         "tolerance": 0.25
       },
       "scf_iterations": {
@@ -101,15 +119,15 @@
     },
     "water-rhf-sto3g-opt": {
       "wall_s": {
-        "value": 3.2877,
+        "value": 3.2386,
         "tolerance": 0.1
       },
       "cpu_s": {
-        "value": 3.3882,
+        "value": 3.3407,
         "tolerance": 0.1
       },
       "peak_rss_mb": {
-        "value": 64.6,
+        "value": 64.8,
         "tolerance": 0.25
       },
       "scf_iterations": {

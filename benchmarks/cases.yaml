@@ -32,6 +32,19 @@ cases:
     runs: 3
     warmup: 1
 
+  # ROHF-градиент радикала CH: фиксация стоимости фокиан-зависимых весов
+  # релаксации (базовый ERI + сборка Fc/F^α/F^β) против RHF-градиента.
+  - id: ch-rohf-sto3g-grad
+    suite: small
+    molecule: tests/fixtures/ch-radical.xyz
+    multiplicity: 2
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g, spin: rohf }
+    measure_gradient: true
+    runs: 3
+    warmup: 1
+
   - id: water-rhf-631g-sp
     suite: small
     molecule: tests/fixtures/water.xyz

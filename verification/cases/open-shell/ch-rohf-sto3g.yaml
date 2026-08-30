@@ -1,0 +1,31 @@
+id: ch-rohf-sto3g-energy
+level: L1
+description: >-
+  ROHF/STO-3G радикала CH (дублет) — открытая оболочка с общими орбиталями
+  каналов. Проверяет эффективный фокиан Руттхана: замкнутый блок по
+  Fc = ½(F^α + F^β), открытый — по F^α, и точное ⟨S^2⟩ = S(S+1).
+molecule: tests/fixtures/ch-radical.xyz
+multiplicity: 2
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g, spin: rohf }
+expect:
+  energy_hartree:
+    value: -37.7686221208
+    tol: 1.0e-8
+    source: >-
+      internal-reference (reference-cpu); независимо сверено с PySCF 2.14
+      ROHF/STO-3G, расхождение 1.6e-08 э
+  spin_squared:
+    value: 0.75
+    tol: 1.0e-8
+    source: >-
+      ROHF — собственное состояние Ŝ²: для чистого дублета ровно 0.75,
+      в отличие от UHF (0.753182 с загрязнением). Сверено с PySCF spin_square()
+quality:
+  scf_converged: true
+  electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  spin_contamination: true

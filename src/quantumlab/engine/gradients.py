@@ -51,7 +51,14 @@ from quantumlab.engine.functional import (
     evaluate_basis_with_gradients,
 )
 from quantumlab.engine.quadrature import QuadratureGrid
-from quantumlab.engine.scf import ScfResult, UhfResult, spin_population
+from quantumlab.engine.scf import (
+    RohfResult,
+    ScfResult,
+    UhfResult,
+    coulomb_matrix,
+    exchange_matrix,
+    spin_population,
+)
 
 Array = npt.NDArray[np.float64]
 
@@ -273,6 +280,86 @@ def uhf_gradient(basis: BasisSet, molecule: Molecule, uhf: UhfResult) -> RhfGrad
         exchange_coefficient=0.5,
     )
     return RhfGradient(energy_hartree=uhf.total_energy, gradient=gradient)
+
+
+def _rohf_orbital_weight(basis: BasisSet, molecule: Molecule, rohf: RohfResult) -> Array:
+    """Энерговзвешенная плотность ROHF для члена релаксации орбиталей.
+
+    В отличие от RHF/UHF, где вес — просто сумма ``C_iε_iC_iᵀ`` по занятым
+    орбиталям, у ROHF каждая часть веса определяется **своим** фокианом:
+
+    * замкнутые орбитали диагонализируют ``Fc = ½(F^α + F^β)`` и несут по две
+      спин-орбитали: ``2C^c(C^cᵀFcC^c)C^cᵀ``;
+    * открытые диагонализируют ``F^α`` и несут по одной:
+      ``C^o(C^oᵀF^αC^o)C^oᵀ``;
+    * ортогональность замкнутого и открытого подпространств даёт
+      межблочный член ``C^c(C^cᵀF^αC^o)C^oᵀ + C^o(C^cᵀF^αC^o)ᵀC^c``.
+
+    Блок ``C^cᵀF^αC^o`` в общем случае **ненулевой** (проверено на NO/STO-3G:
+    |блок| до 4e-2), поэтому брать энергии из единого эффективного фокиана
+    Руттхана — как это делает ``rohf.orbital_energies`` — нельзя: градиент
+    расходится с оракулом на ~1e-2. Диагональные блоки на сошедшемся решении
+    диагональны до SCF-точности, поэтому полные матрицы ``CᵀFC`` в сумме
+    эквивалентны сумме по собственным значениям.
+
+    Требует сборки базовых интегралов (``h`` и ERI): фокиан строится из них
+    заново по сошедшейся плотности — переиспользовать сохранённые
+    ``orbital_energies`` здесь некорректно (см. выше).
+    """
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    core = integrals.build_core_hamiltonian(basis, molecule)
+    eri = integrals.build_electron_repulsion(basis, molecule)
+    density = rohf.density_alpha + rohf.density_beta
+    coulomb = coulomb_matrix(density, eri)
+    fock_alpha = core + coulomb - exchange_matrix(rohf.density_alpha, eri)
+    fock_closed = core + coulomb - 0.5 * exchange_matrix(rohf.density_alpha, eri)
+    fock_closed = fock_closed - 0.5 * exchange_matrix(rohf.density_beta, eri)
+
+    coefficients = rohf.coefficients
+    closed = coefficients[:, :n_beta]
+    open_shell = coefficients[:, n_beta:n_alpha]
+    weight = np.zeros_like(core)
+    if n_beta > 0:
+        weight = weight + 2.0 * closed @ (closed.T @ fock_closed @ closed) @ closed.T
+    if n_alpha > n_beta:
+        weight = weight + open_shell @ (open_shell.T @ fock_alpha @ open_shell) @ open_shell.T
+        if n_beta > 0:
+            coupling = closed.T @ fock_alpha @ open_shell
+            weight = weight + closed @ coupling @ open_shell.T + open_shell @ coupling.T @ closed.T
+    return weight
+
+
+def rohf_gradient(basis: BasisSet, molecule: Molecule, rohf: RohfResult) -> RhfGradient:
+    """Аналитический градиент ROHF-энергии по координатам всех ядер.
+
+    Форма энергии та же, что и в UHF — различие только в плотностях: и α- и
+    β-каналы строятся из **общих** пространственных орбиталей. Замкнутые
+    орбитали заняты в обоих каналах, открытые — только в α:
+
+    ``D^α = C^cC^cᵀ + C^oC^oᵀ,  D^β = C^cC^cᵀ``.
+
+    Поэтому одноэлектронная и кулоновская части считаются на полной плотности
+    ``D^α + D^β``, а обмен — на односпиновых, с тем же коэффициентом ½ на
+    канал, что в UHF.
+
+    Член релаксации орбиталей строится фокианом-зависимым весом
+    ``_rohf_orbital_weight``: замкнутые орбитали взвешиваются энергиями
+    ``Fc = ½(F^α + F^β)`` с множителем 2 (две спин-орбитали), открытые —
+    энергиями ``F^α``, плюс межблочный член из условия их ортогональности.
+
+    Предельные случаи: замкнутая оболочка (``C^o`` пуста) сводит выражение к
+    RHF-градиенту; если орбитали двух каналов разошлись, — к UHF. Требует
+    сошедшегося расчёта по той же причине, что и ``rhf_gradient``.
+    """
+    gradient = _orbital_gradient(
+        basis,
+        molecule,
+        density=rohf.density_alpha + rohf.density_beta,
+        exchange_densities=(rohf.density_alpha, rohf.density_beta),
+        weight=_rohf_orbital_weight(basis, molecule, rohf),
+        exchange_coefficient=0.5,
+    )
+    return RhfGradient(energy_hartree=rohf.total_energy, gradient=gradient)
 
 
 def xc_gradient(

@@ -42,15 +42,20 @@ from quantumlab.domain.spec import (  # noqa: E402
     GridSpec,
     MethodSpec,
     OptimizationSpec,
+    SpinTreatment,
     Task,
     TheoryFamily,
 )
-from quantumlab.engine.basis import build_basis  # noqa: E402
+from quantumlab.engine.basis import BasisSet, build_basis  # noqa: E402
 from quantumlab.engine.constants import angstrom_to_bohr  # noqa: E402
 from quantumlab.engine.contracts import EngineRequest  # noqa: E402
-from quantumlab.engine.gradients import rhf_gradient  # noqa: E402
+from quantumlab.engine.gradients import (  # noqa: E402
+    rhf_gradient,
+    rohf_gradient,
+    uhf_gradient,
+)
 from quantumlab.engine.reference import ReferenceEngine  # noqa: E402
-from quantumlab.engine.scf import run_rhf  # noqa: E402
+from quantumlab.engine.scf import run_rhf, run_rohf, run_uhf  # noqa: E402
 
 CASES_DIR = Path(__file__).resolve().parent / "cases"
 
@@ -220,8 +225,39 @@ def _permuted(molecule: Molecule) -> Molecule:
     return molecule.model_copy(update={"atoms": tuple(reversed(molecule.atoms))})
 
 
+def _resolve_spin(spin: SpinTreatment | str) -> SpinTreatment:
+    return SpinTreatment(str(spin).lower()) if isinstance(spin, str) else spin
+
+
+def _spin_energy(basis: BasisSet, molecule: Molecule, spin: SpinTreatment) -> float:
+    """Энергия SCF с учётом обработки спина.
+
+    Сверка конечными разностями проверяет ту же поверхность, что и
+    аналитический градиент, а не RHF-поверхность.
+    """
+    if spin is SpinTreatment.UHF:
+        return float(run_uhf(basis, molecule).total_energy)
+    if spin is SpinTreatment.ROHF:
+        return float(run_rohf(basis, molecule).total_energy)
+    return float(run_rhf(basis, molecule).total_energy)
+
+
+def _spin_gradient(basis: BasisSet, molecule: Molecule, spin: SpinTreatment) -> np.ndarray:
+    """Аналитический градиент с учётом обработки спина."""
+    if spin is SpinTreatment.UHF:
+        return uhf_gradient(basis, molecule, run_uhf(basis, molecule)).gradient
+    if spin is SpinTreatment.ROHF:
+        return rohf_gradient(basis, molecule, run_rohf(basis, molecule)).gradient
+    return rhf_gradient(basis, molecule, run_rhf(basis, molecule)).gradient
+
+
 def _displaced_energy(
-    molecule: Molecule, basis_name: str, atom_index: int, axis: int, step: float
+    molecule: Molecule,
+    basis_name: str,
+    atom_index: int,
+    axis: int,
+    step: float,
+    spin: SpinTreatment = SpinTreatment.RHF,
 ) -> float:
     atoms = list(molecule.atoms)
     x, y, z = atoms[atom_index].position
@@ -233,10 +269,15 @@ def _displaced_energy(
     )
     moved = molecule.model_copy(update={"atoms": tuple(atoms)})
     basis = build_basis(basis_name, moved)
-    return float(run_rhf(basis, moved).total_energy)
+    return _spin_energy(basis, moved, spin)
 
 
-def _numerical_gradient(molecule: Molecule, basis_name: str, step: float) -> np.ndarray:
+def _numerical_gradient(
+    molecule: Molecule,
+    basis_name: str,
+    step: float,
+    spin: SpinTreatment = SpinTreatment.RHF,
+) -> np.ndarray:
     """Центральная разность энергии по декартовым координатам ядер.
 
     Делитель переводит шаг из ангстрем в бор, потому что градиент ядро
@@ -246,8 +287,8 @@ def _numerical_gradient(molecule: Molecule, basis_name: str, step: float) -> np.
     gradient = np.zeros((len(molecule.atoms), 3))
     for index in range(len(molecule.atoms)):
         for axis in range(3):
-            forward = _displaced_energy(molecule, basis_name, index, axis, +step)
-            backward = _displaced_energy(molecule, basis_name, index, axis, -step)
+            forward = _displaced_energy(molecule, basis_name, index, axis, +step, spin)
+            backward = _displaced_energy(molecule, basis_name, index, axis, -step, spin)
             gradient[index, axis] = (forward - backward) / divisor
     return gradient
 
@@ -317,10 +358,9 @@ def _check(case: Case) -> Outcome:
 
     if case.gradient_vs_finite_difference is not None:
         specification = case.gradient_vs_finite_difference
-        basis = build_basis(str(case.spec["method"]["basis"]), molecule)
-        scf = run_rhf(basis, molecule)
-        analytical = rhf_gradient(basis, molecule, scf).gradient
-        numerical = _numerical_gradient(molecule, basis_name, specification.step_angstrom)
+        spin = _resolve_spin(case.spec["method"].get("spin", "rhf"))
+        analytical = _spin_gradient(build_basis(basis_name, molecule), molecule, spin)
+        numerical = _numerical_gradient(molecule, basis_name, specification.step_angstrom, spin)
         deviation = float(np.abs(analytical - numerical).max())
         ok = deviation <= specification.max_deviation_eh_bohr
         outcome.passed &= ok

@@ -74,6 +74,7 @@ class BenchmarkCase(BaseModel):
     suite: str
     molecule: str
     spec: dict[str, Any]
+    multiplicity: int = Field(default=1, ge=1)
     measure_gradient: bool = False
     runs: int = Field(default=5, ge=2)
     warmup: int = Field(default=1, ge=0)
@@ -199,17 +200,20 @@ def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
         CalculationSpec,
         MethodSpec,
         OptimizationSpec,
+        SpinTreatment,
         Task,
         TheoryFamily,
     )
     from quantumlab.engine.basis import build_basis
     from quantumlab.engine.contracts import EngineRequest
-    from quantumlab.engine.gradients import rhf_gradient
+    from quantumlab.engine.gradients import rhf_gradient, rohf_gradient
     from quantumlab.engine.reference import ReferenceEngine
-    from quantumlab.engine.scf import run_rhf
+    from quantumlab.engine.scf import run_rhf, run_rohf
 
     molecule = Molecule.from_xyz(
-        (REPO_ROOT / case.molecule).read_text(encoding="utf-8"), name=case.id
+        (REPO_ROOT / case.molecule).read_text(encoding="utf-8"),
+        name=case.id,
+        multiplicity=case.multiplicity,
     )
     method_raw = dict(case.spec["method"])
     theory = TheoryFamily(str(method_raw.pop("theory")).lower())
@@ -222,9 +226,15 @@ def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
 
     if case.measure_gradient:
         basis = build_basis(method.basis, molecule)
-        scf = run_rhf(basis, molecule)
-        rhf_gradient(basis, molecule, scf)
-        payload: dict[str, object] = {"scf_iterations": scf.iterations, "stages": {}}
+        if method.spin == SpinTreatment.ROHF:
+            rohf = run_rohf(basis, molecule)
+            rohf_gradient(basis, molecule, rohf)
+            iterations = rohf.iterations
+        else:
+            rhf = run_rhf(basis, molecule)
+            rhf_gradient(basis, molecule, rhf)
+            iterations = rhf.iterations
+        payload: dict[str, object] = {"scf_iterations": iterations, "stages": {}}
         return payload
 
     result = ReferenceEngine().run(
