@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Тесты / качество
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Расчётные артефакты (большие бинарные данные в Git не храним — §24 ТЗ)
+data/
+*.chk
+*.wfn
+*.cube
+*.npz
+scratch/
+work/
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store

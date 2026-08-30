@@ -1,0 +1,826 @@
+{
+ "angular_scheme_published": "cartesian",
+ "bse_name": "3-21G",
+ "bse_revision_date": "2019-02-21",
+ "description": "3-21G Split-valence basis set",
+ "display_name": "3-21G",
+ "elements": {
+  "1": {
+   "references": [
+    {
+     "reference_description": "21G Split-valence basis set for H,He",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.1562849787,
+       0.9046908767
+      ]
+     ],
+     "exponents": [
+      5.447178,
+      0.82454724
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.18319158
+     ]
+    }
+   ]
+  },
+  "14": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06608223959,
+       0.3862286469,
+       0.6723793854
+      ]
+     ],
+     "exponents": [
+      910.655,
+      137.336,
+      29.7601
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.1045110359,
+       0.1074100369,
+       0.9514463269
+      ],
+      [
+       0.1133550147,
+       0.4575780593,
+       0.6074270787
+      ]
+     ],
+     "exponents": [
+      36.6716,
+      8.31729,
+      2.21645
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.3761078795,
+       1.251649599
+      ],
+      [
+       0.06710299112,
+       0.9568828734
+      ]
+     ],
+     "exponents": [
+      1.07913,
+      0.302422
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0933392
+     ]
+    }
+   ]
+  },
+  "15": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06554071355,
+       0.3840360794,
+       0.6745411394
+      ]
+     ],
+     "exponents": [
+      1054.9,
+      159.195,
+      34.5304
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.1021300535,
+       0.08159224271,
+       0.9697885076
+      ],
+      [
+       0.1108510025,
+       0.4564950104,
+       0.6069360139
+      ]
+     ],
+     "exponents": [
+      44.2866,
+      10.1019,
+      2.73997
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.3714960219,
+       1.270993496
+      ],
+      [
+       0.09158231022,
+       0.9349241043
+      ]
+     ],
+     "exponents": [
+      1.21865,
+      0.395546
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.122811
+     ]
+    }
+   ]
+  },
+  "16": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06500708187,
+       0.3820398935,
+       0.6765448113
+      ]
+     ],
+     "exponents": [
+      1210.62,
+      182.747,
+      39.6673
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.1003099399,
+       0.06508766099,
+       0.9814544117
+      ],
+      [
+       0.1096459702,
+       0.4576488757,
+       0.6042608359
+      ]
+     ],
+     "exponents": [
+      52.2236,
+      11.9629,
+      3.28911
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.2860888537,
+       1.228059372
+      ],
+      [
+       0.1647769947,
+       0.8708549722
+      ]
+     ],
+     "exponents": [
+      1.22384,
+      0.457303
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.142269
+     ]
+    }
+   ]
+  },
+  "17": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "gordon1982a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06458270228,
+       0.3803630134,
+       0.6781900239
+      ]
+     ],
+     "exponents": [
+      1376.4,
+      207.857,
+      45.1554
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.09876395275,
+       0.05113382731,
+       0.9913375295
+      ],
+      [
+       0.1085980585,
+       0.4586822471,
+       0.6019623243
+      ]
+     ],
+     "exponents": [
+      60.8014,
+      13.9765,
+      3.8871
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.2224014841,
+       1.182522574
+      ],
+      [
+       0.2192157972,
+       0.8223202393
+      ]
+     ],
+     "exponents": [
+      1.35299,
+      0.526955
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.166714
+     ]
+    }
+   ]
+  },
+  "5": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06296046589,
+       0.3633038032,
+       0.6972546223
+      ]
+     ],
+     "exponents": [
+      116.434,
+      17.4314,
+      3.68016
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.3686634773,
+       1.199444806
+      ],
+      [
+       0.2311519023,
+       0.8667636337
+      ]
+     ],
+     "exponents": [
+      2.28187,
+      0.465248
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.124328
+     ]
+    }
+   ]
+  },
+  "6": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.06176690738,
+       0.3587940429,
+       0.7007130837
+      ]
+     ],
+     "exponents": [
+      172.256,
+      25.9109,
+      5.53335
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.3958951621,
+       1.215834356
+      ],
+      [
+       0.2364599466,
+       0.8606188057
+      ]
+     ],
+     "exponents": [
+      3.66498,
+      0.770545
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.195857
+     ]
+    }
+   ]
+  },
+  "7": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.05986570051,
+       0.352955003,
+       0.706513006
+      ]
+     ],
+     "exponents": [
+      242.766,
+      36.4851,
+      7.81449
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.4133000774,
+       1.224417267
+      ],
+      [
+       0.2379720162,
+       0.8589530586
+      ]
+     ],
+     "exponents": [
+      5.42522,
+      1.14915
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.283205
+     ]
+    }
+   ]
+  },
+  "8": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.05923939339,
+       0.3514999608,
+       0.707657921
+      ]
+     ],
+     "exponents": [
+      322.037,
+      48.4308,
+      10.4206
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.4044535832,
+       1.221561761
+      ],
+      [
+       0.244586107,
+       0.8539553735
+      ]
+     ],
+     "exponents": [
+      7.40294,
+      1.5762
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.373684
+     ]
+    }
+   ]
+  },
+  "9": {
+   "references": [
+    {
+     "reference_description": "3-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    },
+    {
+     "reference_description": "6-21G Split-valence basis set",
+     "reference_keys": [
+      "binkley1980a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.05854830293,
+       0.3493080175,
+       0.7096320355
+      ]
+     ],
+     "exponents": [
+      413.801,
+      62.2446,
+      13.434
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       -0.4073262777,
+       1.223137831
+      ],
+      [
+       0.2466800032,
+       0.852321011
+      ]
+     ],
+     "exponents": [
+      9.77759,
+      2.08617
+     ]
+    },
+    {
+     "angular_momentum": [
+      0,
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ],
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.482383
+     ]
+    }
+   ]
+  }
+ },
+ "family": "pople",
+ "name": "3-21g",
+ "schema_version": "1.0",
+ "source": "Basis Set Exchange (bse 0.12)"
+}

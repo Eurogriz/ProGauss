@@ -1,0 +1,1039 @@
+openapi: 3.1.0
+info:
+  title: QuantumLab API
+  version: v1
+  summary: REST API платформы QuantumLab
+  description: |
+    Единый контракт для Web UI, CLI и внешних интеграций.
+
+    Правила:
+      * версионирование в пути (`/api/v1`), обратная совместимость в пределах мажорной версии;
+      * ошибки возвращаются в формате RFC 9457 (`application/problem+json`) с кодом из
+        таксономии `quantumlab.errors.ErrorCode` и локализованным диагнозом;
+      * тяжёлые научные данные не отдаются телом ответа — только ссылки на артефакты;
+      * прогресс задания доступен опросом `GET /jobs/{id}` и потоком
+        `GET /jobs/{id}/events` (SSE).
+  license:
+    name: Apache-2.0
+
+servers:
+  - url: /api/v1
+    description: Относительный префикс — API развёрнут вместе с UI
+
+tags:
+  - name: auth
+    description: Аутентификация и сессии
+  - name: projects
+    description: Проекты и доступы
+  - name: molecules
+    description: Структуры
+  - name: calculations
+    description: Задания и расчёты
+  - name: results
+    description: Результаты и артефакты
+  - name: workers
+    description: Исполнители и HPC
+  - name: meta
+    description: Возможности, профили, локализация
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/token:
+    post:
+      tags: [auth]
+      operationId: createToken
+      summary: Получить токен доступа
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: Токен выдан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentUser
+      summary: Текущий пользователь
+      responses:
+        '200':
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+
+  /projects:
+    get:
+      tags: [projects]
+      operationId: listProjects
+      summary: Список проектов пользователя
+      parameters:
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Страница проектов
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Project' }
+                  total: { type: integer, minimum: 0 }
+    post:
+      tags: [projects]
+      operationId: createProject
+      summary: Создать проект
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProjectCreate' }
+      responses:
+        '201':
+          description: Проект создан
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+
+  /projects/{projectId}/molecules:
+    get:
+      tags: [molecules]
+      operationId: listMolecules
+      summary: Молекулы проекта
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: Список структур
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Molecule' }
+    post:
+      tags: [molecules]
+      operationId: createMolecule
+      summary: Добавить структуру (из файла или по SMILES/InChI)
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MoleculeCreate' }
+      responses:
+        '201':
+          description: Структура создана; в ответе — результат проверок
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Molecule' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /molecules/{moleculeId}:
+    get:
+      tags: [molecules]
+      operationId: getMolecule
+      summary: Получить структуру
+      parameters:
+        - { $ref: '#/components/parameters/MoleculeId' }
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      responses:
+        '200':
+          description: Структура
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Molecule' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /molecules/{moleculeId}/validate:
+    post:
+      tags: [molecules]
+      operationId: validateMolecule
+      summary: Проверить структуру (валентности, заряд/мультиплетность, контакты)
+      parameters:
+        - { $ref: '#/components/parameters/MoleculeId' }
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      responses:
+        '200':
+          description: Отчёт проверок
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StructureReport' }
+
+  /calculations/plan:
+    post:
+      tags: [calculations]
+      operationId: planCalculation
+      summary: Развернуть профиль точности в полную спецификацию с обоснованиями
+      description: |
+        Ключевой эндпоинт «рекомендуемых настроек» (§8 ТЗ): на вход — задача,
+        профиль и идентификатор структуры; на выход — полная спецификация и
+        список решений с текстовыми обоснованиями для показа пользователю.
+      parameters:
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlanRequest' }
+      responses:
+        '200':
+          description: Спецификация и обоснования
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlanResponse' }
+
+  /jobs:
+    get:
+      tags: [calculations]
+      operationId: listJobs
+      summary: Очередь и история заданий
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/JobStatus' }
+        - name: projectId
+          in: query
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Страница заданий
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, total]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Job' }
+                  total: { type: integer, minimum: 0 }
+    post:
+      tags: [calculations]
+      operationId: submitJob
+      summary: Отправить расчёт
+      parameters:
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/JobCreate' }
+      responses:
+        '202':
+          description: Задание принято в очередь
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /jobs/{jobId}:
+    get:
+      tags: [calculations]
+      operationId: getJob
+      summary: Состояние задания (статус, прогресс, ETA, ресурсы)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      responses:
+        '200':
+          description: Задание
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{jobId}/cancel:
+    post:
+      tags: [calculations]
+      operationId: cancelJob
+      summary: Остановить задание
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+      responses:
+        '200':
+          description: Задание остановлено
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '409': { $ref: '#/components/responses/Problem' }
+
+  /jobs/{jobId}/resume:
+    post:
+      tags: [calculations]
+      operationId: resumeJob
+      summary: Продолжить расчёт с контрольной точки
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      responses:
+        '200':
+          description: Расчёт продолжается
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '409':
+          description: Нет контрольной точки (`job.not_resumable`)
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /jobs/{jobId}/retry:
+    post:
+      tags: [calculations]
+      operationId: retryJob
+      summary: Повторить задание (attempt += 1)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+      responses:
+        '202':
+          description: Задание снова в очереди
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+
+  /jobs/{jobId}/events:
+    get:
+      tags: [calculations]
+      operationId: streamJobEvents
+      summary: Поток событий задания (Server-Sent Events)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+      responses:
+        '200':
+          description: Поток событий прогресса и смены состояний
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /jobs/{jobId}/logs:
+    get:
+      tags: [calculations]
+      operationId: getJobLogs
+      summary: Журнал расчёта
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - name: tail
+          in: query
+          schema: { type: integer, minimum: 1, default: 500 }
+      responses:
+        '200':
+          description: Хвост журнала
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /jobs/{jobId}/result:
+    get:
+      tags: [results]
+      operationId: getResult
+      summary: Результат расчёта (скаляры, проверки качества, ссылки на артефакты)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+      responses:
+        '200':
+          description: Результат
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CalculationResult' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{jobId}/report:
+    get:
+      tags: [results]
+      operationId: getReport
+      summary: Отчёт по расчёту (§39 ТЗ)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+        - name: format
+          in: query
+          schema: { type: string, enum: [html, pdf, json], default: html }
+      responses:
+        '200':
+          description: Файл отчёта
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+  /jobs/{jobId}/result/export:
+    post:
+      tags: [results]
+      operationId: exportResults
+      summary: Пакетный экспорт результатов (CSV / JSON / Parquet)
+      parameters:
+        - { $ref: '#/components/parameters/JobId' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ExportRequest' }
+      responses:
+        '202':
+          description: Экспорт поставлен в очередь
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ExportTask' }
+
+  /artifacts/{artifactId}:
+    get:
+      tags: [results]
+      operationId: getArtifact
+      summary: Скачать артефакт (градиент, орбитали, куб, …)
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '302':
+          description: Перенаправление на подписанный URL объектного хранилища
+          headers:
+            Location:
+              schema: { type: string, format: uri }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /workers:
+    get:
+      tags: [workers]
+      operationId: listWorkers
+      summary: Исполнители, ресурсы и загрузка
+      responses:
+        '200':
+          description: Список worker'ов
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Worker' }
+
+  /capabilities:
+    get:
+      tags: [meta]
+      operationId: listCapabilities
+      summary: Что реально реализовано (§54 ТЗ)
+      description: |
+        Источник правды для UI: метод со статусом `not_implemented` должен
+        отображаться как «Этот метод пока недоступен».
+      parameters:
+        - { $ref: '#/components/parameters/AcceptLanguage' }
+        - name: kind
+          in: query
+          schema:
+            type: string
+            enum: [method, functional, basis, task, format, backend, scheduler, property]
+      responses:
+        '200':
+          description: Срез реестра
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CapabilitySnapshot' }
+
+  /i18n/{locale}:
+    get:
+      tags: [meta]
+      operationId: getCatalog
+      summary: Каталог переводов для интерфейса
+      parameters:
+        - name: locale
+          in: path
+          required: true
+          schema: { type: string, enum: [ru, en] }
+      responses:
+        '200':
+          description: Плоский словарь ключ → строка
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: { type: string }
+
+  /health:
+    get:
+      tags: [meta]
+      operationId: health
+      summary: Liveness-проба
+      security: []
+      responses:
+        '200':
+          description: Сервис жив
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [ok] }
+
+  /ready:
+    get:
+      tags: [meta]
+      operationId: readiness
+      summary: Readiness-проба (БД, кэш, хранилище)
+      security: []
+      responses:
+        '200':
+          description: Готов принимать запросы
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+        '503':
+          description: Не готов
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Readiness' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AcceptLanguage:
+      name: Accept-Language
+      in: header
+      description: Язык сообщений и диагнозов (по умолчанию `ru`)
+      schema: { type: string, enum: [ru, en], default: ru }
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MoleculeId:
+      name: moleculeId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PageSize:
+      name: pageSize
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  responses:
+    Problem:
+      description: Ошибка с человеко-понятным диагнозом (§19 ТЗ)
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Объект не найден
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Требуется аутентификация
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Token:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: секунд }
+
+    User:
+      type: object
+      required: [id, email, role]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        role: { type: string, enum: [admin, researcher, viewer] }
+
+    Project:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        role: { type: string, enum: [owner, editor, viewer] }
+        createdAt: { type: string, format: date-time }
+
+    ProjectCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+
+    Atom:
+      type: object
+      required: [symbol, position]
+      properties:
+        symbol: { type: string, description: Символ элемента }
+        position:
+          type: array
+          description: Координаты в ангстремах
+          prefixItems: [{ type: number }, { type: number }, { type: number }]
+          items: { type: number }
+          minItems: 3
+          maxItems: 3
+        label: { type: string }
+
+    Bond:
+      type: object
+      required: [i, j, order]
+      properties:
+        i: { type: integer, minimum: 0 }
+        j: { type: integer, minimum: 0 }
+        order: { type: string, enum: [single, double, triple, aromatic] }
+
+    Molecule:
+      type: object
+      required: [id, name, atoms, charge, multiplicity, nElectrons, formula]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        atoms:
+          type: array
+          items: { $ref: '#/components/schemas/Atom' }
+        bonds:
+          type: array
+          items: { $ref: '#/components/schemas/Bond' }
+        charge: { type: integer }
+        multiplicity: { type: integer, minimum: 1 }
+        nElectrons: { type: integer }
+        formula: { type: string }
+        structureSha: { type: string }
+        allowedMultiplicities:
+          type: array
+          items: { type: integer }
+
+    MoleculeCreate:
+      type: object
+      properties:
+        name: { type: string }
+        charge: { type: integer, default: 0 }
+        multiplicity: { type: integer, default: 1 }
+        format:
+          type: string
+          description: Формат входных данных; доступность каждого — в `/capabilities`
+          enum: [xyz, mol, sdf, pdb, cif, mol2, smiles, inchi]
+        content: { type: string, description: Текст структуры или SMILES/InChI }
+        atoms:
+          type: array
+          items: { $ref: '#/components/schemas/Atom' }
+
+    StructureReport:
+      type: object
+      required: [valid, issues]
+      properties:
+        valid: { type: boolean }
+        issues:
+          type: array
+          items:
+            type: object
+            required: [code, message]
+            properties:
+              code: { type: string, description: Код из таксономии ошибок }
+              message: { type: string, description: Локализованное сообщение }
+              atomIndex: { type: integer }
+        suggestions:
+          type: array
+          items: { type: string }
+
+    Task:
+      type: string
+      enum:
+        - single_point
+        - optimization
+        - frequencies
+        - ts_optimization
+        - irc
+        - scan_1d
+        - scan_2d
+        - properties
+
+    PrecisionProfile:
+      type: string
+      enum: [screening, standard, high_accuracy, research]
+
+    MethodSpec:
+      type: object
+      required: [theory, basis]
+      properties:
+        theory: { type: string, enum: [hf, dft, mp2, scs_mp2, ccsd, ccsd_t] }
+        functional: { type: string }
+        basis: { type: string }
+        dispersion: { type: string, enum: [none, d3bj, d3zero, d4] }
+        spin: { type: string, enum: [rhf, uhf, rohf] }
+
+    CalculationSpec:
+      type: object
+      required: [task]
+      description: Полная спецификация; зеркалит `quantumlab.domain.spec.CalculationSpec`
+      properties:
+        task: { $ref: '#/components/schemas/Task' }
+        profile: { $ref: '#/components/schemas/PrecisionProfile' }
+        method: { $ref: '#/components/schemas/MethodSpec' }
+        scf:
+          type: object
+          properties:
+            maxIterations: { type: integer, minimum: 1 }
+            energyThreshold: { type: number, exclusiveMinimum: 0 }
+            densityThreshold: { type: number, exclusiveMinimum: 0 }
+            damping: { type: number, minimum: 0, maximum: 1 }
+            levelShift: { type: number, minimum: 0 }
+            stabilityAnalysis: { type: boolean }
+            fallbackStrategies:
+              type: array
+              items: { type: string }
+        grid:
+          type: object
+          properties:
+            preset: { type: string, enum: [coarse, fine, ultrafine] }
+            prune: { type: boolean }
+        resources:
+          type: object
+          properties:
+            threads: { type: [integer, 'null'], minimum: 1 }
+            memoryMb: { type: [integer, 'null'], minimum: 1 }
+            device: { type: string, enum: [auto, cpu, cuda, rocm] }
+            scheduler: { type: [string, 'null'] }
+        seed: { type: [integer, 'null'] }
+        expertRawInput: { type: [string, 'null'] }
+
+    PlanRequest:
+      type: object
+      required: [task, profile, moleculeId]
+      properties:
+        task: { $ref: '#/components/schemas/Task' }
+        profile: { $ref: '#/components/schemas/PrecisionProfile' }
+        moleculeId: { type: string, format: uuid }
+        hardware:
+          type: object
+          properties:
+            cores: { type: integer, minimum: 1 }
+            memoryMb: { type: integer, minimum: 1 }
+            gpuCount: { type: integer, minimum: 0 }
+
+    Decision:
+      type: object
+      required: [parameter, value, text]
+      properties:
+        parameter: { type: string, description: "basis, functional, threads, …" }
+        value: { type: string }
+        text: { type: string, description: Локализованная фраза с обоснованием }
+        detail: { type: string }
+
+    PlanResponse:
+      type: object
+      required: [spec, decisions, rationale]
+      properties:
+        spec: { $ref: '#/components/schemas/CalculationSpec' }
+        decisions:
+          type: array
+          items: { $ref: '#/components/schemas/Decision' }
+        rationale: { type: string, description: Почему выбран этот профиль }
+
+    JobStatus:
+      type: string
+      enum:
+        - draft
+        - queued
+        - starting
+        - running
+        - completed
+        - completed_with_warnings
+        - failed
+        - cancelled
+        - paused
+
+    JobProgress:
+      type: object
+      properties:
+        percent: { type: number, minimum: 0, maximum: 100 }
+        stageKey: { type: [string, 'null'], description: Ключ локализации этапа }
+        etaSeconds: { type: [number, 'null'], minimum: 0 }
+        scfIteration: { type: [integer, 'null'] }
+        optimizationStep: { type: [integer, 'null'] }
+
+    Job:
+      type: object
+      required: [id, name, status, spec, attempt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        projectId: { type: string, format: uuid }
+        moleculeId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/JobStatus' }
+        statusLabel: { type: string, description: Локализованное название статуса }
+        attempt: { type: integer, minimum: 0 }
+        priority: { type: integer }
+        spec: { $ref: '#/components/schemas/CalculationSpec' }
+        progress: { $ref: '#/components/schemas/JobProgress' }
+        resources:
+          type: object
+          properties:
+            threads: { type: [integer, 'null'] }
+            memoryMb: { type: [integer, 'null'] }
+            device: { type: string }
+            workerId: { type: [string, 'null'] }
+        error:
+          type: [object, 'null']
+          description: Диагноз ошибки (§19 ТЗ)
+          properties:
+            code: { type: string }
+            title: { type: string }
+            whatHappened: { type: string }
+            hint: { type: string }
+            tried:
+              type: array
+              items: { type: string }
+            actions:
+              type: array
+              items:
+                type: object
+                required: [key, kind, label]
+                properties:
+                  key: { type: string }
+                  kind: { type: string, enum: [automatic, manual, navigate] }
+                  label: { type: string }
+                  payload: { type: object, additionalProperties: { type: string } }
+        fingerprint: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        availableActions:
+          type: array
+          items: { $ref: '#/components/schemas/JobStatus' }
+
+    JobCreate:
+      type: object
+      required: [moleculeId, spec]
+      properties:
+        name: { type: string }
+        moleculeId: { type: string, format: uuid }
+        spec: { $ref: '#/components/schemas/CalculationSpec' }
+        priority: { type: integer, minimum: 0, maximum: 1000 }
+        tags:
+          type: array
+          items: { type: string }
+
+    QualityCheck:
+      type: object
+      required: [nameKey, verdict]
+      properties:
+        nameKey: { type: string }
+        label: { type: string }
+        verdict: { type: string, enum: [pass, warn, fail, not_checked] }
+        detail: { type: [string, 'null'] }
+
+    Artifact:
+      type: object
+      required: [id, kind, uri, sha256, sizeBytes, schemaVersion]
+      properties:
+        id: { type: string, format: uuid }
+        kind:
+          type: string
+          enum:
+            - gradient
+            - hessian
+            - orbitals
+            - density
+            - spin_density
+            - esp
+            - frequencies
+            - normal_modes
+            - checkpoint
+            - raw_log
+            - report
+        uri: { type: string }
+        sha256: { type: string }
+        sizeBytes: { type: integer, minimum: 0 }
+        schemaVersion: { type: string }
+
+    CalculationResult:
+      type: object
+      required: [jobId, energyHartree, converged, scfIterations, fingerprint]
+      properties:
+        jobId: { type: string, format: uuid }
+        energyHartree: { type: number }
+        converged: { type: boolean }
+        scfIterations: { type: integer }
+        homoHartree: { type: [number, 'null'] }
+        lumoHartree: { type: [number, 'null'] }
+        gapHartree: { type: [number, 'null'] }
+        dipoleDebye: { type: [number, 'null'] }
+        frequenciesCm1:
+          type: array
+          items: { type: number }
+        zeroPointEnergyHartree: { type: [number, 'null'] }
+        optimizationSteps:
+          type: [integer, 'null']
+          description: Число шагов оптимизации геометрии; пусто у расчёта в точке.
+        finalMolecule:
+          description: >-
+            Итоговая геометрия для расчётов, меняющих структуру (оптимизация).
+            Отсутствует у одноточечного расчёта: там она совпадает с исходной.
+          oneOf:
+            - $ref: '#/components/schemas/Molecule'
+            - type: 'null'
+        quality:
+          type: array
+          items: { $ref: '#/components/schemas/QualityCheck' }
+        recommendations:
+          type: array
+          description: Предложения «что сделать дальше» (§29 ТЗ)
+          items:
+            type: object
+            required: [text, actions]
+            properties:
+              text: { type: string }
+              actions:
+                type: array
+                items: { type: string }
+        timings:
+          type: array
+          items:
+            type: object
+            required: [stage, wallSeconds, cpuSeconds]
+            properties:
+              stage: { type: string }
+              wallSeconds: { type: number, minimum: 0 }
+              cpuSeconds: { type: number, minimum: 0 }
+        environment:
+          type: object
+          properties:
+            softwareVersion: { type: string }
+            engineVersion: { type: string }
+            engineBackend: { type: string }
+            cpuModel: { type: string }
+            cores: { type: integer }
+            gpu: { type: [string, 'null'] }
+        fingerprint: { type: string }
+        artifacts:
+          type: array
+          items: { $ref: '#/components/schemas/Artifact' }
+        createdAt: { type: string, format: date-time }
+
+    ExportRequest:
+      type: object
+      required: [format]
+      properties:
+        format: { type: string, enum: [csv, json, parquet] }
+        jobIds:
+          type: array
+          items: { type: string, format: uuid }
+
+    ExportTask:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, completed, failed] }
+
+    Worker:
+      type: object
+      required: [id, status]
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [idle, busy, draining, offline] }
+        scheduler: { type: string, enum: [local, slurm, pbs, lsf, kubernetes] }
+        cores: { type: integer }
+        memoryMb: { type: integer }
+        gpus: { type: integer }
+        currentJobId: { type: [string, 'null'], format: uuid }
+        lastSeenAt: { type: string, format: date-time }
+
+    Capability:
+      type: object
+      required: [id, name, availability]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        availability: { type: string, enum: [implemented, partial, not_implemented] }
+        sinceVersion: { type: [string, 'null'] }
+        limitations:
+          type: array
+          items: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        description: { type: string, description: Локализованное пояснение статуса }
+
+    CapabilitySnapshot:
+      type: object
+      description: Возможность по категориям
+      additionalProperties:
+        type: array
+        items: { $ref: '#/components/schemas/Capability' }
+
+    Readiness:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ready, not_ready] }
+        checks:
+          type: object
+          additionalProperties: { type: boolean }
+
+    Problem:
+      type: object
+      description: RFC 9457 с расширениями QuantumLab
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string, description: Локализованный заголовок }
+        status: { type: integer }
+        detail: { type: string, description: Раздел «Что произошло» }
+        code: { type: string, description: "Код из таксономии, например scf.not_converged" }
+        hint: { type: string }
+        tried:
+          type: array
+          items: { type: string }
+        actions:
+          type: array
+          items:
+            type: object
+            required: [key, kind, label]
+            properties:
+              key: { type: string }
+              kind: { type: string, enum: [automatic, manual, navigate] }
+              label: { type: string }
+              payload: { type: object, additionalProperties: { type: string } }

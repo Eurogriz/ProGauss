@@ -1,0 +1,9 @@
+id: water-rhf-sto3g-invariance
+level: L7
+description: Энергия не зависит от поворота системы и от порядка атомов во входных данных.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g }
+invariance:
+  max_energy_deviation_eh: 1.0e-10

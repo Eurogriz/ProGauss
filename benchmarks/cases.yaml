@@ -1,0 +1,70 @@
+# Наборы бенчмарков (§27 ТЗ, проект — docs/architecture/09).
+#
+# Состав наборов — по числу атомов, как в проекте. Кейс с `blocked_reason`
+# не измеряется: причина всегда конкретна и измерена, а не «потом сделаем».
+
+cases:
+  - id: hydrogen-rhf-sto3g-sp
+    suite: small
+    molecule: tests/fixtures/hydrogen.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g }
+    runs: 5
+    warmup: 1
+
+  - id: water-rhf-sto3g-sp
+    suite: small
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g }
+    runs: 5
+    warmup: 1
+
+  - id: water-rhf-sto3g-grad
+    suite: small
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g }
+    measure_gradient: true
+    runs: 3
+    warmup: 1
+
+  - id: water-rhf-631g-sp
+    suite: small
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: 6-31g }
+    runs: 3
+    warmup: 1
+
+  - id: water-rhf-sto3g-opt
+    suite: small
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: optimization
+      method: { theory: hf, basis: sto-3g }
+      optimization: { coordinates: cartesian, max_steps: 40 }
+    runs: 3
+    warmup: 1
+
+  - id: water-rhf-ccpvdz-sp
+    suite: medium
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: cc-pvdz }
+    runs: 3
+    warmup: 1
+
+  - id: benzene-rhf-631g-sp
+    suite: medium
+    molecule: tests/fixtures/benzene.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: 6-31g }
+    runs: 3
+    warmup: 1

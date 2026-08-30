@@ -1,0 +1,32 @@
+id: water-rks-pbe0-sto3g-energy
+level: L1
+description: >-
+  RKS/PBE0 (гибрид, ¼ точного обмена) воды в STO-3G. Проверяет путь гибрида:
+  доля точного обмена входит и в фокиан (−½α·K), и в энергию (−¼α·D:K).
+  Это единственная верификация в наборе, где XC-матрица комбинируется
+  с точным обменом, поэтому она покрывает ошибки, невидимые на чистых LDA/GGA.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: pbe0 }
+  grid: { preset: ultrafine }
+expect:
+  energy_hartree:
+    value: -75.2457116778
+    tol: 5.0e-6
+    source: >-
+      internal-reference (reference-cpu); сверено с PySCF 2.14 dft.RKS xc=PBE0
+      сетка (120,974), расхождение 1.10e-06 э — то же, что у PBE, потому что
+      остаток общий и происходит от корреляции PBE
+  dipole_debye:
+    value: 1.696875
+    tol: 1.0e-4
+    source: внутренний расчёт по плотности RKS/PBE0
+quality:
+  scf_converged: true
+  electron_count: true
+  quadrature_electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  basis_angular_scheme: true

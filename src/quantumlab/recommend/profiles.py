@@ -1,0 +1,473 @@
+"""Автоподбор параметров расчёта — «Рекомендуемые настройки» (§8 ТЗ).
+
+Пользователь выбирает уровень точности, система сама выбирает метод, базис,
+пороги, сетку и ресурсы, и **обязана показать каждое своё решение** с
+обоснованием. Поэтому функция возвращает не только спецификацию, но и список
+:class:`Decision`, который UI рендерит в блоке «Почему выбраны эти параметры».
+
+Эвристики намеренно просты и задокументированы: их задача — дать надёжную
+отправную точку, а не заменить специалиста. Любое значение можно перекрыть в
+экспертном режиме (§36 ТЗ).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Final
+
+from quantumlab.domain.molecule import Molecule
+from quantumlab.domain.spec import (
+    CalculationSpec,
+    DeviceKind,
+    DispersionCorrection,
+    FunctionalClass,
+    GridPreset,
+    GridSpec,
+    MethodSpec,
+    OptimizationSpec,
+    PrecisionProfile,
+    ResourceSpec,
+    ScfSpec,
+    Task,
+    TheoryFamily,
+)
+from quantumlab.engine.registry import CapabilityRegistry, default_registry
+from quantumlab.i18n import DEFAULT_LOCALE, t
+
+#: Число базисных функций на атом — грубая оценка для выбора ресурсов.
+#: SVP-подобные базисы ≈ 5, TZVP-подобные ≈ 10 функций на атом.
+_BASIS_FUNCTIONS_PER_ATOM: Final[dict[str, int]] = {
+    "def2-svp": 5,
+    "def2-tzvp": 10,
+    "def2-tzvpp": 11,
+    "def2-qzvp": 20,
+    "6-31g(d)": 5,
+    "6-31g(d,p)": 6,
+    "sto-3g": 2,
+}
+
+#: Порог «крупная молекула», после которого точность обменивается на время.
+_LARGE_SYSTEM_ATOMS: Final = 80
+
+#: Единственная реализованная система координат оптимизации. Реестр
+#: возможностей сообщает о том же (``coordinates:cartesian`` = partial).
+_COORDINATES: Final = "cartesian"
+
+#: Чем заменить функционал, которого в ядре нет: каждый шаг — на ближайший
+#: реализованный того же или соседнего уровня точности.
+#:
+#: Цепочка односторонняя и обрывается отсутствием ключа, поэтому зациклиться
+#: не может (``seen`` в :func:`_resolve_functional` — страховка, а не механизм).
+#: Порядок обоснован близостью, а не алфавитом: range-separated гибрид ближе
+#: всего к глобальному гибриду, гибрид — к GGA, GGA — к LDA.
+_FUNCTIONAL_SUBSTITUTES: Final[dict[str, str]] = {
+    "wb97x-d": "pbe0",
+    "wb97x": "pbe0",
+    "m062x": "pbe0",
+    "m06": "pbe0",
+    "tpssh": "pbe0",
+    "b3lyp": "pbe0",
+    "blyp": "pbe",
+    "pbe0": "pbe",
+    "pbe": "svwn",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """Одно автоматическое решение с обоснованием.
+
+    Attributes:
+        parameter: машиночитаемое имя параметра (``basis``, ``threads``, …).
+        value: выбранное значение в виде строки для показа.
+        reason_key: ключ локализации фразы «Выбран базис {value}».
+        detail: дополнительная причина (например, размер системы).
+    """
+
+    parameter: str
+    value: str
+    reason_key: str
+    detail: str | None = None
+
+    def render(self, locale: str = DEFAULT_LOCALE) -> str:
+        """Локализованная строка решения для показа пользователю."""
+        line = t(self.reason_key, locale, value=self.value)
+        return f"{line} — {self.detail}" if self.detail else line
+
+
+@dataclass(frozen=True, slots=True)
+class HardwareContext:
+    """Ресурсы, доступные планировщику в момент подбора."""
+
+    cores: int = 1
+    memory_mb: int = 4096
+    gpu_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    """Результат автоподбора: готовая спецификация + объяснения."""
+
+    spec: CalculationSpec
+    decisions: tuple[Decision, ...]
+
+    def explain(self, locale: str = DEFAULT_LOCALE) -> list[str]:
+        """Строки для блока «Почему выбраны эти параметры»."""
+        profile_name = (
+            t(f"profile.{self.spec.profile.value}.name", locale) if self.spec.profile else ""
+        )
+        return [
+            t("profile.because", locale, profile=profile_name),
+            *(d.render(locale) for d in self.decisions),
+        ]
+
+
+def _basis_functions(basis: str, n_atoms: int) -> int:
+    return _BASIS_FUNCTIONS_PER_ATOM.get(basis, 7) * n_atoms
+
+
+def _estimate_threads(n_basis_functions: int, cores: int) -> int:
+    """Оценка числа потоков.
+
+    Модель: плотные BLAS/интегральные ядра выходят на плато примерно при одном
+    потоке на 60 базисных функций (дальше упираемся в пропускную способность
+    памяти). Оценка намеренно консервативна: недоиспользовать ядро дешевле,
+    чем убить задание по памяти.
+    """
+    target = math.ceil(n_basis_functions / 60)
+    return max(1, min(cores, target))
+
+
+def _estimate_memory_mb(n_basis_functions: int) -> int:
+    """Оценка потребности в памяти, МБ.
+
+    Учитываем плотные матрицы SCF (F, P, S, X, D, ошибки DIIS ≈ 6 штук) по
+    ``N_bf²`` элементов ``float64``; четырёхиндексные интегралы (N⁴) в оценке
+    не участвуют, потому что по умолчанию используется direct-SCF. Для
+    N_bf = 1000 это ≈ 48 ГБ — честная иллюстрация того, почему прямой SCF
+    обязателен для крупных систем.
+    """
+    dense_bytes = 6 * n_basis_functions * n_basis_functions * 8
+    return max(1024, math.ceil(dense_bytes / 1_000_000))
+
+
+def _resolve_functional(
+    requested: str, capabilities: CapabilityRegistry
+) -> tuple[str | None, str | None]:
+    """Возвращает запрошенный функционал или ближайший доступный по цепочке.
+
+    Отступать на HF сразу, как только недоступен «фирменный» функционал
+    профиля, — значит терять больше точности, чем требует честность: PBE0 без
+    дисперсии точнее HF всегда, а не только там, где дисперсия не важна.
+    Поэтому сначала делается шаг по цепочке :data:`_FUNCTIONAL_SUBSTITUTES`
+    и только потом, когда реализованных функционалов не осталось вовсе,
+    происходит откат на HF.
+
+    Returns:
+        Пара ``(выбранный, заменённый)``. ``выбранный`` равен ``None``, если
+        доступных функционалов в цепочке нет. ``заменённый`` — имя, которое
+        профиль просил изначально, если пришлось отступить; иначе ``None``.
+    """
+    seen: set[str] = set()
+    current = requested
+    while current and current not in seen:
+        seen.add(current)
+        if capabilities.is_available(f"functional:{current}"):
+            return (current, requested) if current != requested else (current, None)
+        current = _FUNCTIONAL_SUBSTITUTES.get(current, "")
+    return None, requested
+
+
+def _functional_class_from_registry(
+    functional: str, capabilities: CapabilityRegistry
+) -> FunctionalClass:
+    """Класс функционала из реестра.
+
+    Второй таблицы «имя → класс» здесь намеренно нет: реестр уже хранит класс
+    в метаданных, а две копии разошлись бы при первом же новом функционале.
+    """
+    metadata = capabilities.assert_available(f"functional:{functional}").metadata
+    return FunctionalClass(str(metadata["class"]))
+
+
+def resolve_profile(
+    profile: PrecisionProfile,
+    *,
+    task: Task,
+    molecule: Molecule,
+    hardware: HardwareContext | None = None,
+    registry: CapabilityRegistry | None = None,
+) -> Resolution:
+    """Подбирает полную спецификацию расчёта по профилю точности.
+
+    Args:
+        profile: уровень точности, выбранный пользователем.
+        task: тип задачи.
+        molecule: структура (нужна для оценки размера).
+        hardware: доступные ресурсы; если не заданы — берутся консервативные.
+        registry: реестр возможностей; по умолчанию — текущий. План обязан
+            состоять только из того, что система действительно умеет (§54 ТЗ):
+            рекомендовать нереализованный метод значит выдать пользователю
+            расчёт, который гарантированно упадёт.
+
+    Returns:
+        :class:`Resolution` со спецификацией и списком обоснований.
+    """
+    hardware = hardware or HardwareContext()
+    capabilities = registry or default_registry()
+    decisions: list[Decision] = []
+
+    functional: str | None
+    functional_class: FunctionalClass | None
+    functional, functional_class, basis, dispersion = _base_choice(profile)
+    theory = TheoryFamily.DFT
+
+    # Дисперсия — поправка к теории, а не сама теория. Её отсутствие меняет
+    # точность на дисперсионно-связанных системах, но не превращает расчёт в
+    # другой метод, поэтому недоступная поправка снимается **отдельным
+    # видимым решением**, а не утаскивает профиль на HF (§8 ТЗ). Прежнее
+    # правило «недоступна любая часть обещания — значит HF» было строже, чем
+    # требует §54: оно запрещало не скрывать, а честно сообщать, и из-за него
+    # все четыре профиля разворачивались в HF при реализованных PBE и PBE0.
+    dispersion_dropped = dispersion is not DispersionCorrection.NONE and not (
+        capabilities.is_available(f"dispersion:{dispersion.value}")
+    )
+    if dispersion_dropped:
+        dispersion = DispersionCorrection.NONE
+        decisions.append(
+            Decision("dispersion", dispersion.value, "profile.decision.dispersion_unavailable")
+        )
+
+    # Проверяем не только семейство методов, но и конкретный функционал: DFT
+    # может быть реализован частично (например, есть только LDA), и тогда
+    # профиль, обещающий PBE0, обязан отступить, а не обещать точность,
+    # которой в коде нет (§54 ТЗ).
+    chosen, substituted_from = _resolve_functional(functional, capabilities)
+    if chosen is None or not capabilities.is_available("method:dft"):
+        # Откат на HF с явным объяснением: реализованных функционалов не
+        # осталось. Молча подставить HF нельзя — это было бы обманом про
+        # точность; скрыть выбор — нарушением объяснимости (§8 ТЗ).
+        theory = TheoryFamily.HF
+        functional = None
+        functional_class = None
+        dispersion = DispersionCorrection.NONE
+        decisions.append(Decision("functional", "hf", "profile.decision.functional_fallback"))
+    else:
+        functional = chosen
+        if substituted_from is not None:
+            functional_class = _functional_class_from_registry(chosen, capabilities)
+            decisions.append(
+                Decision("functional", functional, "profile.decision.functional_substituted")
+            )
+        else:
+            decisions.append(Decision("functional", functional, "profile.decision.functional"))
+
+    is_large = molecule.n_atoms > _LARGE_SYSTEM_ATOMS
+    if is_large and basis != "def2-svp":
+        basis = "def2-svp"
+        decisions.append(
+            Decision(
+                "basis",
+                basis,
+                "profile.decision.basis",
+                detail=f"{molecule.n_atoms} атомов — базис уменьшен ради времени счёта",
+            )
+        )
+    else:
+        decisions.append(Decision("basis", basis, "profile.decision.basis"))
+
+    if not dispersion_dropped:
+        # Строка «Дисперсионная поправка: none» после только что показанного
+        # объяснения её отсутствия была бы дублем, а не информацией.
+        decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
+
+    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities)
+    if stability_omitted:
+        decisions.append(
+            Decision(
+                "stability_analysis",
+                "off",
+                "profile.decision.stability_unavailable",
+            )
+        )
+    decisions.append(Decision("grid", grid_preset.value, "profile.decision.grid"))
+    decisions.append(
+        Decision("scf_threshold", f"{scf.energy_threshold:.0e}", "profile.decision.scf_threshold")
+    )
+    decisions.append(
+        Decision(
+            "integral_threshold",
+            f"{_integral_threshold(profile, is_large):.0e}",
+            "profile.decision.integral_threshold",
+        )
+    )
+
+    n_basis_functions = _basis_functions(basis, molecule.n_atoms)
+    threads = _estimate_threads(n_basis_functions, hardware.cores)
+    memory_request = _estimate_memory_mb(n_basis_functions)
+    memory_mb = min(memory_request, hardware.memory_mb)
+    decisions.append(Decision("threads", str(threads), "profile.decision.threads"))
+    decisions.append(
+        Decision(
+            "memory",
+            f"{memory_mb} МБ",
+            "profile.decision.memory",
+            detail=f"оценка по {n_basis_functions} базисным функциям",
+        )
+    )
+    device = DeviceKind.AUTO
+    decisions.append(
+        Decision(
+            "device",
+            device.value,
+            "profile.decision.device",
+            detail=f"доступно GPU: {hardware.gpu_count}",
+        )
+    )
+
+    if task in (Task.OPTIMIZATION, Task.TS_OPTIMIZATION):
+        # Координаты оптимизации выбираются явно и с объяснением: дефолт
+        # спецификации — избыточные внутренние координаты, которых в ядре пока
+        # нет. Молча подставить декартовы нельзя (§8 ТЗ): у них другая скорость
+        # сходимости, и пользователь должен это видеть.
+        decisions.append(
+            Decision(
+                "coordinates",
+                _COORDINATES,
+                "profile.decision.coordinates",
+                detail=(
+                    "избыточные внутренние координаты ещё не реализованы, "
+                    "поэтому расчёт идёт в декартовых — сходимость может "
+                    "потребовать больше шагов"
+                ),
+            )
+        )
+
+    spec = CalculationSpec(
+        task=task,
+        profile=profile,
+        method=MethodSpec(
+            theory=theory,
+            functional=functional,
+            functional_class=functional_class,
+            basis=basis,
+            dispersion=dispersion,
+        ),
+        scf=scf,
+        grid=GridSpec(preset=grid_preset),
+        optimization=_optimization(task),
+        resources=ResourceSpec(threads=threads, memory_mb=memory_mb, device=device),
+    )
+    return Resolution(spec=spec, decisions=tuple(decisions))
+
+
+def _base_choice(
+    profile: PrecisionProfile,
+) -> tuple[str, FunctionalClass, str, DispersionCorrection]:
+    """Базовый выбор «функционал + базис + дисперсия» по профилю.
+
+    Обоснование: гибридные функционалы с эмпирической дисперсией дают
+    предсказуемую точность геометрий и энергий для органических молекул при
+    умеренной стоимости; def2-семейство сбалансировано по элементам и не
+    требует отдельных поляризационных добавок.
+    """
+    if profile is PrecisionProfile.SCREENING:
+        return ("pbe", FunctionalClass.GGA, "def2-svp", DispersionCorrection.D3_BJ)
+    if profile is PrecisionProfile.STANDARD:
+        return ("pbe0", FunctionalClass.HYBRID, "def2-svp", DispersionCorrection.D3_BJ)
+    if profile is PrecisionProfile.HIGH_ACCURACY:
+        return ("pbe0", FunctionalClass.HYBRID, "def2-tzvp", DispersionCorrection.D3_BJ)
+    return (
+        "wb97x-d",
+        FunctionalClass.RANGE_SEPARATED_HYBRID,
+        "def2-tzvp",
+        DispersionCorrection.NONE,
+    )
+
+
+def _numerics(
+    profile: PrecisionProfile,
+    task: Task,
+    is_large: bool,
+    capabilities: CapabilityRegistry,
+) -> tuple[GridPreset, ScfSpec, bool]:
+    """Сетка и пороги SCF.
+
+    Частотные расчёты требуют более жёстких порогов и мелкой сетки: численное
+    дифференцирование усиливает любой шум в энергии, и «дрожание» градиента
+    превращается в ложные мнимые частоты.
+    """
+    thresholds: dict[PrecisionProfile, tuple[float, float]] = {
+        PrecisionProfile.SCREENING: (1e-6, 1e-5),
+        PrecisionProfile.STANDARD: (1e-8, 1e-6),
+        PrecisionProfile.HIGH_ACCURACY: (1e-9, 1e-8),
+        PrecisionProfile.RESEARCH: (1e-10, 1e-8),
+    }
+    grids: dict[PrecisionProfile, GridPreset] = {
+        PrecisionProfile.SCREENING: GridPreset.FINE,
+        PrecisionProfile.STANDARD: GridPreset.FINE,
+        PrecisionProfile.HIGH_ACCURACY: GridPreset.ULTRAFINE,
+        PrecisionProfile.RESEARCH: GridPreset.ULTRAFINE,
+    }
+    energy_threshold, density_threshold = thresholds[profile]
+    grid = grids[profile]
+
+    if task is Task.FREQUENCIES or task is Task.TS_OPTIMIZATION:
+        energy_threshold = min(energy_threshold, 1e-10)
+        density_threshold = min(density_threshold, 1e-8)
+        grid = GridPreset.ULTRAFINE
+    if is_large:
+        grid = GridPreset.FINE
+
+    # Проверка устойчивости волновой функции входит в обещание точных профилей,
+    # но ядро может её не реализовывать. Запросить и получить отказ значило бы,
+    # что подборщик выдаёт спецификацию, которую движок не принимает — то есть
+    # «подобранные параметры» неработоспособны. Поэтому сверяемся с реестром,
+    # а пропуск объясняем отдельным решением (§8 ТЗ).
+    wants_stability = profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH)
+    has_stability = capabilities.is_available("scf:stability_analysis")
+    scf = ScfSpec(
+        max_iterations=80 if profile is PrecisionProfile.SCREENING else 128,
+        energy_threshold=energy_threshold,
+        density_threshold=density_threshold,
+        stability_analysis=wants_stability and has_stability,
+        damping=0.2 if profile is PrecisionProfile.RESEARCH else 0.0,
+    )
+    return grid, scf, wants_stability and not has_stability
+
+
+def _integral_threshold(profile: PrecisionProfile, is_large: bool) -> float:
+    """Порог отсечки двухэлектронных интегралов.
+
+    Отсечка на уровне 1e-10 вносит ошибку энергии много меньшую порога
+    сходимости SCF, поэтому для скрининга её можно ослабить до 1e-9, а для
+    крупных систем — до 1e-8 ради скорости.
+    """
+    base = {
+        PrecisionProfile.SCREENING: 1e-9,
+        PrecisionProfile.STANDARD: 1e-10,
+        PrecisionProfile.HIGH_ACCURACY: 1e-11,
+        PrecisionProfile.RESEARCH: 1e-12,
+    }[profile]
+    return 1e-8 if is_large else base
+
+
+def _optimization(task: Task) -> OptimizationSpec:
+    """Параметры оптимизации: для поиска ТС шаг доверия уменьшают.
+
+    В седловой точке квазиньютоновский шаг с большим радиусом доверия легко
+    «перепрыгивает» через максимум, поэтому радиус урезан вдвое, а обновление
+    гессиана заменено на Bofill — оно устойчивее при наличии отрицательной
+    кривизны.
+    """
+    if task is Task.TS_OPTIMIZATION:
+        return OptimizationSpec(
+            coordinates=_COORDINATES,
+            trust_radius=0.15,
+            hessian_update="bofill",
+            max_steps=150,
+            max_force=3.0e-4,
+            rms_force=2.0e-4,
+        )
+    return OptimizationSpec(coordinates=_COORDINATES)

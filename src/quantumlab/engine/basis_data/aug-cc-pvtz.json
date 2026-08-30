@@ -1,0 +1,2351 @@
+{
+ "angular_scheme_published": "spherical",
+ "bse_name": "aug-cc-pVTZ",
+ "bse_revision_date": "2018-10-03",
+ "description": "aug-cc-pVTZ",
+ "display_name": "aug-cc-pVTZ",
+ "elements": {
+  "1": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.006068,
+       0.045308,
+       0.202822,
+       0.503903,
+       0.383421
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      33.87,
+      5.095,
+      1.159,
+      0.3258,
+      0.1027
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.407,
+      0.388
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.057
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.02526
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.102
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.247
+     ]
+    }
+   ]
+  },
+  "14": {
+   "references": [
+    {
+     "reference_description": "Common functions for cc-pVTZ and similar",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       6.25101e-05,
+       0.000485553,
+       0.00254516,
+       0.0105866,
+       0.0368787,
+       0.107479,
+       0.247936,
+       0.390927,
+       0.302026,
+       0.0559236,
+       -0.00402406,
+       0.0025803,
+       -0.00103821,
+       0.00060793,
+       -0.000154022
+      ],
+      [
+       -1.6637e-05,
+       -0.00012931,
+       -0.000678828,
+       -0.00284117,
+       -0.0100551,
+       -0.0305774,
+       -0.0777256,
+       -0.154236,
+       -0.180368,
+       0.0798218,
+       0.547441,
+       0.480119,
+       0.0474846,
+       -0.0106996,
+       0.00219871
+      ],
+      [
+       4.26257e-06,
+       3.31062e-05,
+       0.000174015,
+       0.000727574,
+       0.00258333,
+       0.00786354,
+       0.0202155,
+       0.040732,
+       0.0499358,
+       -0.0249396,
+       -0.19035,
+       -0.31835,
+       0.0948036,
+       0.68118,
+       0.395672
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      254900.0,
+      38190.0,
+      8690.0,
+      2462.0,
+      804.8,
+      291.3,
+      113.6,
+      46.75,
+      19.82,
+      7.708,
+      3.34,
+      1.402,
+      0.4387,
+      0.207,
+      0.07944
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00192045,
+       0.0153552,
+       0.0713991,
+       0.213052,
+       0.390354,
+       0.393721,
+       0.132565,
+       0.0039563,
+       0.000331624
+      ],
+      [
+       -0.00040522,
+       -0.00335896,
+       -0.015286,
+       -0.0489218,
+       -0.0855008,
+       -0.112137,
+       0.0618274,
+       0.551919,
+       0.523492
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      481.5,
+      113.9,
+      36.23,
+      13.34,
+      5.252,
+      2.12,
+      0.8561,
+      0.2528,
+      0.07889
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.336
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.159,
+      0.481
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.033
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0237
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0556
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.125
+     ]
+    }
+   ]
+  },
+  "15": {
+   "references": [
+    {
+     "reference_description": "Common functions for cc-pVTZ and similar",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       5.7696e-05,
+       0.000448296,
+       0.00234939,
+       0.00978265,
+       0.0341467,
+       0.100204,
+       0.234372,
+       0.382434,
+       0.318088,
+       0.0707788,
+       -0.00181799,
+       0.0021618,
+       -0.000834742,
+       0.000432297,
+       -0.000114251
+      ],
+      [
+       -1.56709e-05,
+       -0.000121724,
+       -0.000639672,
+       -0.00267426,
+       -0.00949831,
+       -0.0289349,
+       -0.0745121,
+       -0.149938,
+       -0.189467,
+       0.036327,
+       0.528816,
+       0.519115,
+       0.0605547,
+       -0.00925695,
+       0.00210372
+      ],
+      [
+       4.30631e-06,
+       3.34194e-05,
+       0.000175885,
+       0.00073434,
+       0.00261775,
+       0.00797852,
+       0.020794,
+       0.0424446,
+       0.0563436,
+       -0.0127358,
+       -0.196495,
+       -0.353555,
+       0.0741407,
+       0.700912,
+       0.404739
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      312400.0,
+      46800.0,
+      10650.0,
+      3018.0,
+      986.8,
+      357.4,
+      139.6,
+      57.63,
+      24.6,
+      10.12,
+      4.283,
+      1.805,
+      0.6158,
+      0.2782,
+      0.1055
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00233728,
+       0.018541,
+       0.0849693,
+       0.244615,
+       0.422766,
+       0.368439,
+       0.0772734,
+       -0.00379005,
+       0.00159939
+      ],
+      [
+       -0.000555236,
+       -0.00445913,
+       -0.020635,
+       -0.0617694,
+       -0.108924,
+       -0.105599,
+       0.153483,
+       0.576981,
+       0.422439
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      504.9,
+      119.4,
+      37.96,
+      13.95,
+      5.457,
+      2.177,
+      0.801,
+      0.2877,
+      0.09714
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.452
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.216,
+      0.652
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0409
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0307
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0775
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.165
+     ]
+    }
+   ]
+  },
+  "16": {
+   "references": [
+    {
+     "reference_description": "Common functions for cc-pVTZ and similar",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       5.4214e-05,
+       0.000420855,
+       0.00220698,
+       0.00919258,
+       0.0321123,
+       0.0946683,
+       0.22363,
+       0.374393,
+       0.329108,
+       0.0847038,
+       0.000440851,
+       0.00164827,
+       -0.000622332,
+       0.000301306,
+       -8.4129e-05
+      ],
+      [
+       -1.49837e-05,
+       -0.000116198,
+       -0.000611583,
+       -0.0025537,
+       -0.00908708,
+       -0.0277045,
+       -0.072002,
+       -0.146439,
+       -0.19515,
+       0.00819193,
+       0.516601,
+       0.542178,
+       0.068843,
+       -0.00918072,
+       0.00226832
+      ],
+      [
+       4.35066e-06,
+       3.3714e-05,
+       0.000177674,
+       0.000741116,
+       0.00264591,
+       0.00807487,
+       0.0212276,
+       0.0438323,
+       0.0612716,
+       -0.0036151,
+       -0.20451,
+       -0.381871,
+       0.0826844,
+       0.714147,
+       0.393791
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      374100.0,
+      56050.0,
+      12760.0,
+      3615.0,
+      1183.0,
+      428.8,
+      167.8,
+      69.47,
+      29.84,
+      12.72,
+      5.244,
+      2.219,
+      0.7767,
+      0.349,
+      0.1322
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00242264,
+       0.0192796,
+       0.0885401,
+       0.254654,
+       0.433984,
+       0.354953,
+       0.0618941,
+       -0.00502977,
+       0.00209813
+      ],
+      [
+       -0.000620102,
+       -0.00493882,
+       -0.0232647,
+       -0.0685195,
+       -0.123896,
+       -0.0969499,
+       0.228215,
+       0.569394,
+       0.366302
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      574.4,
+      135.8,
+      43.19,
+      15.87,
+      6.208,
+      2.483,
+      0.8688,
+      0.3229,
+      0.1098
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.557
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.269,
+      0.819
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0497
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0351
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.101
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.218
+     ]
+    }
+   ]
+  },
+  "17": {
+   "references": [
+    {
+     "reference_description": "Common functions for cc-pVTZ and similar",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Additional functions to form cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "woon1993a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       4.9297e-05,
+       0.000383029,
+       0.00200854,
+       0.00838558,
+       0.0294703,
+       0.0878325,
+       0.211473,
+       0.365364,
+       0.340884,
+       0.102133,
+       0.00311675,
+       0.00105751,
+       -0.000378,
+       0.000156136,
+       -5.14126e-05
+      ],
+      [
+       -1.38304e-05,
+       -0.000107279,
+       -0.000565083,
+       -0.00236135,
+       -0.00845886,
+       -0.0259638,
+       -0.0686362,
+       -0.141874,
+       -0.199319,
+       -0.0195662,
+       0.499741,
+       0.563736,
+       0.0790325,
+       -0.00835091,
+       0.00232456
+      ],
+      [
+       4.18546e-06,
+       3.24395e-05,
+       0.000171105,
+       0.000714176,
+       0.00256705,
+       0.00788552,
+       0.0210867,
+       0.0442264,
+       0.065167,
+       0.00603012,
+       -0.206495,
+       -0.405871,
+       0.0759558,
+       0.725661,
+       0.394423
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      456100.0,
+      68330.0,
+      15550.0,
+      4405.0,
+      1439.0,
+      520.4,
+      203.1,
+      83.96,
+      36.2,
+      15.83,
+      6.334,
+      2.694,
+      0.9768,
+      0.4313,
+      0.1625
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.00240448,
+       0.0192148,
+       0.0885097,
+       0.25602,
+       0.436927,
+       0.350334,
+       0.0585495,
+       -0.00458423,
+       0.0022697
+      ],
+      [
+       -0.000652145,
+       -0.00519445,
+       -0.0246938,
+       -0.0728167,
+       -0.13403,
+       -0.0947742,
+       0.262289,
+       0.564667,
+       0.34125
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      663.3,
+      156.8,
+      49.98,
+      18.42,
+      7.24,
+      2.922,
+      1.022,
+      0.3818,
+      0.1301
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.706
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.046,
+      0.344
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0591
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0419
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.135
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.312
+     ]
+    }
+   ]
+  },
+  "5": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000555,
+       0.004291,
+       0.021949,
+       0.084441,
+       0.238557,
+       0.435072,
+       0.341955,
+       0.036856,
+       -0.009545,
+       0.002368
+      ],
+      [
+       -0.000112,
+       -0.000868,
+       -0.004484,
+       -0.017683,
+       -0.053639,
+       -0.119005,
+       -0.165824,
+       0.120107,
+       0.595981,
+       0.411021
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      5473.0,
+      820.9,
+      186.8,
+      52.83,
+      17.08,
+      5.999,
+      2.208,
+      0.5879,
+      0.2415,
+      0.0861
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.013118,
+       0.079896,
+       0.277275,
+       0.50427,
+       0.35368
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      12.05,
+      2.613,
+      0.7475,
+      0.2385,
+      0.07698
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.661,
+      0.199
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.49
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.02914
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.02096
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0604
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.163
+     ]
+    }
+   ]
+  },
+  "6": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000531,
+       0.004108,
+       0.021087,
+       0.081853,
+       0.234817,
+       0.434401,
+       0.346129,
+       0.039378,
+       -0.008983,
+       0.002385
+      ],
+      [
+       -0.000113,
+       -0.000878,
+       -0.00454,
+       -0.018133,
+       -0.05576,
+       -0.126895,
+       -0.170352,
+       0.140382,
+       0.598684,
+       0.395389
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      8236.0,
+      1235.0,
+      280.8,
+      79.27,
+      25.59,
+      8.997,
+      3.319,
+      0.9059,
+      0.3643,
+      0.1285
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.014031,
+       0.086866,
+       0.290216,
+       0.501008,
+       0.343406
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      18.71,
+      4.133,
+      1.2,
+      0.3827,
+      0.1209
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.097,
+      0.318
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.761
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.04402
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.03569
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.1
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.268
+     ]
+    }
+   ]
+  },
+  "7": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000523,
+       0.004045,
+       0.020775,
+       0.080727,
+       0.233074,
+       0.433501,
+       0.347472,
+       0.041262,
+       -0.008508,
+       0.002384
+      ],
+      [
+       -0.000115,
+       -0.000895,
+       -0.004624,
+       -0.018528,
+       -0.057339,
+       -0.132076,
+       -0.17251,
+       0.151814,
+       0.599944,
+       0.387462
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      11420.0,
+      1712.0,
+      389.3,
+      110.0,
+      35.57,
+      12.54,
+      4.644,
+      1.293,
+      0.5118,
+      0.1787
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.01467,
+       0.091764,
+       0.298683,
+       0.498487,
+       0.337023
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      26.63,
+      5.948,
+      1.742,
+      0.555,
+      0.1725
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.654,
+      0.469
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.093
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0576
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.0491
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.151
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.364
+     ]
+    }
+   ]
+  },
+  "8": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000508,
+       0.003929,
+       0.020243,
+       0.079181,
+       0.230687,
+       0.433118,
+       0.35026,
+       0.042728,
+       -0.008154,
+       0.002381
+      ],
+      [
+       -0.000115,
+       -0.000895,
+       -0.004636,
+       -0.018724,
+       -0.058463,
+       -0.136463,
+       -0.17574,
+       0.160934,
+       0.603418,
+       0.378765
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      15330.0,
+      2299.0,
+      522.4,
+      147.3,
+      47.55,
+      16.76,
+      6.207,
+      1.752,
+      0.6882,
+      0.2384
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.015928,
+       0.09974,
+       0.310492,
+       0.491026,
+       0.336337
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      34.46,
+      7.749,
+      2.28,
+      0.7156,
+      0.214
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      2.314,
+      0.645
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.428
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.07376
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.05974
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.214
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.5
+     ]
+    }
+   ]
+  },
+  "9": {
+   "references": [
+    {
+     "reference_description": "The cc-pVTZ basis set",
+     "reference_keys": [
+      "dunning1989a"
+     ]
+    },
+    {
+     "reference_description": "Augmenting functions for cc-pVTZ",
+     "reference_keys": [
+      "kendall1992a"
+     ]
+    }
+   ],
+   "shells": [
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.000507,
+       0.003923,
+       0.0202,
+       0.07901,
+       0.230439,
+       0.432872,
+       0.349964,
+       0.043233,
+       -0.007892,
+       0.002384
+      ],
+      [
+       -0.000117,
+       -0.000912,
+       -0.004717,
+       -0.019086,
+       -0.059655,
+       -0.14001,
+       -0.176782,
+       0.171625,
+       0.605043,
+       0.369512
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      19500.0,
+      2923.0,
+      664.5,
+      187.5,
+      60.62,
+      21.42,
+      7.95,
+      2.257,
+      0.8815,
+      0.3041
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       0.016665,
+       0.104472,
+       0.31726,
+       0.487343,
+       0.334604
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       0.0,
+       0.0,
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      43.88,
+      9.926,
+      2.93,
+      0.9132,
+      0.2672
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0,
+       0.0
+      ],
+      [
+       0.0,
+       1.0
+      ]
+     ],
+     "exponents": [
+      3.107,
+      0.855
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      1.917
+     ]
+    },
+    {
+     "angular_momentum": [
+      0
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.09158
+     ]
+    },
+    {
+     "angular_momentum": [
+      1
+     ],
+     "bse_function_type": "gto",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.07361
+     ]
+    },
+    {
+     "angular_momentum": [
+      2
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.292
+     ]
+    },
+    {
+     "angular_momentum": [
+      3
+     ],
+     "bse_function_type": "gto_spherical",
+     "coefficients": [
+      [
+       1.0
+      ]
+     ],
+     "exponents": [
+      0.724
+     ]
+    }
+   ]
+  }
+ },
+ "family": "dunning",
+ "name": "aug-cc-pvtz",
+ "schema_version": "1.0",
+ "source": "Basis Set Exchange (bse 0.12)"
+}

@@ -1,0 +1,35 @@
+id: water-rks-pbe-sto3g-energy
+level: L1
+description: >-
+  RKS/PBE (GGA) воды в STO-3G. Проверяет градиентно-зависимый функционал:
+  обменно-корреляционная матрица здесь собирается не только из φ_μ φ_ν, но и
+  из ∇φ_μ · ∇ρ, поэтому кейс покрывает путь, которого нет у LDA.
+  Допуск шире, чем у SVWN, — по измеренному расхождению с PySCF, а не по желаемому.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: pbe }
+  grid: { preset: ultrafine }
+expect:
+  energy_hartree:
+    value: -75.2255795008
+    tol: 5.0e-6
+    source: >-
+      internal-reference (reference-cpu); сверено с PySCF 2.14 dft.RKS xc=PBE
+      сетка (120,974), расхождение 1.09e-06 э. Оно на порядок шире, чем у SVWN
+      (4.0e-08), и происходит от неустранённого остатка 2.5e-07 в ε_c
+      корреляции PBE: перебор β, γ и трёх вариантов базовой LDA-корреляции
+      полного совпадения с LibXC не дал. Обмен PBE при этом совпадает с LibXC
+      до 8.3e-17, корреляция PW92 — до 1.4e-17
+  dipole_debye:
+    value: 1.657598
+    tol: 1.0e-4
+    source: внутренний расчёт по плотности RKS/PBE
+quality:
+  scf_converged: true
+  electron_count: true
+  quadrature_electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  basis_angular_scheme: true

@@ -1,0 +1,19 @@
+id: water-rhf-ccpvdz-energy
+level: L1
+slow: true  # измерено: > 10 c на кейс
+description: RHF/cc-pVDZ воды — корреляционно-согласованный базис.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: cc-pvdz }
+expect:
+  energy_hartree:
+    value: -76.0271119674
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu)
+  dipole_debye:
+    value: 2.057853
+    tol: 1.0e-5
+    source: internal-reference
+quality:
+  scf_converged: true

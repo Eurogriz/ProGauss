@@ -1,0 +1,18 @@
+id: water-rhf-631g-energy
+level: L1
+description: RHF/6-31G воды — проверка расщеплённого валентного базиса.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: 6-31g }
+expect:
+  energy_hartree:
+    value: -75.9839703461
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu)
+  dipole_debye:
+    value: 2.631185
+    tol: 1.0e-5
+    source: internal-reference
+quality:
+  scf_converged: true

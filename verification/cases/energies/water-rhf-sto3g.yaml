@@ -1,0 +1,33 @@
+id: water-rhf-sto3g-energy
+level: L1
+description: RHF/STO-3G воды в экспериментальной геометрии — базовый эталон ядра.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: single_point
+  method: { theory: hf, basis: sto-3g }
+expect:
+  energy_hartree:
+    value: -74.9630296542
+    tol: 1.0e-8
+    source: >-
+      internal-reference (reference-cpu, RHF, порог SCF 1e-10); обновлено после исправления обрыва ряда Бойса (см. _series_terms).
+      Расхождение с PySCF 2.14 — 1.5e-08 э: оно определяется не интегралами, а
+      константой перевода Å в боры (у нас CODATA-1998 1.8897259885789, у PySCF
+      CODATA-2010 1.8897261246), что даёт 7.2e-08 отн. в расстояниях и 6.6e-07 э
+      в ядерном отталкивании
+  homo_energy_hartree:
+    value: -0.3912426982
+    tol: 1.0e-7
+    source: internal-reference
+  lumo_energy_hartree:
+    value: 0.6051653995
+    tol: 1.0e-7
+    source: internal-reference
+  dipole_debye:
+    value: 1.7253373742
+    tol: 1.0e-5
+    source: internal-reference
+quality:
+  scf_converged: true
+  energy_decomposition: true
+  fock_density_commutator: true

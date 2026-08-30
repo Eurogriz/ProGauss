@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="900" viewBox="0 0 1180 900" font-family="Inter, Segoe UI, sans-serif">
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#38bdf8"/></marker></defs>
+<rect width="1180" height="900" fill="#0f172a"/>
+<text x="590" y="36" font-family="Inter, Segoe UI, sans-serif" font-size="22" fill="#e2e8f0" text-anchor="middle">QuantumLab — архитектура системы</text>
+<text x="590" y="58" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#94a3b8" text-anchor="middle">UI → API → Job Manager → Scheduler → Worker → Quantum Engine → Result Store</text>
+<rect x="40" y="80" width="780" height="90" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="54" y="102" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">ИНТЕРФЕЙСЫ ПОЛЬЗОВАТЕЛЯ</text>
+<rect x="60" y="110" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="145" y="130" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Web UI</text>
+<text x="145" y="150" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">React · TS · WebGL</text>
+<rect x="250" y="110" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="335" y="130" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">CLI</text>
+<text x="335" y="150" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">quantumlab</text>
+<rect x="440" y="110" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="525" y="130" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Python SDK</text>
+<text x="525" y="150" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">batch · workflows</text>
+<rect x="630" y="110" width="170" height="48" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="715" y="130" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Внешние системы</text>
+<text x="715" y="150" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">ноутбуки, пайплайны</text>
+<rect x="40" y="195" width="780" height="90" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="54" y="217" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">API-SERVER · FASTAPI · /api/v1</text>
+<rect x="60" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="118" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">AuthN/AuthZ · RBAC</text>
+<rect x="186" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="244" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Projects</text>
+<rect x="312" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="370" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Molecules</text>
+<rect x="438" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="496" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Jobs</text>
+<rect x="564" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="622" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Results</text>
+<rect x="690" y="225" width="116" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="748" y="247" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Workers</text>
+<rect x="40" y="310" width="780" height="100" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="54" y="332" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">ЯДРО ПЛАТФОРМЫ (общий код для всех интерфейсов)</text>
+<rect x="60" y="342" width="142" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="131" y="364" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">domain</text>
+<text x="131" y="384" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">Molecule · Spec · Job</text>
+<rect x="212" y="342" width="142" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="283" y="364" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">recommend</text>
+<text x="283" y="384" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">автоподбор + обоснования</text>
+<rect x="364" y="342" width="142" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="435" y="364" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">registry</text>
+<text x="435" y="384" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">что реально реализовано</text>
+<rect x="516" y="342" width="142" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="587" y="364" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">i18n</text>
+<text x="587" y="384" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">ru (по умолч.) · en</text>
+<rect x="668" y="342" width="142" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="739" y="364" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">job-manager</text>
+<text x="739" y="384" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">состояния · retry · аудит</text>
+<rect x="40" y="435" width="780" height="90" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="54" y="457" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">SCHEDULER</text>
+<rect x="60" y="465" width="170" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="145" y="487" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Очередь · приоритеты</text>
+<rect x="250" y="465" width="170" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="335" y="487" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">local</text>
+<rect x="440" y="465" width="170" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="525" y="487" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Slurm / PBS / LSF</text>
+<rect x="630" y="465" width="170" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="715" y="487" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Kubernetes</text>
+<rect x="40" y="550" width="780" height="220" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="54" y="572" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">WORKER-RUNTIME · QUANTUM ENGINE</text>
+<rect x="60" y="580" width="170" height="60" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="145" y="606" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">worker</text>
+<text x="145" y="626" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">sandbox · лимиты · чекпоинты</text>
+<rect x="250" y="580" width="170" height="60" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="335" y="606" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">QuantumEngine</text>
+<text x="335" y="626" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">фасад ядра</text>
+<rect x="440" y="580" width="170" height="60" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="525" y="606" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">molecule-engine</text>
+<text x="525" y="626" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">basis-library</text>
+<rect x="630" y="580" width="170" height="60" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="715" y="606" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">checkpoint</text>
+<text x="715" y="626" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">артефакты · логи</text>
+<rect x="60" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="108" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">integral</text>
+<rect x="166" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="214" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">scf</text>
+<rect x="272" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="320" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">dft</text>
+<rect x="378" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="426" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">correlation</text>
+<rect x="484" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="532" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">optimization</text>
+<rect x="590" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="638" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">frequency</text>
+<rect x="696" y="660" width="96" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="744" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">property</text>
+<rect x="60" y="716" width="740" height="40" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="430" y="736" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">backends: reference-cpu · optimized-cpu (OpenMP/BLAS) · CUDA · ROCm</text>
+<rect x="840" y="80" width="300" height="300" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="854" y="102" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">ХРАНИЛИЩЕ</text>
+<rect x="860" y="112" width="260" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="134" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">PostgreSQL</text>
+<text x="990" y="154" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">метаданные · статусы · аудит</text>
+<rect x="860" y="176" width="260" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="198" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Object storage (S3)</text>
+<text x="990" y="218" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">градиенты · орбитали · кубы</text>
+<rect x="860" y="240" width="260" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="262" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Redis</text>
+<text x="990" y="282" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">кэш · прогресс · блокировки</text>
+<rect x="860" y="304" width="260" height="52" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="326" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">Result Store</text>
+<text x="990" y="346" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">версионируемые артефакты</text>
+<rect x="840" y="400" width="300" height="190" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="854" y="422" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">НАБЛЮДАЕМОСТЬ</text>
+<rect x="860" y="432" width="260" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="450" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">structured logs</text>
+<text x="990" y="470" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">JSON · job_id</text>
+<rect x="860" y="486" width="260" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="504" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">metrics</text>
+<text x="990" y="524" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">Prometheus</text>
+<rect x="860" y="540" width="260" height="44" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+<text x="990" y="558" font-family="Inter, Segoe UI, sans-serif" font-size="14" fill="#e2e8f0" text-anchor="middle">tracing · health</text>
+<text x="990" y="578" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">OpenTelemetry</text>
+<rect x="840" y="610" width="300" height="160" rx="10" fill="#111c33" stroke="#334155" stroke-width="1.5"/>
+<text x="854" y="632" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#38bdf8" text-anchor="start">СТАТУС РЕАЛИЗАЦИИ</text>
+<rect x="860" y="640" width="260" height="52" rx="10" fill="#1a2233" stroke="#f59e0b" stroke-width="1.5"/>
+<text x="990" y="662" font-family="Inter, Segoe UI, sans-serif" font-size="12" fill="#f59e0b" text-anchor="middle">Расчётное ядро не реализовано</text>
+<text x="990" y="680" font-family="Inter, Segoe UI, sans-serif" font-size="10" fill="#94a3b8" text-anchor="middle">реестр честно отдаёт not_implemented</text>
+<text x="990" y="720" font-family="Inter, Segoe UI, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">контрактный слой реализован и покрыт тестами</text>
+<line x1="430" y1="170" x2="430" y2="195" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="430" y1="285" x2="430" y2="310" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="430" y1="410" x2="430" y2="435" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="430" y1="525" x2="430" y2="550" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="430" y1="640" x2="430" y2="660" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="430" y1="700" x2="430" y2="716" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<line x1="820" y1="360" x2="860" y2="360" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+<text x="848" y="360" font-family="Inter, Segoe UI, sans-serif" font-size="10" fill="#94a3b8" text-anchor="start">метаданные</text>
+<line x1="820" y1="700" x2="860" y2="700" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrowhead)"/>
+</svg>

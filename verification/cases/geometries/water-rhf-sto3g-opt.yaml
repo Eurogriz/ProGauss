@@ -1,0 +1,22 @@
+id: water-rhf-sto3g-geometry
+level: L5
+slow: true  # измерено: > 10 c на кейс
+description: Оптимизированная геометрия воды RHF/STO-3G против собственной эталонной точки.
+molecule: tests/fixtures/water.xyz
+spec:
+  task: optimization
+  method: { theory: hf, basis: sto-3g }
+  optimization: { coordinates: cartesian, max_steps: 40 }
+expect:
+  energy_hartree:
+    value: -74.9659005427
+    tol: 1.0e-8
+    source: internal-reference (reference-cpu, сходимость по силам 4.5e-4 э/бор)
+bond_lengths_angstrom:
+  - { atoms: [0, 1], value: 0.98952325, tol: 5.0e-3 }
+  - { atoms: [0, 2], value: 0.98952325, tol: 5.0e-3 }
+angles_degrees:
+  - { atoms: [1, 0, 2], value: 100.143329, tol: 0.5 }
+quality:
+  optimization_converged: true
+  scf_converged: true
