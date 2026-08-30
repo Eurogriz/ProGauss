@@ -198,9 +198,14 @@ def test_lda_exchange_potential_is_numerical_derivative_of_energy() -> None:
     assert float(vxc[0]) == pytest.approx(numerical, rel=1e-8)
 
 
-def test_svwn_declines_spin_polarization() -> None:
-    """Спиновая поляризация требует UKS — его нет, и молча считать нельзя."""
-    with pytest.raises(NotImplementedError):
+def test_svwn_declines_spin_polarization_in_evaluate() -> None:
+    """Неспиновая ``evaluate`` не считает поляризованный расчёт молча.
+
+    Спин-поляризованное вычисление идёт через ``evaluate_spin`` (ядро UKS);
+    ``evaluate`` с ``spin_polarized=True`` отклоняется явной ошибкой, а не
+    выдаёт непарную энергию по полной плотности.
+    """
+    with pytest.raises(ValueError, match="evaluate_spin"):
         Svwn().evaluate(np.zeros((1, 3)), np.array([1.0]), spin_polarized=True)
 
 

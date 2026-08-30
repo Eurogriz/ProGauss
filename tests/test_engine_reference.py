@@ -807,13 +807,17 @@ def test_spin_combination_is_refused_instead_of_crashing(
     оптимизацией раньше отклонялся отдельно — с введением аналитического
     градиента ROHF это ограничение снято, и шесть ячеек HF×ROHF проходят.)
 
+    С введением UKS открытая оболочка для DFT доступна как ``spin:uhf``;
+    отклоняется только ``DFT + spin:rohf`` — ограниченная открытая оболочка для
+    DFT не определена (открытооболочечный DFT по построению спиново-неразделён).
+
     Утверждение здесь ровно то, которое отличает честный отказ от сбоя: ошибка
     обязана быть :class:`QuantumLabError`, то есть локализуемой и diagnosable.
     """
     engine = ReferenceEngine()
     spec = _matrix_spec(task, theory, spin)
 
-    unsupported = theory is TheoryFamily.DFT and spin is not SpinTreatment.RHF
+    unsupported = theory is TheoryFamily.DFT and spin is SpinTreatment.ROHF
     if unsupported:
         with pytest.raises(CombinationUnavailableError):
             engine.assert_supported(spec)

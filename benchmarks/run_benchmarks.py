@@ -198,6 +198,7 @@ def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
     from quantumlab.domain.molecule import Molecule
     from quantumlab.domain.spec import (
         CalculationSpec,
+        GridSpec,
         MethodSpec,
         OptimizationSpec,
         SpinTreatment,
@@ -222,6 +223,7 @@ def _run_calculation(case: BenchmarkCase) -> dict[str, object]:
         task=Task(case.spec["task"]),
         method=method,
         optimization=OptimizationSpec(**case.spec.get("optimization", {})),
+        grid=GridSpec(**case.spec.get("grid", {})),
     )
 
     if case.measure_gradient:

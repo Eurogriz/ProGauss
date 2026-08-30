@@ -59,10 +59,11 @@ def test_all_declared_methods_and_functionals_are_present(registry: CapabilityRe
 
 
 def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistry) -> None:
-    """Все методы, кроме HF, остаются недоступными: кода для них нет.
+    """Все методы, кроме HF и DFT, остаются недоступными: кода для них нет.
 
-    HF — единственное исключение, и он помечен ``partial``, а не
-    ``implemented``: реализован только RHF и только для двух задач.
+    HF и DFT — исключения, и оба помечены ``partial``, а не ``implemented``:
+    HF — RHF/UHF/ROHF, DFT — RKS/UKS с ограниченным набором функционалов, и оба
+    только для двух задач.
     """
     hf = registry.get("method:hf")
     assert hf.availability is Availability.PARTIAL
@@ -83,8 +84,8 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
         assert capability.availability is Availability.NOT_IMPLEMENTED, capability.id
         assert not capability.is_usable, capability.id
 
-    # DFT работает, но только в варианте LDA-функционала SVWN и только для
-    # энергии в точке: «partial» без перечня ограничений выглядел бы как «готово».
+    # DFT работает, но не во всех вариантах: RKS/UKS и ограниченный набор
+    # функционалов. «partial» без перечня ограничений выглядело бы как «готово».
     dft = registry.get("method:dft")
     assert dft.availability is Availability.PARTIAL
     assert dft.limitations

@@ -116,7 +116,7 @@ $ quantumlab plan water.xyz --task optimize --profile high-accuracy
 ```python
 from quantumlab import Calculation, Molecule
 
-mol = Molecule.from_smiles("CCO")            # формат доступен, когда реализован парсер
+mol = Molecule.from_smiles("CCO")  # формат доступен, когда реализован парсер
 
 calc = Calculation(
     molecule=mol,
@@ -125,11 +125,11 @@ calc = Calculation(
     functional="PBE0",
     basis="def2-TZVP",
 )
-result = calc.run()                          # блокирующий вызов с прогрессом в лог
+result = calc.run()  # блокирующий вызов с прогрессом в лог
 
 print(result.energy_hartree)
 print(result.optimized_geometry.to_xyz())
-print(result.quality_checks)                 # проверки качества (§28 ТЗ)
+print(result.quality_checks)  # проверки качества (§28 ТЗ)
 ```
 
 Дополнительно для автоматизации:

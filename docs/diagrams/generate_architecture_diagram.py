@@ -28,14 +28,18 @@ WARN = "#f59e0b"
 _PARTS: list[str] = []
 
 
-def _rect(x: int, y: int, width: int, height: int, fill: str, stroke: str, radius: int = 10) -> None:
+def _rect(
+    x: int, y: int, width: int, height: int, fill: str, stroke: str, radius: int = 10
+) -> None:
     _PARTS.append(
         f'<rect x="{x}" y="{y}" width="{width}" height="{height}" rx="{radius}" '
         f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>'
     )
 
 
-def _text(x: int, y: int, value: str, *, size: int = 14, fill: str = TEXT, anchor: str = "middle") -> None:
+def _text(
+    x: int, y: int, value: str, *, size: int = 14, fill: str = TEXT, anchor: str = "middle"
+) -> None:
     _PARTS.append(
         f'<text x="{x}" y="{y}" font-family="Inter, Segoe UI, sans-serif" font-size="{size}" '
         f'fill="{fill}" text-anchor="{anchor}">{escape(value)}</text>'
@@ -76,18 +80,31 @@ def build() -> str:
     )
     _PARTS.append(f'<rect width="{WIDTH}" height="{HEIGHT}" fill="{BACKGROUND}"/>')
     _text(WIDTH // 2, 36, "QuantumLab — архитектура системы", size=22, fill=TEXT)
-    _text(WIDTH // 2, 58, "UI → API → Job Manager → Scheduler → Worker → Quantum Engine → Result Store", size=12, fill=MUTED)
+    _text(
+        WIDTH // 2,
+        58,
+        "UI → API → Job Manager → Scheduler → Worker → Quantum Engine → Result Store",
+        size=12,
+        fill=MUTED,
+    )
 
     # 1. Интерфейсы пользователя
     _section(40, 80, 780, 90, "ИНТЕРФЕЙСЫ ПОЛЬЗОВАТЕЛЯ")
     for index, (title, subtitle) in enumerate(
-        [("Web UI", "React · TS · WebGL"), ("CLI", "quantumlab"), ("Python SDK", "batch · workflows"), ("Внешние системы", "ноутбуки, пайплайны")]
+        [
+            ("Web UI", "React · TS · WebGL"),
+            ("CLI", "quantumlab"),
+            ("Python SDK", "batch · workflows"),
+            ("Внешние системы", "ноутбуки, пайплайны"),
+        ]
     ):
         _box(60 + index * 190, 110, 170, 48, title, subtitle)
 
     # 2. API
     _section(40, 195, 780, 90, "API-SERVER · FASTAPI · /api/v1")
-    for index, title in enumerate(["AuthN/AuthZ · RBAC", "Projects", "Molecules", "Jobs", "Results", "Workers"]):
+    for index, title in enumerate(
+        ["AuthN/AuthZ · RBAC", "Projects", "Molecules", "Jobs", "Results", "Workers"]
+    ):
         _box(60 + index * 126, 225, 116, 44, title)
 
     # 3. Платформенное ядро
@@ -105,7 +122,9 @@ def build() -> str:
 
     # 4. Планировщик
     _section(40, 435, 780, 90, "SCHEDULER")
-    for index, title in enumerate(["Очередь · приоритеты", "local", "Slurm / PBS / LSF", "Kubernetes"]):
+    for index, title in enumerate(
+        ["Очередь · приоритеты", "local", "Slurm / PBS / LSF", "Kubernetes"]
+    ):
         _box(60 + index * 190, 465, 170, 44, title)
 
     # 5. Worker и ядро
@@ -114,7 +133,9 @@ def build() -> str:
     _box(250, 580, 170, 60, "QuantumEngine", "фасад ядра")
     _box(440, 580, 170, 60, "molecule-engine", "basis-library")
     _box(630, 580, 170, 60, "checkpoint", "артефакты · логи")
-    for index, title in enumerate(["integral", "scf", "dft", "correlation", "optimization", "frequency", "property"]):
+    for index, title in enumerate(
+        ["integral", "scf", "dft", "correlation", "optimization", "frequency", "property"]
+    ):
         _box(60 + index * 106, 660, 96, 40, title)
     _box(60, 716, 740, 40, "backends: reference-cpu · optimized-cpu (OpenMP/BLAS) · CUDA · ROCm")
 

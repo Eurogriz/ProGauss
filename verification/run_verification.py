@@ -48,12 +48,20 @@ from quantumlab.domain.spec import (  # noqa: E402
 )
 from quantumlab.engine.basis import BasisSet, build_basis  # noqa: E402
 from quantumlab.engine.constants import angstrom_to_bohr  # noqa: E402
-from quantumlab.engine.contracts import EngineRequest  # noqa: E402
+from quantumlab.engine.contracts import (  # noqa: E402
+    EngineRequest,
+    ExchangeCorrelationFunctional,
+)
+from quantumlab.engine.dft import run_rks, run_uks  # noqa: E402
+from quantumlab.engine.functional import get_functional  # noqa: E402
 from quantumlab.engine.gradients import (  # noqa: E402
     rhf_gradient,
+    rks_gradient,
     rohf_gradient,
     uhf_gradient,
+    uks_gradient,
 )
+from quantumlab.engine.quadrature import QuadratureGrid, build_grid  # noqa: E402
 from quantumlab.engine.reference import ReferenceEngine  # noqa: E402
 from quantumlab.engine.scf import run_rhf, run_rohf, run_uhf  # noqa: E402
 
@@ -229,12 +237,25 @@ def _resolve_spin(spin: SpinTreatment | str) -> SpinTreatment:
     return SpinTreatment(str(spin).lower()) if isinstance(spin, str) else spin
 
 
-def _spin_energy(basis: BasisSet, molecule: Molecule, spin: SpinTreatment) -> float:
-    """Энергия SCF с учётом обработки спина.
+def _spin_energy(
+    basis: BasisSet,
+    molecule: Molecule,
+    spin: SpinTreatment,
+    *,
+    functional: ExchangeCorrelationFunctional | None = None,
+    grid: QuadratureGrid | None = None,
+) -> float:
+    """Энергия SCF с учётом обработки спина и метода (HF/DFT).
 
     Сверка конечными разностями проверяет ту же поверхность, что и
-    аналитический градиент, а не RHF-поверхность.
+    аналитический градиент, а не RHF-поверхность. Для DFT ``functional``
+    обязателен, а сетку передают замороженной — одну и ту же для всех точек,
+    чтобы КР считали ту же поверхность, что и аналитический градиент.
     """
+    if functional is not None:
+        if spin is SpinTreatment.RHF:
+            return float(run_rks(basis, molecule, functional, grid=grid).total_energy)
+        return float(run_uks(basis, molecule, functional, grid=grid).total_energy)
     if spin is SpinTreatment.UHF:
         return float(run_uhf(basis, molecule).total_energy)
     if spin is SpinTreatment.ROHF:
@@ -242,8 +263,22 @@ def _spin_energy(basis: BasisSet, molecule: Molecule, spin: SpinTreatment) -> fl
     return float(run_rhf(basis, molecule).total_energy)
 
 
-def _spin_gradient(basis: BasisSet, molecule: Molecule, spin: SpinTreatment) -> np.ndarray:
-    """Аналитический градиент с учётом обработки спина."""
+def _spin_gradient(
+    basis: BasisSet,
+    molecule: Molecule,
+    spin: SpinTreatment,
+    *,
+    functional: ExchangeCorrelationFunctional | None = None,
+    grid: QuadratureGrid | None = None,
+) -> np.ndarray:
+    """Аналитический градиент с учётом обработки спина и метода (HF/DFT)."""
+    if functional is not None:
+        assert grid is not None, "аналитический DFT-градиент требует сетку"
+        if spin is SpinTreatment.RHF:
+            rks = run_rks(basis, molecule, functional, grid=grid)
+            return rks_gradient(basis, molecule, rks, grid, functional).gradient
+        uks = run_uks(basis, molecule, functional, grid=grid)
+        return uks_gradient(basis, molecule, uks, grid, functional).gradient
     if spin is SpinTreatment.UHF:
         return uhf_gradient(basis, molecule, run_uhf(basis, molecule)).gradient
     if spin is SpinTreatment.ROHF:
@@ -258,6 +293,9 @@ def _displaced_energy(
     axis: int,
     step: float,
     spin: SpinTreatment = SpinTreatment.RHF,
+    *,
+    functional: ExchangeCorrelationFunctional | None = None,
+    grid: QuadratureGrid | None = None,
 ) -> float:
     atoms = list(molecule.atoms)
     x, y, z = atoms[atom_index].position
@@ -269,7 +307,7 @@ def _displaced_energy(
     )
     moved = molecule.model_copy(update={"atoms": tuple(atoms)})
     basis = build_basis(basis_name, moved)
-    return _spin_energy(basis, moved, spin)
+    return _spin_energy(basis, moved, spin, functional=functional, grid=grid)
 
 
 def _numerical_gradient(
@@ -277,18 +315,40 @@ def _numerical_gradient(
     basis_name: str,
     step: float,
     spin: SpinTreatment = SpinTreatment.RHF,
+    *,
+    functional: ExchangeCorrelationFunctional | None = None,
+    grid: QuadratureGrid | None = None,
 ) -> np.ndarray:
     """Центральная разность энергии по декартовым координатам ядер.
 
     Делитель переводит шаг из ангстрем в бор, потому что градиент ядро
-    возвращает в э/бор.
+    возвращает в э/бор. Для DFT сетку передают замороженной, чтобы КР и
+    аналитический градиент считали одну поверхность.
     """
     divisor = 2.0 * angstrom_to_bohr(step)
     gradient = np.zeros((len(molecule.atoms), 3))
     for index in range(len(molecule.atoms)):
         for axis in range(3):
-            forward = _displaced_energy(molecule, basis_name, index, axis, +step, spin)
-            backward = _displaced_energy(molecule, basis_name, index, axis, -step, spin)
+            forward = _displaced_energy(
+                molecule,
+                basis_name,
+                index,
+                axis,
+                +step,
+                spin,
+                functional=functional,
+                grid=grid,
+            )
+            backward = _displaced_energy(
+                molecule,
+                basis_name,
+                index,
+                axis,
+                -step,
+                spin,
+                functional=functional,
+                grid=grid,
+            )
             gradient[index, axis] = (forward - backward) / divisor
     return gradient
 
@@ -358,9 +418,32 @@ def _check(case: Case) -> Outcome:
 
     if case.gradient_vs_finite_difference is not None:
         specification = case.gradient_vs_finite_difference
-        spin = _resolve_spin(case.spec["method"].get("spin", "rhf"))
-        analytical = _spin_gradient(build_basis(basis_name, molecule), molecule, spin)
-        numerical = _numerical_gradient(molecule, basis_name, specification.step_angstrom, spin)
+        method_raw = case.spec["method"]
+        spin = _resolve_spin(method_raw.get("spin", "rhf"))
+        functional: ExchangeCorrelationFunctional | None = None
+        grid: QuadratureGrid | None = None
+        if method_raw.get("theory", "hf").lower() == "dft":
+            # Замороженная сетка: одна и та же для аналитического градиента и
+            # всех конечно-разностных смещений, чтобы сравнивалась одна
+            # поверхность, а не сетка, «следящая» за геометрией.
+            functional = get_functional(method_raw["functional"])
+            grid_preset = GridSpec(**case.spec.get("grid", {})).preset
+            grid = build_grid(molecule, grid_preset)
+        analytical = _spin_gradient(
+            build_basis(basis_name, molecule),
+            molecule,
+            spin,
+            functional=functional,
+            grid=grid,
+        )
+        numerical = _numerical_gradient(
+            molecule,
+            basis_name,
+            specification.step_angstrom,
+            spin,
+            functional=functional,
+            grid=grid,
+        )
         deviation = float(np.abs(analytical - numerical).max())
         ok = deviation <= specification.max_deviation_eh_bohr
         outcome.passed &= ok
