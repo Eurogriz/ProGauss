@@ -26,6 +26,7 @@ from quantumlab.domain.job import Job
 from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import (
     CalculationSpec,
+    DispersionCorrection,
     MethodSpec,
     OptimizationSpec,
     PrecisionProfile,
@@ -145,6 +146,16 @@ def _add_calculation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--method", default=None, help="явный метод: hf | dft | mp2 | …")
     parser.add_argument("--functional", default=None, help="явный функционал, например pbe0")
     parser.add_argument("--basis", default=None, help="явный базис, например def2-tzvp")
+    parser.add_argument(
+        "--dispersion",
+        choices=("none", "d3bj", "d3zero"),
+        default="none",
+        help=(
+            "дисперсионная поправка (экспертный режим: только с явным "
+            "--method/--functional/--basis; с профилем поправка берётся "
+            "из профиля)"
+        ),
+    )
     parser.add_argument("--charge", type=int, default=0)
     parser.add_argument("--multiplicity", type=int, default=1)
     parser.add_argument(
@@ -175,10 +186,29 @@ def _build_spec(args: argparse.Namespace, registry: CapabilityRegistry) -> Calcu
         raise ValueError(msg)
 
     if args.method or args.functional or args.basis:
+        theory = TheoryFamily((args.method or "dft").lower())
+        dispersion = DispersionCorrection(args.dispersion)
+        # D3 — это параметры, обученные на конкретный функционал. Если
+        # пользователь задал поправку, но не указал функционал (и метод не
+        # HF, где функционал отсутствует по определению), результат зависел
+        # бы от умолчания, которое он не видел — поэтому такой запрос
+        # отклоняется, а не подменяется молчаливым выбором (§8, §54 ТЗ).
+        if (
+            dispersion is not DispersionCorrection.NONE
+            and not args.functional
+            and theory is not TheoryFamily.HF
+        ):
+            msg = (
+                "Дисперсионная поправка требует явного --functional: "
+                "параметры D3 обучаются на конкретный функционал "
+                "(для HF: --method hf)"
+            )
+            raise ValueError(msg)
         method = MethodSpec(
-            theory=TheoryFamily((args.method or "dft").lower()),
+            theory=theory,
             functional=args.functional,
             basis=args.basis or "def2-svp",
+            dispersion=dispersion,
             spin=SpinTreatment(getattr(args, "spin", "rhf")),
         )
         registry.assert_available(f"basis:{method.basis}")
@@ -199,6 +229,17 @@ def _build_spec(args: argparse.Namespace, registry: CapabilityRegistry) -> Calcu
     if profile is None:
         available = ", ".join(sorted(_PROFILE_BY_CLI_NAME))
         msg = f"Неизвестный профиль {args.profile!r}. Доступны: {available}"
+        raise ValueError(msg)
+    # С профилем поправка определяется профилем: два источника истины о
+    # методе — профиль и ручной флаг — дали бы расчёт, о котором пользователь
+    # думал одно, а система сделала другое (§8 ТЗ). Для своей поправки —
+    # экспертный режим: --method/--functional/--basis (+ --dispersion).
+    if args.dispersion != "none":
+        msg = (
+            "--dispersion действует только в экспертном режиме "
+            "(--method/--functional/--basis). С профилем дисперсионная "
+            "поправка берётся из профиля — её видно в выводе «plan»."
+        )
         raise ValueError(msg)
     return CalculationSpec(task=task, profile=profile)
 
@@ -317,6 +358,8 @@ def _command_plan(args: argparse.Namespace, registry: CapabilityRegistry, locale
         print(f"  {t('profile.decision.basis', locale, value=spec.method.basis)}")
         if spec.method.functional:
             print(f"  {t('profile.decision.functional', locale, value=spec.method.functional)}")
+        if spec.method.dispersion is not DispersionCorrection.NONE:
+            print(f"  {t('cli.run.dispersion', locale, value=spec.method.dispersion.value)}")
         if spec.task is Task.OPTIMIZATION:
             print(
                 "  "

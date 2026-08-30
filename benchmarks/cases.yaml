@@ -41,6 +41,18 @@ cases:
     runs: 3
     warmup: 1
 
+  # DFT-D3 (BJ) поверх RHF: кейс фиксирует стоимость поправки в реестре —
+  # она обязана оставаться пренебрежимо малой против SCF (O(N²) по парам
+  # против O(N³) по базису).
+  - id: water-rhf-sto3g-sp-d3bj
+    suite: small
+    molecule: tests/fixtures/water.xyz
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g, dispersion: d3bj }
+    runs: 5
+    warmup: 1
+
   - id: water-rhf-sto3g-opt
     suite: small
     molecule: tests/fixtures/water.xyz

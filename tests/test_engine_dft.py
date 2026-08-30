@@ -614,11 +614,10 @@ def test_pbe_energy_matches_pyscf(water: Molecule) -> None:
 
 
 def test_engine_refuses_unimplemented_dispersion(water: Molecule) -> None:
-    """План с D3(BJ) не должен выполняться как расчёт без поправки (§54 ТЗ).
+    """План с нереализованной дисперсией не должен выполняться как расчёт без поправки (§54 ТЗ).
 
-    До этой проверки движок дисперсию вообще не смотрел: спецификация с
-    ``d3bj`` молча считалась как расчёт без неё, и пользователь получал другое
-    число под тем же описанием.
+    D4 в ядре до сих пор нет: спецификация с ``d4`` отклоняется до начала
+    расчёта, а не молча считается как расчёт без поправки.
     """
     spec = CalculationSpec(
         task=Task.SINGLE_POINT,
@@ -626,19 +625,48 @@ def test_engine_refuses_unimplemented_dispersion(water: Molecule) -> None:
             theory=TheoryFamily.DFT,
             basis="sto-3g",
             functional="pbe",
-            dispersion=DispersionCorrection.D3_BJ,
+            dispersion=DispersionCorrection.D4,
         ),
     )
     with pytest.raises(MethodNotAvailableError):
         ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1))
 
 
+def test_engine_refuses_lda_with_d3(water: Molecule) -> None:
+    """LDA не имеет обученных параметров D3: запрос отклоняется, а не приближается (§54 ТЗ).
+
+    Реестр считает d3bj доступным (PARTIAL — для обученных функционалов), но
+    для конкретного функционала решение принимает модуль поправок: для LDA
+    параметров не существует, и это не приближение, а недоступный метод.
+    """
+    spec = CalculationSpec(
+        task=Task.SINGLE_POINT,
+        method=MethodSpec(
+            theory=TheoryFamily.DFT,
+            basis="sto-3g",
+            functional="svwn",
+            dispersion=DispersionCorrection.D3_BJ,
+        ),
+    )
+    with pytest.raises(ValueError, match="не обучен для функционала"):
+        ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1))
+
+
 def test_registry_reports_dispersion_honestly() -> None:
-    """Дисперсионные поправки видны в реестре: ``none`` доступна, остальные нет."""
+    """Дисперсионные поправки видны в реестре со своим статусом.
+
+    d3bj/d3zero реализованы частично (область применения уже, чем у остальных
+    методов), d4 — не реализован, none — доступен.
+    """
     registry = default_registry()
     assert registry.is_available("dispersion:none")
-    assert not registry.is_available("dispersion:d3bj")
+    assert registry.is_available("dispersion:d3bj")
+    assert registry.is_available("dispersion:d3zero")
     assert not registry.is_available("dispersion:d4")
+    from quantumlab.engine.capabilities import Availability
+
+    assert registry.availability("dispersion:d3bj") is Availability.PARTIAL
+    assert registry.availability("dispersion:d4") is Availability.NOT_IMPLEMENTED
 
 
 # --------------------------------------------------------------------------- #

@@ -523,20 +523,41 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for correction in DispersionCorrection:
-        # Ни одна дисперсионная поправка не реализована: D3/D4 требуют
-        # таблиц коэффициентов и своих параметров. Заявлять их доступными
-        # означало бы выдать энергию без обещанной поправки (§54 ТЗ).
+        # D3 реализован, но область применения уже, чем у остальных методов:
+        # элементы H–F, Si, P, S, Cl, Br, I и функционалы с обученными
+        # параметрами (hf, pbe, pbe0, blyp, b3lyp). За это — PARTIAL с
+        # описанными ограничениями, а не молчаливый IMPLEMENTED (§54 ТЗ):
+        # для LDA (svwn) D3-параметры не существуют, и запрос отклоняется.
+        # D4 по-прежнему не реализован.
+        if correction is DispersionCorrection.NONE:
+            availability = Availability.IMPLEMENTED
+            since_version = __version__
+            limitations = ()
+            notes_key = "capability.note.dispersion_none"
+        elif correction in (DispersionCorrection.D3_BJ, DispersionCorrection.D3_ZERO):
+            availability = Availability.PARTIAL
+            since_version = __version__
+            limitations = (
+                "Область применения: элементы H, B, C, N, O, F, Si, P, S, "
+                "Cl, Br, I; функционалы hf, pbe, pbe0, blyp, b3lyp.",
+                "Для LDA (svwn) обученных параметров D3 не существует — "
+                "такой запрос отклоняется, а не приближается.",
+            )
+            notes_key = "capability.note.dispersion_d3"
+        else:
+            availability = Availability.NOT_IMPLEMENTED
+            since_version = None
+            limitations = ()
+            notes_key = "capability.note.not_implemented"
         capabilities.append(
             Capability(
                 id=f"dispersion:{correction.value}",
                 kind=CapabilityKind.DISPERSION,
                 name=correction.value,
-                availability=(
-                    Availability.IMPLEMENTED
-                    if correction is DispersionCorrection.NONE
-                    else Availability.NOT_IMPLEMENTED
-                ),
-                since_version=__version__ if correction is DispersionCorrection.NONE else None,
+                availability=availability,
+                since_version=since_version,
+                limitations=limitations,
+                notes_key=notes_key,
             )
         )
 

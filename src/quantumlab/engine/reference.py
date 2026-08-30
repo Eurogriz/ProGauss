@@ -46,6 +46,7 @@ from quantumlab.domain.result import (
 )
 from quantumlab.domain.spec import (
     CalculationSpec,
+    DispersionCorrection,
     OptimizationSpec,
     ScfSpec,
     SpinTreatment,
@@ -62,6 +63,7 @@ from quantumlab.engine.checkpoint import (
 )
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
 from quantumlab.engine.dft import RksResult, run_rks
+from quantumlab.engine.dispersion import DispersionContribution, dftd3_contribution
 from quantumlab.engine.functional import (
     density_at_points,
     evaluate_basis,
@@ -359,8 +361,19 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=rks.iterations, converged=rks.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties(rks.as_scf_result(), request.molecule, dipole_integrals)
-        checks = _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
+        checks = (
+            _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
+            + d3_checks
+        )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -380,6 +393,7 @@ class ReferenceEngine:
                 rks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
             ),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_rhf(
@@ -430,8 +444,16 @@ class ReferenceEngine:
             )
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties(rhf, request.molecule, dipole_integrals)
-        checks = _quality_checks(rhf, basis, request.molecule, prepared)
+        checks = _quality_checks(rhf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -449,6 +471,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings(rhf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_uhf(
@@ -480,8 +503,16 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=uhf.iterations, converged=uhf.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties_uhf(uhf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared)
+        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -502,6 +533,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings_uhf(uhf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_rohf(
@@ -537,8 +569,16 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=rohf.iterations, converged=rohf.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties_uhf(rohf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared)
+        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -559,6 +599,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings_uhf(rohf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -693,6 +734,17 @@ class ReferenceEngine:
             final_solution = rhf_final
         timings.append(_timing("final-scf", started))
 
+        # D3 вычисляется на **финальной** геометрии — той же, к которой
+        # относятся свойства и отпечаток. Берить вклад из последней итерации
+        # оптимизатора нельзя: геометрии там другие.
+        started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, final)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
         started = time.perf_counter()
         # Свойства, проверки и предупреждения различаются по методу: у RKS к ним
         # добавляются квадратурные, у UHF — второй спиновой канал и <S^2>.
@@ -700,22 +752,28 @@ class ReferenceEngine:
         # а не по общему объединению.
         if functional is not None:
             properties = _properties(rks_final, final, dipole_integrals)
-            checks = _quality_checks_rks(
-                rks_final, basis, final, prepared, grid, basis_values
-            ) + _optimization_check(optimization)
+            checks = (
+                _quality_checks_rks(rks_final, basis, final, prepared, grid, basis_values)
+                + _optimization_check(optimization)
+                + d3_checks
+            )
             extra_warnings = _warnings_rks(
                 rks_final, basis, final, grid, pruning_requested=spec.grid.prune
             )
         elif is_uhf:
             properties = _properties_uhf(uhf_final, final, dipole_integrals)
-            checks = _quality_checks_uhf(uhf_final, basis, final, prepared) + _optimization_check(
-                optimization
+            checks = (
+                _quality_checks_uhf(uhf_final, basis, final, prepared)
+                + _optimization_check(optimization)
+                + d3_checks
             )
             extra_warnings = _warnings_uhf(uhf_final, basis, final)
         else:
             properties = _properties(rhf_final, final, dipole_integrals)
-            checks = _quality_checks(rhf_final, basis, final, prepared) + _optimization_check(
-                optimization
+            checks = (
+                _quality_checks(rhf_final, basis, final, prepared)
+                + _optimization_check(optimization)
+                + d3_checks
             )
             extra_warnings = _warnings(rhf_final, basis, final)
         timings.append(_timing("properties", started))
@@ -744,6 +802,7 @@ class ReferenceEngine:
             initial_molecule=request.molecule,
             converged=final_solution.converged and optimization.converged,
             optimization_steps=optimization.steps,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -766,6 +825,7 @@ class ReferenceEngine:
         optimization_steps: int | None = None,
         frequencies_cm1: tuple[float, ...] = (),
         zero_point_energy_hartree: float | None = None,
+        dispersion_energy_hartree: float | None = None,
     ) -> CalculationResult:
         """Собирает ``CalculationResult``: отпечаток, проверки, окружение.
 
@@ -783,11 +843,18 @@ class ReferenceEngine:
             final_molecule=final_molecule,
         )
         del basis  # используется вызывающим кодом для проверок качества
+        # Полная энергия = электронная (SCF) + дисперсионная поправка, если она
+        # была запрошена и вычислена. Электронная часть не маскируется: её вклад
+        # виден через ``dispersion_energy_hartree``, а разность — это и есть D3.
+        total_energy = scf.total_energy
+        if dispersion_energy_hartree is not None:
+            total_energy += dispersion_energy_hartree
         return CalculationResult(
             job_id=request.job_id,
             spec=spec,
             fingerprint=fingerprint,
-            energy_hartree=scf.total_energy,
+            energy_hartree=total_energy,
+            dispersion_energy_hartree=dispersion_energy_hartree,
             scf_iterations=scf.iterations,
             converged=scf.converged if converged is None else converged,
             beta_homo_energy_hartree=scf.beta_homo,
@@ -915,6 +982,41 @@ class ReferenceEngine:
         return method.basis
 
 
+def _dispersion_contribution(
+    spec: CalculationSpec, molecule: Molecule
+) -> DispersionContribution | None:
+    """Вклад D3 для текущей геометрии; ``None``, если поправка не запрошена.
+
+    Вызывается на каждой геометрии расчёта (в оптимизации — на каждом шаге),
+    поэтому все проверки отклоняющего типа (функционал без параметров,
+    элемент вне области применения) уже пройдены в ``assert_supported``;
+    здесь ValueError возможен только для дефектной спецификации.
+    """
+    method = spec.method
+    if method is None or method.dispersion is DispersionCorrection.NONE:
+        return None
+    functional = None if method.theory is TheoryFamily.HF else method.functional
+    return dftd3_contribution(molecule, method.dispersion, functional)
+
+
+#: Допустимый остаток суммы поправок по всем атомам, э/bohr: градиент D3
+#: трансляционно инвариантен по построению (каждая пара даёт +F и −F),
+#: поэтому ненулевая сумма — артефакт численной сборки, а не физика.
+_DISPERSION_FORCE_TOL: float = 1e-8
+
+
+def _dispersion_check(contribution: DispersionContribution) -> QualityCheck:
+    """Проверка сохранения силы в D3-градиенте (§26 ТЗ)."""
+    net_force = float(np.max(np.abs(contribution.gradient.sum(axis=0))))
+    return QualityCheck(
+        name_key="quality.dispersion_force_conservation",
+        verdict=(
+            QualityVerdict.PASS if net_force <= _DISPERSION_FORCE_TOL else QualityVerdict.FAIL
+        ),
+        detail=f"|ΣF| = {net_force:.3e} э/bohr",
+    )
+
+
 def _timing(stage: str, started: float) -> TimingRecord:
     """Запись времени этапа. CPU-время не измеряется отдельно — один поток."""
     wall = time.perf_counter() - started
@@ -947,14 +1049,31 @@ def _solve_energy_and_gradient(
         grid = build_grid(molecule, spec.grid.preset)
         rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
         _require_converged(rks)
-        return rks.total_energy, rks_gradient(basis, molecule, rks, grid, functional).gradient
-    if method is not None and method.spin is SpinTreatment.UHF:
+        energy, gradient = (
+            rks.total_energy,
+            rks_gradient(basis, molecule, rks, grid, functional).gradient,
+        )
+    elif method is not None and method.spin is SpinTreatment.UHF:
         uhf = run_uhf(basis, molecule, _scf_settings(spec))
         _require_converged(uhf)
-        return uhf.total_energy, uhf_gradient(basis, molecule, uhf).gradient
-    rhf = run_rhf(basis, molecule, _scf_settings(spec))
-    _require_converged(rhf)
-    return rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
+        energy, gradient = (
+            uhf.total_energy,
+            uhf_gradient(basis, molecule, uhf).gradient,
+        )
+    else:
+        rhf = run_rhf(basis, molecule, _scf_settings(spec))
+        _require_converged(rhf)
+        energy, gradient = rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
+
+    # D3 складывается со SCF-вкладом в той же системе единиц (э, э/bohr) и
+    # применяется на каждой геометрии: оптимизатор и гессиан получают ту же
+    # энергию, что и расчёт в одной точке, иначе они пойдут по разным
+    # поверхностям (§51 ТЗ).
+    d3 = _dispersion_contribution(spec, molecule)
+    if d3 is not None:
+        energy += d3.energy_hartree
+        gradient = gradient + d3.gradient
+    return energy, gradient
 
 
 #: Все ключи предупреждений, которые может выдать движок.
