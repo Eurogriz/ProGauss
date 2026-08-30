@@ -1,0 +1,19 @@
+id: ch-uks-pbe-sto3g-gradient
+level: L2
+description: >-
+  Аналитический градиент UKS/PBE (GGA) радикала CH (дублет) в STO-3G против
+  центральной разности. Проверяет спино-зависимый XC-вклад в градиент
+  (∂ρ^α/∂R, ∂ρ^β/∂R, ∂σ/∂R) и обмен по своему каналу — путь, которого нет ни у
+  RKS, ни у UHF. Сетка заморожена: одна и та же для аналитического градиента и
+  всех смещений, чтобы сравнивалась одна поверхность. Кейс помечен slow:
+  12 конечно-разностных SCF на GGA-сетке, по измеренной стоимости.
+molecule: tests/fixtures/ch-radical.xyz
+multiplicity: 2
+slow: true
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: pbe, spin: uhf }
+  grid: { preset: fine }
+gradient_vs_finite_difference:
+  step_angstrom: 1.0e-4
+  max_deviation_eh_bohr: 1.0e-6

@@ -9,7 +9,7 @@
 
 ```bash
 python benchmarks/run_benchmarks.py --list               # состав наборов
-python benchmarks/run_benchmarks.py --suite small        # прогон (~100 с)
+python benchmarks/run_benchmarks.py --suite small        # прогон (~2.5 минуты)
 python benchmarks/run_benchmarks.py --update-reference small
 make bench                                               # то же, что --suite small
 ```
@@ -38,11 +38,20 @@ x86_64, 2 CPU, Linux 6.1.158+ · Python 3.11.2 · NumPy 2.4.6 · scipy-openblas 
 
 | Кейс | wall (медиана) | cpu | пик. память | итераций SCF |
 |---|---|---|---|---|
-| hydrogen-rhf-sto3g-sp | 0.27 с | 0.37 с | 48 МБ | 2 |
-| water-rhf-sto3g-sp | 0.45 с | 0.55 с | 49 МБ | 8 |
-| water-rhf-sto3g-grad | 1.41 с | 1.51 с | 49 МБ | 8 |
-| water-rhf-631g-sp | 1.76 с | 1.86 с | 50 МБ | 13 |
-| water-rhf-sto3g-opt | 12.13 с | 12.22 с | 61 МБ | 8 |
+| hydrogen-rhf-sto3g-sp | 0.29 с | 0.39 с | 50 МБ | 2 |
+| water-rhf-sto3g-sp | 0.39 с | 0.48 с | 51 МБ | 8 |
+| water-rhf-sto3g-grad | 0.51 с | 0.61 с | 52 МБ | 8 |
+| ch-rohf-sto3g-grad | 0.48 с | 0.58 с | 52 МБ | 7 |
+| water-rhf-631g-sp | 0.61 с | 0.71 с | 52 МБ | 12 |
+| water-rhf-sto3g-sp-d3bj | 0.34 с | 0.44 с | 52 МБ | 8 |
+| water-rhf-sto3g-opt | 2.88 с | 2.98 с | 65 МБ | 8 |
+| ch-uks-pbe-sto3g-sp | 10.29 с | 13.70 с | 376 МБ | 26 |
+
+У UKS-точки пиковая память (~376 МБ) на порядок выше HF-кейсов — это
+квадратурная сетка GGA (172 800 точек, два канала). Кейс намеренно стоит
+**последним** в наборе: пик памяти в отчёте — монотонный максимум по всем
+потомкам (``ru_maxrss``), и стоит ли DFT-кейс раньше, его память приписалась
+бы кейсам, идущим после.
 
 Деградация wall time больше +10% — ненулевой код возврата, а не «шум».
 Число итераций SCF имеет нулевой допуск: оно не зависит от железа, и его

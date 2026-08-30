@@ -5,16 +5,20 @@ NumPy-реализаций базисов, интегралов и RHF. Назн
 корректности** (ADR-002): любые будущие backend'ы (C++/OpenMP, CUDA, внешние
 пакеты) обязаны совпадать с ним в пределах заявленной точности.
 
-Что ядро умеет и чего не умеет
-------------------------------
-Умеет: ``single_point`` методом RHF в любом из зарегистрированных базисов.
+Что ядро умеет
+--------------
+RHF, UHF, ROHF и RKS (функционалы из реестра) — расчёт в одной точке,
+аналитический ядерный градиент, оптимизация геометрии (декартовы координаты)
+и колебательные частоты (численный гессиан из аналитических градиентов).
+Для не-HF-методов доступен дисперсионный поправочный член DFT-D3 (BJ и
+zero-затухание) с аналитическим вкладом в градиент.
 
 Не умеет — и сообщает об этом штатной ошибкой до начала вычислений, а не
 выдаёт правдоподобное число:
 
-* UHF/ROHF: только замкнутые оболочки, нечётное число электронов отклоняется;
-* DFT, MP2, CC: отсутствуют как код;
-* градиенты, оптимизация, частоты, сканирования;
+* UKS (спиново-поляризованный DFT): функционалы считаются только по полной
+  плотности, поэтому DFT с открытой оболочкой отклоняется;
+* MP2, CC, сканирования и поиск переходных состояний;
 * сферическая схема базисов: наборы, опубликованные с d/f в чистых угловых
   моментах, считаются в декартовой схеме (6 компонент вместо 5 для d). Это
   больший базис, энергии отличаются от табличных на ~1e-4 Eh; факт отражается
@@ -46,6 +50,7 @@ from quantumlab.domain.result import (
 )
 from quantumlab.domain.spec import (
     CalculationSpec,
+    DispersionCorrection,
     OptimizationSpec,
     ScfSpec,
     SpinTreatment,
@@ -61,13 +66,20 @@ from quantumlab.engine.checkpoint import (
     write_scf_checkpoint,
 )
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
-from quantumlab.engine.dft import RksResult, run_rks
+from quantumlab.engine.dft import RksResult, UksResult, run_rks, run_uks
+from quantumlab.engine.dispersion import DispersionContribution, dftd3_contribution
 from quantumlab.engine.functional import (
     density_at_points,
     evaluate_basis,
     get_functional,
 )
-from quantumlab.engine.gradients import rhf_gradient, rks_gradient, uhf_gradient
+from quantumlab.engine.gradients import (
+    rhf_gradient,
+    rks_gradient,
+    rohf_gradient,
+    uhf_gradient,
+    uks_gradient,
+)
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -109,6 +121,19 @@ _ENERGY_DECOMPOSITION_TOLERANCE = 1e-8
 
 #: Точность условия стационарности ``FDS = SDF`` (следствие уравнений Рутана).
 _FOCK_COMMUTATOR_TOLERANCE = 1e-6
+
+#: Порог коммутатора для UKS, отдельно от общего.
+#:
+#: У HF и RKS фокиан — линейная функция плотности, и коммутатор ``FDS − SDF``
+#: — величина высшего порядка по невязке: на сошедшемся SCF он на 2–3 порядка
+#: ниже порога по плотности. У UKS в фокиан входит ``V_xc``, нелинейная
+#: функция плотности, и коммутатор становится величиной **первого** порядка:
+#: измеряется как ~2× ошибка DIIS (на CH/STO-3G при пороге 1e-6 — 1.2e-6 при
+#: DIIS 5.9e-7). Обобщённый порог 1e-6 давал бы ложный FAIL на корректном
+#: гибриде. Поэтому у UKS порог — в 3 раза выше дефолтного порога по плотности
+#: (1e-6): оставляет запас на более тяжёлые почтивырождения, но на 3 порядка
+#: ниже реальных расхождений, которые проверка и призвана ловить.
+_UKS_FOCK_COMMUTATOR_TOLERANCE = 3e-6
 
 #: Точность выполнения D′² = 2D′ в ортогональном базисе.
 _IDEMPOTENCY_TOLERANCE = 1e-6
@@ -294,7 +319,9 @@ class ReferenceEngine:
         """
         method = request.spec.method
         if method is not None and method.theory is TheoryFamily.DFT:
-            return self._run_single_point_rks(request, basis_name, progress=progress)
+            if method.spin is SpinTreatment.RHF:
+                return self._run_single_point_rks(request, basis_name, progress=progress)
+            return self._run_single_point_uks(request, basis_name, progress=progress)
         if method is not None and method.spin is SpinTreatment.UHF:
             return self._run_single_point_uhf(request, basis_name, progress=progress)
         if method is not None and method.spin is SpinTreatment.ROHF:
@@ -359,8 +386,19 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=rks.iterations, converged=rks.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties(rks.as_scf_result(), request.molecule, dipole_integrals)
-        checks = _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
+        checks = (
+            _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
+            + d3_checks
+        )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -380,6 +418,94 @@ class ReferenceEngine:
                 rks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
             ),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
+        )
+
+    def _run_single_point_uks(
+        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+    ) -> CalculationResult:
+        """UKS (спиново-поляризованный DFT) в фиксированной геометрии.
+
+        Каркас — из RKS (функционал, сетка, ``basis_values``: проверки обязаны
+        пользоваться той же сеткой, на которой считалась энергия), а свойства
+        и проверки качества — из UHF (два канала, ⟨Ŝ²⟩, границы каналов β).
+        Аналитический градиент UKS реализован (``uks_gradient``), поэтому
+        оптимизация и частоты для открытой оболочки DFT проходят.
+        """
+        spec = request.spec
+        timings: list[TimingRecord] = []
+        method = spec.method
+        if method is None or method.functional is None:
+            msg = "DFT-расчёт требует явного обменно-корреляционного функционала."
+            raise ValueError(msg)
+        functional = get_functional(method.functional)
+
+        started = time.perf_counter()
+        basis = build_basis(basis_name, request.molecule)
+        timings.append(_timing("basis", started))
+        _report(progress, 5.0, "basis", functions=basis.n_functions)
+
+        started = time.perf_counter()
+        prepared = build_integrals(basis, request.molecule)
+        dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
+        timings.append(_timing("integrals", started))
+        _report(progress, 35.0, "integrals")
+
+        started = time.perf_counter()
+        grid = build_grid(request.molecule, spec.grid.preset)
+        basis_values = evaluate_basis(basis, request.molecule, grid.points)
+        timings.append(_timing("grid", started))
+        _report(progress, 45.0, "grid", points=grid.n_points)
+
+        started = time.perf_counter()
+        uks = run_uks(
+            basis,
+            request.molecule,
+            functional,
+            _scf_settings(spec),
+            integrals=prepared,
+            grid=grid,
+        )
+        timings.append(_timing("scf", started))
+        _report(progress, 85.0, "scf", iterations=uks.iterations, converged=uks.converged)
+
+        started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
+        properties = _properties_uhf(uks.as_uhf_result(), request.molecule, dipole_integrals)
+        checks = (
+            _quality_checks_uks(uks, basis, request.molecule, prepared, grid, basis_values)
+            + d3_checks
+        )
+        timings.append(_timing("properties", started))
+        _report(progress, 100.0, "properties")
+
+        return self._result(
+            request,
+            molecule=request.molecule,
+            basis=basis,
+            scf=_ScfSummary(
+                total_energy=uks.total_energy,
+                iterations=uks.iterations,
+                converged=uks.converged,
+                spin_squared=uks.s_squared,
+                beta_homo=properties.beta_homo,
+                beta_lumo=properties.beta_lumo,
+            ),
+            properties=properties,
+            checks=checks,
+            timings=timings,
+            warnings=_warnings_uks(
+                uks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
+            ),
+            final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_rhf(
@@ -430,8 +556,16 @@ class ReferenceEngine:
             )
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties(rhf, request.molecule, dipole_integrals)
-        checks = _quality_checks(rhf, basis, request.molecule, prepared)
+        checks = _quality_checks(rhf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -449,6 +583,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings(rhf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_uhf(
@@ -457,8 +592,9 @@ class ReferenceEngine:
         """UHF в фиксированной геометрии.
 
         Интегралы ровно те же, что и в RHF: UHF отличается только построением
-        фокиана и наличием двух плотностей. Градиенты UHF не реализованы,
-        поэтому оптимизация геометрии для открытой оболочки отклоняется выше.
+        фокиана и наличием двух плотностей. Аналитический градиент UHF
+        реализован (``uhf_gradient``), поэтому оптимизация и частоты для
+        открытой оболочки проходят.
         """
         spec = request.spec
         timings: list[TimingRecord] = []
@@ -480,8 +616,16 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=uhf.iterations, converged=uhf.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties_uhf(uhf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared)
+        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -502,6 +646,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings_uhf(uhf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_rohf(
@@ -514,8 +659,8 @@ class ReferenceEngine:
         и предупреждения переиспользуются от UHF, потому что физика та же;
         расходиться они не должны.
 
-        Градиентов ROHF нет, поэтому оптимизация и частоты для него отклоняются
-        на уровне реестра, а не считаются по силам другого метода.
+        Аналитический градиент ROHF реализован (``rohf_gradient``), поэтому
+        оптимизация и частоты проходят и считают поверхность ROHF.
         """
         spec = request.spec
         timings: list[TimingRecord] = []
@@ -537,8 +682,16 @@ class ReferenceEngine:
         _report(progress, 85.0, "scf", iterations=rohf.iterations, converged=rohf.converged)
 
         started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, request.molecule)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
+        started = time.perf_counter()
         properties = _properties_uhf(rohf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared)
+        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared) + d3_checks
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -559,6 +712,7 @@ class ReferenceEngine:
             timings=timings,
             warnings=_warnings_uhf(rohf, basis, request.molecule),
             final_molecule=None,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -652,6 +806,7 @@ class ReferenceEngine:
         else:
             functional = None
         is_uhf = method is not None and method.spin is SpinTreatment.UHF
+        is_rohf = method is not None and method.spin is SpinTreatment.ROHF
 
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
             total_energy, gradient = _solve_energy_and_gradient(spec, basis_name, molecule)
@@ -677,45 +832,104 @@ class ReferenceEngine:
         basis = build_basis(basis_name, final)
         prepared = build_integrals(basis, final)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
-        final_solution: RhfResult | RksResult | UhfResult
+        final_solution: RhfResult | RksResult | UhfResult | RohfResult | UksResult
+        open_shell_final: UhfResult | RohfResult | None = None
+        rks_final: RksResult | None = None
+        uks_final: UksResult | None = None
+        grid: QuadratureGrid | None = None
+        basis_values: np.ndarray | None = None
         if functional is not None:
             grid = build_grid(final, spec.grid.preset)
             basis_values = evaluate_basis(basis, final, grid.points)
-            rks_final = run_rks(
-                basis, final, functional, _scf_settings(spec), integrals=prepared, grid=grid
-            )
-            final_solution = rks_final
+            if is_uhf:
+                # Открытая оболочка: спиново-поляризованный UKS. (DFT+ROHF
+                # отклонён в ``assert_supported``: ограниченной открытой
+                # оболочки для DFT не существует.)
+                uks_final = run_uks(
+                    basis,
+                    final,
+                    functional,
+                    _scf_settings(spec),
+                    integrals=prepared,
+                    grid=grid,
+                )
+                final_solution = uks_final
+                open_shell_final = uks_final.as_uhf_result()
+            else:
+                rks_final = run_rks(
+                    basis,
+                    final,
+                    functional,
+                    _scf_settings(spec),
+                    integrals=prepared,
+                    grid=grid,
+                )
+                final_solution = rks_final
         elif is_uhf:
             uhf_final = run_uhf(basis, final, _scf_settings(spec), integrals=prepared)
             final_solution = uhf_final
+            open_shell_final = uhf_final
+        elif is_rohf:
+            rohf_final = run_rohf(basis, final, _scf_settings(spec), integrals=prepared)
+            final_solution = rohf_final
+            open_shell_final = rohf_final
         else:
             rhf_final = run_rhf(basis, final, _scf_settings(spec), integrals=prepared)
             final_solution = rhf_final
         timings.append(_timing("final-scf", started))
 
+        # D3 вычисляется на **финальной** геометрии — той же, к которой
+        # относятся свойства и отпечаток. Берить вклад из последней итерации
+        # оптимизатора нельзя: геометрии там другие.
+        started = time.perf_counter()
+        d3 = _dispersion_contribution(spec, final)
+        if d3 is not None:
+            timings.append(_timing("dispersion", started))
+            d3_checks: tuple[QualityCheck, ...] = (_dispersion_check(d3),)
+        else:
+            d3_checks = ()
+
         started = time.perf_counter()
         # Свойства, проверки и предупреждения различаются по методу: у RKS к ним
-        # добавляются квадратурные, у UHF — второй спиновой канал и <S^2>.
+        # добавляются квадратурные, у UHF/ROHF — второй спиновой канал и <S^2>.
         # Вычисляются внутри своей ветви, где конкретный тип результата известен,
         # а не по общему объединению.
-        if functional is not None:
+        if uks_final is not None:
+            assert grid is not None and basis_values is not None
+            properties = _properties_uhf(uks_final.as_uhf_result(), final, dipole_integrals)
+            checks = (
+                _quality_checks_uks(uks_final, basis, final, prepared, grid, basis_values)
+                + _optimization_check(optimization)
+                + d3_checks
+            )
+            extra_warnings = _warnings_uks(
+                uks_final, basis, final, grid, pruning_requested=spec.grid.prune
+            )
+        elif rks_final is not None:
+            assert grid is not None and basis_values is not None
             properties = _properties(rks_final, final, dipole_integrals)
-            checks = _quality_checks_rks(
-                rks_final, basis, final, prepared, grid, basis_values
-            ) + _optimization_check(optimization)
+            checks = (
+                _quality_checks_rks(rks_final, basis, final, prepared, grid, basis_values)
+                + _optimization_check(optimization)
+                + d3_checks
+            )
             extra_warnings = _warnings_rks(
                 rks_final, basis, final, grid, pruning_requested=spec.grid.prune
             )
-        elif is_uhf:
-            properties = _properties_uhf(uhf_final, final, dipole_integrals)
-            checks = _quality_checks_uhf(uhf_final, basis, final, prepared) + _optimization_check(
-                optimization
+        elif open_shell_final is not None:
+            properties = _properties_uhf(open_shell_final, final, dipole_integrals)
+            checks = (
+                _quality_checks_uhf(open_shell_final, basis, final, prepared)
+                + _optimization_check(optimization)
+                + d3_checks
             )
-            extra_warnings = _warnings_uhf(uhf_final, basis, final)
+            extra_warnings = _warnings_uhf(open_shell_final, basis, final)
         else:
             properties = _properties(rhf_final, final, dipole_integrals)
-            checks = _quality_checks(rhf_final, basis, final, prepared) + _optimization_check(
-                optimization
+            checks = (
+                _quality_checks(rhf_final, basis, final, prepared)
+                + _optimization_check(optimization)
+                + d3_checks
             )
             extra_warnings = _warnings(rhf_final, basis, final)
         timings.append(_timing("properties", started))
@@ -732,7 +946,7 @@ class ReferenceEngine:
                 total_energy=final_solution.total_energy,
                 iterations=final_solution.iterations,
                 converged=final_solution.converged,
-                spin_squared=uhf_final.s_squared if is_uhf else None,
+                spin_squared=open_shell_final.s_squared if open_shell_final is not None else None,
                 beta_homo=properties.beta_homo,
                 beta_lumo=properties.beta_lumo,
             ),
@@ -744,6 +958,7 @@ class ReferenceEngine:
             initial_molecule=request.molecule,
             converged=final_solution.converged and optimization.converged,
             optimization_steps=optimization.steps,
+            dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     # ------------------------------------------------------------------ #
@@ -766,6 +981,7 @@ class ReferenceEngine:
         optimization_steps: int | None = None,
         frequencies_cm1: tuple[float, ...] = (),
         zero_point_energy_hartree: float | None = None,
+        dispersion_energy_hartree: float | None = None,
     ) -> CalculationResult:
         """Собирает ``CalculationResult``: отпечаток, проверки, окружение.
 
@@ -783,11 +999,18 @@ class ReferenceEngine:
             final_molecule=final_molecule,
         )
         del basis  # используется вызывающим кодом для проверок качества
+        # Полная энергия = электронная (SCF) + дисперсионная поправка, если она
+        # была запрошена и вычислена. Электронная часть не маскируется: её вклад
+        # виден через ``dispersion_energy_hartree``, а разность — это и есть D3.
+        total_energy = scf.total_energy
+        if dispersion_energy_hartree is not None:
+            total_energy += dispersion_energy_hartree
         return CalculationResult(
             job_id=request.job_id,
             spec=spec,
             fingerprint=fingerprint,
-            energy_hartree=scf.total_energy,
+            energy_hartree=total_energy,
+            dispersion_energy_hartree=dispersion_energy_hartree,
             scf_iterations=scf.iterations,
             converged=scf.converged if converged is None else converged,
             beta_homo_energy_hartree=scf.beta_homo,
@@ -840,37 +1063,41 @@ class ReferenceEngine:
         """Отклоняет сочетания, где спин реализован, а их комбинация с задачей — нет.
 
         Проверка доступности ``spin:uhf`` сама по себе недостаточна: UHF
-        реализован для HF, но не для DFT. Без этой проверки запрос проходил
+        реализован для HF, а для DFT открытая оболочка считается как
+        спиново-поляризованный UKS. Без явной проверки запрос проходил
         валидацию, попадал в ветку RKS и падал необработанным ``ValueError``
         про нечётное число электронов — то есть пользователь получал аварийный
         сбой вместо честного «недоступно» (§54 ТЗ).
 
-        То же с ROHF: реестр честно объявляет его пригодным только для энергии
-        в одной точке, но объявление без читателя ничего не значит — движок
-        проваливался в RHF и падал там. Проверка делает ограничение реальным.
+        Исторически здесь же отклонялась ROHF с оптимизацией/частотами:
+        аналитических градиентов ROHF не было. С введением градиента ROHF
+        ограничение снято — движок считает его аналитически, а не силами
+        другого метода.
+
+        С введением UKS (спиново-поляризованный DFT) открытая оболочка для DFT
+        доступна как ``spin:uhf``. Сочетание ``DFT + rohf`` остаётся
+        отклонённым: «ограниченная» открытая оболочка (ROHF, общий набор
+        пространственных орбиталей и точное ⟨Ŝ²⟩) для DFT не определена —
+        открытооболочечный DFT по определению спиново-неразделён. Движок не
+        подменяет запрошенное ROHF-описание UKS-расчётом молча: это другая
+        физика (возможное спиновое загрязнение), и она должна быть выбрана
+        явно (§54 ТЗ).
         """
         method = spec.method
         if method is None:
             return
 
-        if method.theory is TheoryFamily.DFT and method.spin is not SpinTreatment.RHF:
+        if method.theory is TheoryFamily.DFT and method.spin is SpinTreatment.ROHF:
             # В ``combination`` — только технические идентификаторы: движок по
             # устройству не знает локали вызывающей стороны, а подставлять
             # русский текст в параметр значило бы зашить в код строку
             # интерфейса (§3 ТЗ).
             raise CombinationUnavailableError(
                 f"DFT/{method.functional} + {method.spin.value}",
-                "UKS (спиново-поляризованный DFT) не реализован: функционалы "
-                "считаются только по полной плотности. Для открытой оболочки "
-                "доступен метод HF с обработкой "
-                f"{method.spin.value}.",
-            )
-        if method.spin is SpinTreatment.ROHF and spec.task is not Task.SINGLE_POINT:
-            raise CombinationUnavailableError(
-                f"ROHF + {spec.task.value}",
-                "аналитических градиентов ROHF нет, поэтому нужны производные "
-                "энергии. Для открытой оболочки доступны UHF (оптимизация и "
-                "частоты) и ROHF (только энергия в одной точке).",
+                "Ограниченная открытая оболочка (ROHF) для DFT не определена: "
+                "открытооболочечный DFT считается как спиново-поляризованный "
+                "UKS. Для открытой оболочки используйте "
+                "spin:uhf.",
             )
 
     def assert_supported(self, spec: CalculationSpec) -> str:
@@ -915,6 +1142,41 @@ class ReferenceEngine:
         return method.basis
 
 
+def _dispersion_contribution(
+    spec: CalculationSpec, molecule: Molecule
+) -> DispersionContribution | None:
+    """Вклад D3 для текущей геометрии; ``None``, если поправка не запрошена.
+
+    Вызывается на каждой геометрии расчёта (в оптимизации — на каждом шаге),
+    поэтому все проверки отклоняющего типа (функционал без параметров,
+    элемент вне области применения) уже пройдены в ``assert_supported``;
+    здесь ValueError возможен только для дефектной спецификации.
+    """
+    method = spec.method
+    if method is None or method.dispersion is DispersionCorrection.NONE:
+        return None
+    functional = None if method.theory is TheoryFamily.HF else method.functional
+    return dftd3_contribution(molecule, method.dispersion, functional)
+
+
+#: Допустимый остаток суммы поправок по всем атомам, э/bohr: градиент D3
+#: трансляционно инвариантен по построению (каждая пара даёт +F и −F),
+#: поэтому ненулевая сумма — артефакт численной сборки, а не физика.
+_DISPERSION_FORCE_TOL: float = 1e-8
+
+
+def _dispersion_check(contribution: DispersionContribution) -> QualityCheck:
+    """Проверка сохранения силы в D3-градиенте (§26 ТЗ)."""
+    net_force = float(np.max(np.abs(contribution.gradient.sum(axis=0))))
+    return QualityCheck(
+        name_key="quality.dispersion_force_conservation",
+        verdict=(
+            QualityVerdict.PASS if net_force <= _DISPERSION_FORCE_TOL else QualityVerdict.FAIL
+        ),
+        detail=f"|ΣF| = {net_force:.3e} э/bohr",
+    )
+
+
 def _timing(stage: str, started: float) -> TimingRecord:
     """Запись времени этапа. CPU-время не измеряется отдельно — один поток."""
     wall = time.perf_counter() - started
@@ -945,16 +1207,50 @@ def _solve_energy_and_gradient(
         # Сетка перестраивается на каждой геометрии, чтобы энергия оставалась той
         # же величиной, что и в расчёте в одной точке.
         grid = build_grid(molecule, spec.grid.preset)
-        rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
-        _require_converged(rks)
-        return rks.total_energy, rks_gradient(basis, molecule, rks, grid, functional).gradient
-    if method is not None and method.spin is SpinTreatment.UHF:
+        if method.spin is SpinTreatment.RHF:
+            rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+            _require_converged(rks)
+            energy, gradient = (
+                rks.total_energy,
+                rks_gradient(basis, molecule, rks, grid, functional).gradient,
+            )
+        else:
+            # Открытая оболочка: спиново-поляризованный UKS со своим
+            # аналитическим градиентом (``uks_gradient``).
+            uks = run_uks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+            _require_converged(uks)
+            energy, gradient = (
+                uks.total_energy,
+                uks_gradient(basis, molecule, uks, grid, functional).gradient,
+            )
+    elif method is not None and method.spin is SpinTreatment.UHF:
         uhf = run_uhf(basis, molecule, _scf_settings(spec))
         _require_converged(uhf)
-        return uhf.total_energy, uhf_gradient(basis, molecule, uhf).gradient
-    rhf = run_rhf(basis, molecule, _scf_settings(spec))
-    _require_converged(rhf)
-    return rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
+        energy, gradient = (
+            uhf.total_energy,
+            uhf_gradient(basis, molecule, uhf).gradient,
+        )
+    elif method is not None and method.spin is SpinTreatment.ROHF:
+        rohf = run_rohf(basis, molecule, _scf_settings(spec))
+        _require_converged(rohf)
+        energy, gradient = (
+            rohf.total_energy,
+            rohf_gradient(basis, molecule, rohf).gradient,
+        )
+    else:
+        rhf = run_rhf(basis, molecule, _scf_settings(spec))
+        _require_converged(rhf)
+        energy, gradient = rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
+
+    # D3 складывается со SCF-вкладом в той же системе единиц (э, э/bohr) и
+    # применяется на каждой геометрии: оптимизатор и гессиан получают ту же
+    # энергию, что и расчёт в одной точке, иначе они пойдут по разным
+    # поверхностям (§51 ТЗ).
+    d3 = _dispersion_contribution(spec, molecule)
+    if d3 is not None:
+        energy += d3.energy_hartree
+        gradient = gradient + d3.gradient
+    return energy, gradient
 
 
 #: Все ключи предупреждений, которые может выдать движок.
@@ -974,7 +1270,9 @@ WARNING_KEYS: tuple[str, ...] = (
 )
 
 
-def _require_converged(solution: RhfResult | RksResult | UhfResult) -> None:
+def _require_converged(
+    solution: RhfResult | RksResult | UhfResult | RohfResult | UksResult,
+) -> None:
     """Прерывает расчёт, если SCF не сошёлся.
 
     Градиент по несошедшейся плотности неверен, а оптимизация по неверному
@@ -1152,13 +1450,19 @@ def _properties_uhf(
 def _quality_checks_uhf(
     uhf: UhfResult | RohfResult, basis: BasisSet, molecule: Molecule, prepared: PrecomputedIntegrals
 ) -> tuple[QualityCheck, ...]:
-    """Проверки качества для UHF.
+    """Проверки качества для UHF и ROHF.
 
     RHF-проверки здесь неприменимы дословно: разложение энергии и условие
     стационарности у открытой оболочки строятся по каждому каналу отдельно, а
     полная плотность входит только в кулоновский член. Кроме того, добавлена
     проверка ⟨Ŝ²⟩ — у UHF возможно спиновое загрязнение, и оно должно быть
-    видно в результате, а не оставаться внутри движка.
+    видно в результате, а не оставаться внутри движка (у ROHF оно отсутствует
+    в точности).
+
+    Коммутатор [F, D] трактуется по-разному: у UHF каждый канал диагонализует
+    свой фокиан, а у ROHF замкнутые орбитали диагонализируют
+    Fc = ½(F^α + F^β), открытые — F^α, поэтому сверка идёт по блокам, а не по
+    каналам.
     """
     n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
     overlap = prepared.overlap
@@ -1185,23 +1489,51 @@ def _quality_checks_uhf(
     idempotency_error = 0.0
     orthogonalizer = canonical_orthogonalizer(overlap)
     inverse = np.linalg.inv(orthogonalizer)
-    for density, n_occupied in ((uhf.density_alpha, n_alpha), (uhf.density_beta, n_beta)):
-        fock = (
-            prepared.core
-            + coulomb_matrix(density_total, repulsion)
-            - exchange_matrix(density, repulsion)
+
+    # Стационарность: коммутатор [F, D] обязан обращаться в ноль. У UHF каждый
+    # канал диагонализирует свой фокиан, поэтому проверяются [F^α, D^α] и
+    # [F^β, D^β]. У ROHF это не так: замкнутые орбитали диагонализируют
+    # Fc = ½(F^α + F^β), а открытые — F^α, и [F^α, D^α] было бы ненулевым
+    # (ложный FAIL). Поэтому для ROHF коммутатор берётся по замкнутому блоку
+    # (D^β) с Fc и по открытому (D^α − D^β) с F^α.
+    if isinstance(uhf, RohfResult):
+        base = prepared.core + coulomb_matrix(density_total, repulsion)
+        fock_alpha = base - exchange_matrix(uhf.density_alpha, repulsion)
+        fock_closed = 0.5 * (fock_alpha + (base - exchange_matrix(uhf.density_beta, repulsion)))
+        pairs = (
+            (fock_closed, uhf.density_beta),
+            (fock_alpha, uhf.density_alpha - uhf.density_beta),
         )
+        commutator_label = "худший из блоков (замкнутый с Fc, открытый с F^α)"
+    else:
+        commutator_label = "худший из каналов"
+        pairs = (
+            (
+                prepared.core
+                + coulomb_matrix(density_total, repulsion)
+                - exchange_matrix(uhf.density_alpha, repulsion),
+                uhf.density_alpha,
+            ),
+            (
+                prepared.core
+                + coulomb_matrix(density_total, repulsion)
+                - exchange_matrix(uhf.density_beta, repulsion),
+                uhf.density_beta,
+            ),
+        )
+    for fock, density in pairs:
         commutator_error = max(
             commutator_error,
             float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock))),
         )
+
+    for density in (uhf.density_alpha, uhf.density_beta):
         density_prime = inverse @ density @ inverse.T
         # Занятие канала равно 1, поэтому идемпотентность D'^2 = D' (без множителя 2).
         idempotency_error = max(
             idempotency_error,
             float(np.max(np.abs(density_prime @ density_prime - density_prime))),
         )
-        del n_occupied  # число занятых нужно только для построения плотности
 
     s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
     scheme = basis_angular_scheme(basis.name)
@@ -1239,7 +1571,7 @@ def _quality_checks_uhf(
                 if commutator_error < _FOCK_COMMUTATOR_TOLERANCE
                 else QualityVerdict.FAIL
             ),
-            detail=f"худший из каналов: max|FDS − SDF| = {commutator_error:.3e}",
+            detail=f"{commutator_label}: max|FDS − SDF| = {commutator_error:.3e}",
         ),
         QualityCheck(
             name_key="density_idempotency",
@@ -1530,6 +1862,217 @@ def _quality_checks_rks(
             ),
         ),
     )
+
+
+def _quality_checks_uks(
+    uks: UksResult,
+    basis: BasisSet,
+    molecule: Molecule,
+    prepared: PrecomputedIntegrals,
+    grid: QuadratureGrid,
+    basis_values: np.ndarray,
+) -> tuple[QualityCheck, ...]:
+    """Проверки качества для UKS.
+
+    Гибрид из RKS- и UHF-проверок: как у DFT разложение энергии содержит
+    ``E_xc`` и долю точного обмена (а не «чистый» обмен), а как у UHF —
+    два канала, свои фокианы и ⟨Ŝ²⟩. Подстановка RHF- или RKS-проверок
+    выдала бы FAIL на корректном UKS (или, что хуже, PASS на неверном).
+
+    Разложение энергии: E = T + V_яд-эл + ½J + E_xc − ½α(D^α:K^α + D^β:K^β)
+    + V_яд-яд. Коммутатор проверяется по каждому каналу со своим фокианом
+    F^σ = h + J + V_xc^σ − αK^σ.
+    """
+    overlap = prepared.overlap
+    eri = prepared.eri
+    expected = molecule.n_electrons
+    density_total = uks.density_alpha + uks.density_beta
+    alpha = uks.exact_exchange_fraction
+
+    kinetic = float(np.sum(density_total * integrals.build_kinetic(basis, molecule)))
+    attraction = float(np.sum(density_total * integrals.build_nuclear_attraction(basis, molecule)))
+    coulomb = float(np.einsum("uv,ls,uvls", density_total, density_total, eri))
+    exchange_alpha = float(np.einsum("uv,ls,ulvs", uks.density_alpha, uks.density_alpha, eri))
+    exchange_beta = float(np.einsum("uv,ls,ulvs", uks.density_beta, uks.density_beta, eri))
+    exact_exchange = 0.5 * alpha * (exchange_alpha + exchange_beta)
+
+    decomposition_error = abs(
+        kinetic
+        + attraction
+        + 0.5 * coulomb
+        + uks.xc_energy
+        - exact_exchange
+        + uks.nuclear_repulsion
+        - uks.total_energy
+    )
+
+    coulomb_matrix_total = coulomb_matrix(density_total, eri)
+    fock_alpha = (
+        prepared.core
+        + coulomb_matrix_total
+        - alpha * exchange_matrix(uks.density_alpha, eri)
+        + _require_vxc(uks.v_xc_alpha)
+    )
+    fock_beta = (
+        prepared.core
+        + coulomb_matrix_total
+        - alpha * exchange_matrix(uks.density_beta, eri)
+        + _require_vxc(uks.v_xc_beta)
+    )
+    commutator_error = 0.0
+    for fock, density in ((fock_alpha, uks.density_alpha), (fock_beta, uks.density_beta)):
+        commutator_error = max(
+            commutator_error,
+            float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock))),
+        )
+
+    orthogonalizer = canonical_orthogonalizer(overlap)
+    inverse = np.linalg.inv(orthogonalizer)
+    idempotency_error = 0.0
+    for density in (uks.density_alpha, uks.density_beta):
+        density_prime = inverse @ density @ inverse.T
+        idempotency_error = max(
+            idempotency_error,
+            float(np.max(np.abs(density_prime @ density_prime - density_prime))),
+        )
+
+    rho_total = density_at_points(basis_values, density_total)
+    grid_electrons = float(np.sum(grid.weights * rho_total))
+    grid_error = abs(grid_electrons - expected)
+    if grid_error < _QUADRATURE_STRICT_TOLERANCE:
+        grid_verdict = QualityVerdict.PASS
+    elif grid_error < _QUADRATURE_LOOSE_TOLERANCE:
+        grid_verdict = QualityVerdict.WARNING
+    else:
+        grid_verdict = QualityVerdict.FAIL
+
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
+    scheme = basis_angular_scheme(basis.name)
+    return (
+        QualityCheck(
+            name_key="scf_converged",
+            verdict=QualityVerdict.PASS if uks.converged else QualityVerdict.FAIL,
+            detail=f"итераций: {uks.iterations}, стратегии: {', '.join(uks.strategies_used)}",
+        ),
+        QualityCheck(
+            name_key="electron_count",
+            verdict=(
+                QualityVerdict.PASS
+                if abs(float(np.trace(density_total @ overlap)) - expected)
+                < _ELECTRON_COUNT_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"tr(D·S) = {np.trace(density_total @ overlap):.8f}, ожидается {expected}",
+        ),
+        QualityCheck(
+            name_key="quadrature_electron_count",
+            verdict=grid_verdict,
+            detail=(
+                f"∫ρ dV по сетке из {uks.grid_points} точек = {grid_electrons:.8f}, "
+                f"ожидается {expected}, расхождение {grid_error:.3e}"
+            ),
+        ),
+        QualityCheck(
+            name_key="energy_decomposition",
+            verdict=(
+                QualityVerdict.PASS
+                if decomposition_error < _ENERGY_DECOMPOSITION_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=(
+                "E = T + V_яд-эл + ½J + E_xc − ½αΣD^σ:K^σ + V_яд-яд пересчитано "
+                f"по плотностям каналов, E_xc = {uks.xc_energy:.8f} э, "
+                f"расхождение {decomposition_error:.3e} э"
+            ),
+        ),
+        QualityCheck(
+            name_key="fock_density_commutator",
+            verdict=(
+                QualityVerdict.PASS
+                if commutator_error < _UKS_FOCK_COMMUTATOR_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=(
+                f"условие стационарности FDS = SDF по каналам, "
+                f"max|FDS − SDF| = {commutator_error:.3e}"
+            ),
+        ),
+        QualityCheck(
+            name_key="density_idempotency",
+            verdict=(
+                QualityVerdict.PASS
+                if idempotency_error < _IDEMPOTENCY_TOLERANCE
+                else QualityVerdict.FAIL
+            ),
+            detail=f"max|D′² − D′| = {idempotency_error:.3e} (занятие канала 1)",
+        ),
+        QualityCheck(
+            name_key="spin_contamination",
+            verdict=(
+                QualityVerdict.PASS
+                if uks.s_squared <= s_exact + _SPIN_CONTAMINATION_TOLERANCE
+                else QualityVerdict.WARNING
+            ),
+            detail=(
+                f"<S^2> = {uks.s_squared:.6f}, для чистого состояния {s_exact:.6f}; "
+                f"избыток {uks.s_squared - s_exact:+.6f}"
+            ),
+        ),
+        QualityCheck(
+            name_key="basis_angular_scheme",
+            verdict=QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING,
+            detail=(
+                "базис опубликован в декартовой схеме — расчёт ей соответствует"
+                if scheme == "cartesian"
+                else (
+                    "базис опубликован в сферической схеме, расчёт идёт в декартовой "
+                    "(6 d-функций вместо 5); энергия ниже табличной примерно на 1e-4 Eh"
+                )
+            ),
+        ),
+    )
+
+
+def _require_vxc(vxc: np.ndarray | None) -> np.ndarray:
+    """Проверяет наличие канального V_xc: без него фокиан восстановить нельзя."""
+    if vxc is None:
+        msg = "UKS-результат без обменно-корреляционного потенциала: проверки невозможны."
+        raise ValueError(msg)
+    return vxc
+
+
+def _warnings_uks(
+    uks: UksResult,
+    basis: BasisSet,
+    molecule: Molecule,
+    grid: QuadratureGrid,
+    *,
+    pruning_requested: bool = False,
+) -> tuple[CalculationWarning, ...]:
+    """Предупреждения UKS: всё из RKS (сетка, границы) плюс открытая оболочка."""
+    warnings: list[CalculationWarning] = []
+    if not uks.converged:
+        warnings.append(
+            CalculationWarning(
+                key="warning.scf_not_converged", params={"iterations": str(uks.iterations)}
+            )
+        )
+    scheme = _angular_scheme_warning(basis)
+    if scheme:
+        warnings.append(scheme)
+    dipole = _dipole_origin_warning(molecule)
+    if dipole:
+        warnings.append(dipole)
+    if pruning_requested:
+        warnings.append(CalculationWarning(key="warning.grid_prune_unimplemented"))
+    warnings.append(
+        CalculationWarning(
+            key="warning.grid_xc_integration",
+            params={"points": str(grid.n_points), "preset": grid.preset.value},
+        )
+    )
+    return tuple(warnings)
 
 
 def _warnings_rks(

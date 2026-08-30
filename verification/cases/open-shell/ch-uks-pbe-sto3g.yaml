@@ -1,0 +1,39 @@
+id: ch-uks-pbe-sto3g-energy
+level: L1
+description: >-
+  UKS/PBE (GGA) радикала CH (дублет) в STO-3G — открытая оболочка,
+  спиново-поляризованный DFT. Проверяет два спиновых канала: обмен по своему
+  каналу, кулон по полной плотности; GGA-часть — из ∇ρ^α, ∇ρ^β и σ. Кейс
+  фиксирует точку, в которой DFT и открытая оболочка работают вместе.
+  Допуск шире измеренного расхождения с PySCF — по остатку дефекта PBE-c, а не
+  по желаемому.
+molecule: tests/fixtures/ch-radical.xyz
+multiplicity: 2
+spec:
+  task: single_point
+  method: { theory: dft, basis: sto-3g, functional: pbe, spin: uhf }
+  grid: { preset: ultrafine }
+expect:
+  energy_hartree:
+    value: -37.9067707329
+    tol: 5.0e-6
+    source: >-
+      internal-reference (reference-cpu); независимо сверено с PySCF 2.14
+      dft.UKS xc=PBE сетка (120,974), расхождение 4.4e-08 э. Допуск шире
+      расхождения, чтобы покрыть остаток 2.5e-07 в ε_c корреляции PBE и
+      различие квадратурных сеток между движком и оракулом
+  spin_squared:
+    value: 0.75088708
+    tol: 1.0e-5
+    source: >-
+      <S^2> решения UHF; для чистого дублета 0.75, избыток — спиновое
+      загрязнение. Сверено с PySCF spin_square() до 2e-8
+quality:
+  scf_converged: true
+  electron_count: true
+  quadrature_electron_count: true
+  energy_decomposition: true
+  fock_density_commutator: true
+  density_idempotency: true
+  spin_contamination: true
+  basis_angular_scheme: true

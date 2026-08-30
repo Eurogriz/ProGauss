@@ -153,6 +153,7 @@ ID                                    СТАТУС              ПОПЫТКА  
 | Узнать, что реально реализовано | `quantumlab capabilities` |
 | Посмотреть только базисы | `quantumlab capabilities --kind basis` |
 | Задать метод вручную (экспертный режим) | `quantumlab run mol.xyz --method dft --functional pbe0 --basis def2-tzvp` |
+| С дисперсионной поправкой D3 (экспертный режим) | `quantumlab run mol.xyz --method dft --functional pbe0 --basis def2-svp --dispersion d3bj` |
 | Переключить язык вывода | `quantumlab --lang en …` |
 | Хранить задания в другом каталоге | `quantumlab --data-dir /путь …` |
 

@@ -138,7 +138,22 @@ class CalculationResult(BaseModel):
     job_id: str
     spec: CalculationSpec
     fingerprint: Fingerprint
-    energy_hartree: float
+    energy_hartree: float = Field(
+        description=(
+            "Полная энергия: электронная (SCF) плюс дисперсионная поправка, "
+            "если она была запрошена и применена. Вклад поправки виден "
+            "отдельно в ``dispersion_energy_hartree``."
+        )
+    )
+    dispersion_energy_hartree: float | None = Field(
+        default=None,
+        description=(
+            "Вклад дисперсионной поправки D3 в энергию (отрицательный), "
+            "хартри. ``None`` — поправка не запрашивалась. Поле присутствует, "
+            "чтобы энергия с D3 не выдавалась за энергию без неё: разница "
+            "видна пользователю, а не теряется в полной сумме (§8, §54 ТЗ)."
+        ),
+    )
     scf_iterations: int = Field(default=0, ge=0)
     converged: bool = False
     homo_energy_hartree: float | None = Field(

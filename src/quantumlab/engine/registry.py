@@ -150,8 +150,11 @@ _METHODS: tuple[tuple[str, str], ...] = (
     ("ccsd_t", "CCSD(T)"),
 )
 
-#: SVWN реализован и сверен с LibXC; остальные заявлены в ТЗ, но кода нет.
-#: Статус записан рядом с именем, чтобы «заявлено» и «умеет» не разъезжались.
+#: Статус «реализован/заявлено» реестр читает из ``FUNCTIONALS`` (см. ниже):
+#: здесь только справочные имена и классы, чтобы «заявлено» и «умеет» не
+#: разъезжались. Реализованы SVWN, PBE, BLYP, PBE0, B3LYP (сверены с LibXC и
+#: PySCF, в том числе со спиновой поляризацией); meta-GGA и дальнодействующие
+#: гибриды — заявлены в ТЗ, кода нет.
 _FUNCTIONALS: tuple[tuple[str, str, str], ...] = (
     ("svwn", "SVWN (Слейтер + VWN-5)", "lda"),
     ("lda", "LDA (синоним SVWN)", "lda"),
@@ -215,19 +218,21 @@ _SPINS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
             "результат и в предупреждения, а не замалчивается.",
             "Однодетерминантное описание: при заметном спиновом загрязнении "
             "(<S^2> заметно выше S(S+1)) результат требует проверки.",
-            "Только для метода HF: UKS (спиново-поляризованный DFT) не "
-            "реализован, поэтому DFT с открытой оболочкой отклоняется.",
+            "Для HF — это UHF; для DFT — спиново-поляризованный UKS "
+            "(открытая оболочка считается с двумя канальными плотностями и "
+            "аналитическим градиентом).",
         ),
     ),
     (
         "rohf",
         Availability.PARTIAL,
         (
-            "Задачи: только энергия в одной точке — аналитических градиентов "
-            "ROHF нет, поэтому оптимизация и частоты отклоняются ядром, а не "
-            "только объявлены недоступными в этом списке.",
-            "Только для метода HF: UKS (спиново-поляризованный DFT) не "
-            "реализован, поэтому DFT с открытой оболочкой отклоняется.",
+            "Задачи: энергия в точке, оптимизация геометрии и частоты "
+            "(переходные состояния и сканирования не реализованы).",
+            "Оптимизация — только в декартовых координатах.",
+            "Только для метода HF: для DFT ограниченная открытая оболочка не "
+            "определена — открытооболочечный DFT считается как UKS "
+            "(spin:uhf), и сочетание DFT + rohf отклоняется.",
             "Орбитальные энергии — собственные значения эффективного фокиана "
             "Рутаана; отдельных энергий каналов α и β он не даёт.",
             "В отличие от UHF состояние остаётся собственным для Ŝ², поэтому "
@@ -266,18 +271,21 @@ def _method_limitations(name: str) -> tuple[str, ...]:
     """Ограничения метода, видимые и в реестре, и в предупреждениях (§54 ТЗ)."""
     if name == "hf":
         return (
-            "Только RHF: нечётное число электронов отклоняется.",
+            "Замкнутая оболочка — RHF, открытая — UHF (возможное спиновое "
+            "загрязнение, <S^2> выводится) или ROHF (точное <S^2>).",
             "Задачи: энергия в точке, оптимизация геометрии и частоты "
             "(переходные состояния и сканирования не реализованы).",
             "Оптимизация — только в декартовых координатах.",
         )
     if name == "dft":
         return (
-            "Реализованы SVWN (LDA), PBE (GGA) и PBE0 (гибрид, ¼ точного "
-            "обмена); meta-GGA, B3LYP и дальнодействующие гибриды "
-            "не реализованы.",
-            "Дисперсионные поправки (D3, D4) не реализованы.",
-            "Только RKS: UKS для открытой оболочки не реализован.",
+            "Реализованы SVWN (LDA), PBE и BLYP (GGA), PBE0 и B3LYP (гибриды); "
+            "meta-GGA (TPSSh, M06, M06-2X) и дальнодействующие гибриды "
+            "(ωB97X, ωB97X-D) не реализованы.",
+            "Дисперсионные поправки: D3 реализован, D4 не реализован.",
+            "Замкнутая оболочка — RKS, открытая — спиново-поляризованный UKS "
+            "(spin:uhf); для DFT нет ограниченной открытой оболочки "
+            "(spin:rohf отклоняется).",
             "Оптимизация геометрии реализована, но аналитический градиент не "
             "содержит отклика квадратурной сетки: расхождение с поверхностью "
             "оптимизатора измерено (7.0e-06 э/бор на воде/STO-3G) и в 64 раза "
@@ -307,7 +315,10 @@ def _functional_limitations(name: str) -> tuple[str, ...]:
             f"Гибрид: {functional.exact_exchange_fraction:g} точного обмена; "
             "дальнодействующая коррекция (ωB97X и подобные) не реализована."
         )
-    limits.append("Только замкнутая оболочка: UKS не реализован.")
+    limits.append(
+        "Замкнутая оболочка — RKS, открытая — спиново-поляризованный UKS "
+        "(spin:uhf); для DFT нет ограниченной открытой оболочки (spin:rohf)."
+    )
     return tuple(limits)
 
 
@@ -402,7 +413,7 @@ def default_registry() -> CapabilityRegistry:
                 "Гессиан численный: центральные разности аналитического градиента, "
                 "а не аналитические вторые производные.",
                 "Доступны только методы с аналитическим градиентом: RHF, UHF, "
-                "RKS со SVWN/PBE/PBE0.",
+                "ROHF, RKS и UKS (SVWN, PBE, BLYP, PBE0, B3LYP).",
                 "Стоимость — 6N расчётов градиента, поэтому задача заметно дороже одноточечной.",
             )
         capabilities.append(
@@ -417,8 +428,10 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for name, label in _METHODS:
-        # hf реализован, но только в варианте RHF и только для двух задач —
-        # поэтому partial с явным перечнем ограничений, а не implemented.
+        # hf и dft реализованы, но не во всех вариантах: hf — RHF/UHF/ROHF,
+        # dft — RKS/UKS с ограниченным набором функционалов, и оба — только для
+        # двух задач. Поэтому partial с явным перечнем ограничений, а не
+        # implemented.
         availability = (
             Availability.PARTIAL if name in ("hf", "dft") else Availability.NOT_IMPLEMENTED
         )
@@ -523,20 +536,41 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for correction in DispersionCorrection:
-        # Ни одна дисперсионная поправка не реализована: D3/D4 требуют
-        # таблиц коэффициентов и своих параметров. Заявлять их доступными
-        # означало бы выдать энергию без обещанной поправки (§54 ТЗ).
+        # D3 реализован, но область применения уже, чем у остальных методов:
+        # элементы H–F, Si, P, S, Cl, Br, I и функционалы с обученными
+        # параметрами (hf, pbe, pbe0, blyp, b3lyp). За это — PARTIAL с
+        # описанными ограничениями, а не молчаливый IMPLEMENTED (§54 ТЗ):
+        # для LDA (svwn) D3-параметры не существуют, и запрос отклоняется.
+        # D4 по-прежнему не реализован.
+        if correction is DispersionCorrection.NONE:
+            availability = Availability.IMPLEMENTED
+            since_version = __version__
+            limitations = ()
+            notes_key = "capability.note.dispersion_none"
+        elif correction in (DispersionCorrection.D3_BJ, DispersionCorrection.D3_ZERO):
+            availability = Availability.PARTIAL
+            since_version = __version__
+            limitations = (
+                "Область применения: элементы H, B, C, N, O, F, Si, P, S, "
+                "Cl, Br, I; функционалы hf, pbe, pbe0, blyp, b3lyp.",
+                "Для LDA (svwn) обученных параметров D3 не существует — "
+                "такой запрос отклоняется, а не приближается.",
+            )
+            notes_key = "capability.note.dispersion_d3"
+        else:
+            availability = Availability.NOT_IMPLEMENTED
+            since_version = None
+            limitations = ()
+            notes_key = "capability.note.not_implemented"
         capabilities.append(
             Capability(
                 id=f"dispersion:{correction.value}",
                 kind=CapabilityKind.DISPERSION,
                 name=correction.value,
-                availability=(
-                    Availability.IMPLEMENTED
-                    if correction is DispersionCorrection.NONE
-                    else Availability.NOT_IMPLEMENTED
-                ),
-                since_version=__version__ if correction is DispersionCorrection.NONE else None,
+                availability=availability,
+                since_version=since_version,
+                limitations=limitations,
+                notes_key=notes_key,
             )
         )
 

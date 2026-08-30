@@ -283,7 +283,7 @@ def test_cli_run_reports_unavailable_task_honestly(
 def test_cli_run_rejects_unimplemented_functional(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """B3LYP не реализован: запрос отклоняется до создания задания, а не в середине расчёта."""
+    """TPSSh не реализован: запрос отклоняется до создания задания, а не в середине расчёта."""
     code = main(
         [
             "--lang",

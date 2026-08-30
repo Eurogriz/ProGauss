@@ -15,20 +15,183 @@
 
 from __future__ import annotations
 
+from typing import Protocol
+
 import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, cartesian_powers
-from quantumlab.engine.contracts import Array, XcEvaluation
+from quantumlab.engine.contracts import Array, XcEvaluation, XcEvaluationSpin
+from quantumlab.engine.xc_spin_cores import (
+    _lyp_spin_core,
+    _pbe_spin_core,
+    _vwn4rpa_spin_core,
+    _vwn5_spin_core,
+)
 from quantumlab.errors import FunctionalNotFoundError
 
 #: (3/π)^(1/3) — входит в обмен Слэтера.
 _SLATER_FACTOR: float = (3.0 / np.pi) ** (1.0 / 3.0)
 
+#: Коэффициент обмена Слэтера для **спиновой** LDA: ε_x = −C'_x(ρ_α^{4/3} +
+#: ρ_β^{4/3})/ρ. Вдвое меньше «навыгляд», чем ¾(3/π)^(1/3), — и замена на
+#: полный коэффициент занижает обмен ровно на 20.6 % (проверено: ошибка
+#: выходит на 2.1e-01, а не на 1e-16).
+_SPIN_SLATER_FACTOR: float = (3.0 / 8.0) * 2.0 ** (4.0 / 3.0) * (3.0 / np.pi) ** (1.0 / 3.0)
+
+#: Знаменатель в s² обменной части PBE для спин-канала:
+#: ``s_σ² = |∇ρ_σ|²/(D² ρ_σ^{8/3})``, ``D² = 24π^{4/3}/6^{1/3}``. Константа
+#: восстановлена численно из эталонной реализации (fit по энергии, остаток
+#: 7.9e-15 на сетке 126 точек), а не из текста: «школьное» определение
+#: ``4(3π²)^{2/3}`` даёт 6.1 % ошибку, и форма F(s) при этом верна.
+_PBE_SPIN_S2_DENOM: float = 24.0 * np.pi ** (4.0 / 3.0) / 6.0 ** (1.0 / 3.0)
+
+#: Климпы переменных work-структуры — ровно те, что в C-коде libxc, с которым
+#: сверены ядра (``xc_spin_cores``): при других клампах производные в
+#: нулевых каналах дают бесконечные вклады, хотя энергия совпадает.
+_SPIN_ZETA_EPS: float = 2.2204460492503131e-16
+_SPIN_DENS_MIN: float = 1e-30
+_SPIN_GRAD2_MIN: float = 1e-60
+
 #: Порог плотности, ниже которого вклад считается нулевым. Без него деление на
 #: ρ^(1/3) и логарифм r_s дают ``nan`` в хвостах плотности, и одна такая точка
 #: отравляет всю матрицу Фока.
 _DENSITY_FLOOR: float = 1e-14
+
+
+def _spin_work(
+    rho_alpha: np.ndarray,
+    rho_beta: np.ndarray,
+    s_aa: np.ndarray,
+    s_ab: np.ndarray,
+    s_bb: np.ndarray,
+) -> tuple[np.ndarray, ...]:
+    """Переменные work-структуры spin-GGA в установке libxc.
+
+    Возвращает ``(dens, z, ds0, ds1, rs, sigmat, s00c, s11c, xt, xs0, xs1)`` —
+    те же величины, что и в C-коде, из которого транскрибированы ядра
+    :mod:`xc_spin_cores`, включая клампы. Цепное правило обязано использовать
+    именно эти клампованные значения: подставь неклампованные — и в
+    нулевых каналах появятся ложные вклады, невидимые по энергии.
+    """
+    dens = rho_alpha + rho_beta
+    # В хвостовых точках сетки плотность может быть ровно 0 или ≤
+    # _DENSITY_FLOOR: xt и rs считаются от клампованной плотности — как в
+    # C-драйвере, где вход кламировался до вызова. Итоговые вклады там
+    # маскируются в каждом функционале (``valid``), поэтому значение клампа
+    # на результат не влияет — важно отсутствие inf/NaN в промежуточных.
+    dens_safe = np.where(dens > _DENSITY_FLOOR, dens, 1.0)
+    z = (rho_alpha - rho_beta) / dens_safe
+    z = np.where(1.0 + z < _SPIN_ZETA_EPS, -1.0 + _SPIN_ZETA_EPS, z)
+    z = np.where(1.0 - z < _SPIN_ZETA_EPS, 1.0 - _SPIN_ZETA_EPS, z)
+    ds0 = np.maximum(rho_alpha, _SPIN_DENS_MIN)
+    ds1 = np.maximum(rho_beta, _SPIN_DENS_MIN)
+    rs = _wigner_seitz_radius(dens_safe)
+    sigmat = np.maximum(s_aa + 2.0 * s_ab + s_bb, _SPIN_GRAD2_MIN)
+    s00c = np.maximum(s_aa, _SPIN_GRAD2_MIN)
+    s11c = np.maximum(s_bb, _SPIN_GRAD2_MIN)
+    xt = np.sqrt(sigmat) / dens_safe ** (4.0 / 3.0)
+    xs0 = np.sqrt(s00c) / ds0 ** (4.0 / 3.0)
+    xs1 = np.sqrt(s11c) / ds1 ** (4.0 / 3.0)
+    return dens, z, ds0, ds1, rs, sigmat, s00c, s11c, xt, xs0, xs1
+
+
+def _spin_gga_chain(
+    f: np.ndarray,
+    dfdr: np.ndarray,
+    dfdz: np.ndarray,
+    dfdxt: np.ndarray,
+    dfdxs0: np.ndarray,
+    dfdxs1: np.ndarray,
+    work: tuple[np.ndarray, ...],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Цепное правило spin-GGA: ``E_V = ρ·f(rs, z, xt, xs0, xs1)``.
+
+    Возвращает производные энергии на единицу объёма
+    ``(v_rho_a, v_rho_b, v_sigma_aa, v_sigma_ab, v_sigma_bb)``.
+    Коэффициент 2 в ``v_sigma_ab`` уже учтён: ``s_tot`` зависит от
+    ``s_ab = ∇ρ_α·∇ρ_β`` с множителем 2.
+    """
+    dens, z, ds0, ds1, rs, sigmat, s00c, s11c, xt, xs0, xs1 = work
+    # Член xt идёт без множителя ρ: xt/∂ρ_σ = −4xt/(3ρ) и ρ·(−4xt/(3ρ)) = −4xt/3.
+    # Лишний ρ здесь давал ошибку в v_ρ уровня 1e-2, невидимую по энергии.
+    v_rho_a = (
+        f
+        - rs / 3.0 * dfdr
+        + (1.0 - z) * dfdz
+        - (4.0 / 3.0) * xt * dfdxt
+        - (4.0 / 3.0) * (dens / ds0) * xs0 * dfdxs0
+    )
+    v_rho_b = (
+        f
+        - rs / 3.0 * dfdr
+        - (1.0 + z) * dfdz
+        - (4.0 / 3.0) * xt * dfdxt
+        - (4.0 / 3.0) * (dens / ds1) * xs1 * dfdxs1
+    )
+    # Коэффициенты сверены с эталоном по всем членам: ∂xt/∂s_aa = xt/(2·s_tot),
+    # ∂xt/∂s_ab = xt/s_tot (суммарный градиент зависит от s_ab с множителем 2),
+    # ∂xs_σ/∂s_σσ = xs_σ/(2·s_σσ).
+    v_xt = dens * xt / sigmat * dfdxt
+    v_sigma_aa = 0.5 * v_xt + 0.5 * dens * xs0 / s00c * dfdxs0
+    v_sigma_ab = v_xt
+    v_sigma_bb = 0.5 * v_xt + 0.5 * dens * xs1 / s11c * dfdxs1
+    return v_rho_a, v_rho_b, v_sigma_aa, v_sigma_ab, v_sigma_bb
+
+
+class _SpinPart(Protocol):
+    """Слагаемое функционала с ``evaluate_spin`` (для весовых сумм).
+
+    Композитные функционалы суммируют части (обмен/корреляция) через
+    ``_sum_spin_evaluations``; все части имеют один и тот же метод, поэтому
+    типизация идёт протоколом, а не перечислением всех классов.
+    """
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin: ...
+
+
+def _sum_spin_evaluations(
+    points: Array,
+    density_spin: Array,
+    density_gradient_spin: Array | None,
+    terms: tuple[tuple[_SpinPart, float], ...],
+) -> XcEvaluationSpin:
+    """Взвешенная сумма спинных XC-слагаемых для композитных функционалов.
+
+    ``terms`` — пары ``(функционал, вес)``. ``vsigma`` суммируется по тем
+    слагаемым, которые его имеют (LDA-слагаемые дают ``None``); если его нет
+    ни у одного — результат LDA и ``vsigma`` остаётся ``None``.
+    """
+    rho = np.asarray(density_spin, dtype=float)
+    total = rho[0] + rho[1]
+    valid = total > _DENSITY_FLOOR
+    energy: np.ndarray | None = None
+    vrho: np.ndarray | None = None
+    vsigma: np.ndarray | None = None
+    for functional, weight in terms:
+        evaluation = functional.evaluate_spin(points, density_spin, density_gradient_spin)
+        energy = (
+            evaluation.energy_density * weight
+            if energy is None
+            else energy + weight * evaluation.energy_density
+        )
+        vrho = evaluation.vrho * weight if vrho is None else vrho + weight * evaluation.vrho
+        if evaluation.vsigma is None:
+            continue
+        vsigma = (
+            evaluation.vsigma * weight if vsigma is None else vsigma + weight * evaluation.vsigma
+        )
+    assert energy is not None and vrho is not None
+    return XcEvaluationSpin(
+        energy_density=np.where(valid, energy, 0.0),
+        vrho=np.where(valid[None, :], vrho, 0.0),
+        vsigma=None if vsigma is None else np.where(valid[None, None, :], vsigma, 0.0),
+    )
 
 
 def evaluate_basis(basis: BasisSet, molecule: Molecule, points: np.ndarray) -> np.ndarray:
@@ -285,13 +448,48 @@ class LdaExchange:
         spin_polarized: bool = False,
     ) -> XcEvaluation:
         """Энергия и потенциал обмена Слэтера в точках сетки."""
-        del points, density_gradient, spin_polarized  # LDA зависит только от ρ
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
+        del points, density_gradient
         rho = np.asarray(density, dtype=float)
         safe = np.where(rho > _DENSITY_FLOOR, rho, 0.0)
         cube_root = np.cbrt(safe)
         exc = np.where(safe > 0.0, -0.75 * _SLATER_FACTOR * cube_root, 0.0)
         vrho = np.where(safe > 0.0, -_SLATER_FACTOR * cube_root, 0.0)
         return XcEvaluation(energy_density=np.asarray(exc), vrho=np.asarray(vrho))
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спин-обмен Слэтера: ``ε_x = −C'_x(ρ_α^{4/3} + ρ_β^{4/3})/ρ``.
+
+        Сверка с эталоном (LDA_X, libxc 7.0.0) — в ``tests/test_engine_uks.py``,
+        расхождение 2.1e-14. Коэффициент C'_x — :data:`_SPIN_SLATER_FACTOR`,
+        а не ¾(3/π)^(1/3): подстановка полного коэффициента занижает обмен
+        ровно на 20.6 %.
+        """
+        del points, density_gradient_spin
+        rho = np.asarray(density_spin, dtype=float)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+        per_volume = -_SPIN_SLATER_FACTOR * (
+            np.where(rho[0] > _DENSITY_FLOOR, rho[0], 0.0) ** (4.0 / 3.0)
+            + np.where(rho[1] > _DENSITY_FLOOR, rho[1], 0.0) ** (4.0 / 3.0)
+        )
+        energy_density = np.where(valid, per_volume / np.where(valid, total, 1.0), 0.0)
+        vrho = np.zeros((2, total.shape[0]))
+        for sigma in (0, 1):
+            channel = np.where(rho[sigma] > _DENSITY_FLOOR, rho[sigma], 0.0)
+            vrho[sigma] = np.where(
+                rho[sigma] > _DENSITY_FLOOR,
+                -(4.0 / 3.0) * _SPIN_SLATER_FACTOR * np.cbrt(channel),
+                0.0,
+            )
+        return XcEvaluationSpin(energy_density=energy_density, vrho=vrho)
 
 
 class VwnCorrelation:
@@ -397,6 +595,44 @@ class VwnCorrelation:
         vrho[valid] = exc[valid] - x[valid] / 6.0 * derivative[valid]
         return XcEvaluation(energy_density=exc, vrho=vrho)
 
+    #: Спиновое ядро — транскрипция из libxc (maple2c/lda_c_vwn.c, func1);
+    #: сверка с 7.0.0 — в docstring :mod:`xc_spin_cores` и в тестах UKS.
+    #: Подкласс в RPA-параметризации заменяет его на своё.
+    _spin_core = staticmethod(_vwn5_spin_core)
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спинная VWN-корреляция (LDA_C_VWN / LDA_C_VWN_RPA).
+
+        Ядро — функция ``(rs, z)`` от полной плотности и ``z = (ρ_α−ρ_β)/ρ``;
+        производные по каналам — цепным правилом от ``E_V = ρ·f``:
+
+        ``v_ρ^σ = f − (r_s/3)·df/dr_s ± (1∓z)·df/dz``.
+
+        Потенциалы сверены с эталоном до точности конечной разности (1e-13),
+        энергия — до 1.2e-14; предельный случай ``z = 0`` обязан (и даёт)
+        ровно неполяризованную VWN.
+        """
+        del points, density_gradient_spin
+        rho = np.asarray(density_spin, dtype=float)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+        z = (rho[0] - rho[1]) / np.where(valid, total, 1.0)
+        z = np.clip(z, -1.0 + _SPIN_ZETA_EPS, 1.0 - _SPIN_ZETA_EPS)
+        r_s = np.where(valid, total, 1.0)
+        r_s = np.cbrt(3.0 / (4.0 * np.pi * r_s))
+        f, dfdrs, dfdz = self._spin_core(r_s, z)
+        base = f - r_s / 3.0 * dfdrs
+        energy_density = np.where(valid, f, 0.0)
+        vrho = np.zeros((2, total.shape[0]))
+        vrho[0] = np.where(valid, base + (1.0 - z) * dfdz, 0.0)
+        vrho[1] = np.where(valid, base - (1.0 + z) * dfdz, 0.0)
+        return XcEvaluationSpin(energy_density=energy_density, vrho=vrho)
+
     def _dexc_dx(self, x: np.ndarray, denominator: np.ndarray, root: float) -> np.ndarray:
         """Аналитическая производная ``dε_c/dx``."""
         slope = self.B * self.X0 / self._denominator_at_x0
@@ -422,9 +658,10 @@ class Svwn:
     собственный способ собрать функционал, а они обязаны давать один и тот же
     результат.
 
-    Это LDA-функционал: локальная плотность плотности, без градиентов. Для
-    спиновой поляризации нужен UKS, которого пока нет, поэтому параметр
-    ``spin_polarized`` принят только для соответствия протоколу и отклоняется.
+    Это LDA-функционал: локальная плотность плотности, без градиентов.
+    Спин-поляризованное вычисление идёт через ``evaluate_spin`` (ядро UKS);
+    ``evaluate`` с ``spin_polarized=True`` отклоняется, чтобы не выдать
+    непарную энергию по полной плотности.
     """
 
     name: str = "svwn"
@@ -447,16 +684,31 @@ class Svwn:
     ) -> XcEvaluation:
         """Энергия и потенциал обмена+корреляции; см. протокол."""
         if spin_polarized:
-            msg = (
-                "Спиново-поляризованный XC требует UKS (отдельные плотности α и β), "
-                "который не реализован."
-            )
-            raise NotImplementedError(msg)
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
         exchange = self._exchange.evaluate(points, density, density_gradient)
         correlation = self._correlation.evaluate(points, density, density_gradient)
         return XcEvaluation(
             energy_density=exchange.energy_density + correlation.energy_density,
             vrho=exchange.vrho + correlation.vrho,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Сумма спинного обмена Слэтера и спинной VWN-корреляции."""
+        exchange = self._exchange.evaluate_spin(points, density_spin, density_gradient_spin)
+        correlation = self._correlation.evaluate_spin(points, density_spin, density_gradient_spin)
+        rho = np.asarray(density_spin, dtype=float)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+        energy = exchange.energy_density + correlation.energy_density
+        return XcEvaluationSpin(
+            energy_density=np.where(valid, energy, 0.0),
+            vrho=np.where(valid[None, :], exchange.vrho + correlation.vrho, 0.0),
         )
 
 
@@ -483,6 +735,12 @@ _PBE_KAPPA = 0.804
 _PBE_MU = 0.21951497276451748
 _PBE_GAMMA = (1.0 - np.log(2.0)) / np.pi**2
 _PBE_BETA = 0.066725
+
+#: Полноточный β из C-кода libxc (gga_c_pbe.c). Спиновое ядро сверялось с
+#: эталоном именно на этом значении; округлённое 0.066725 выше дало бы
+#: расхождение в ε_c порядка 1e-05 — невидимое по сходимости, видимое по
+#: энергии.
+_PBE_BETA_FULL = 0.06672455060314922
 
 
 def _wigner_seitz_radius(rho: np.ndarray) -> np.ndarray:
@@ -668,6 +926,62 @@ class PbeExchange:
             energy_density=np.asarray(exc), vrho=np.asarray(vrho), vsigma=np.asarray(vsigma)
         )
 
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спинный обмен PBE: по каналу ``ε_x^σ = −C'_x ρ_σ^{4/3} F(s_σ)``.
+
+        Определение ``s_σ`` отличается от неполяризованного (см.
+        :data:`_PBE_SPIN_S2_DENOM`): «школьная» константа ``4(3π²)^{2/3}``
+        даёт 6.1 % ошибку, эталонная ``24π^{4/3}/6^{1/3}`` — 7.9e-15.
+        Сверка — в ``tests/test_engine_uks.py``.
+        """
+        del points
+        if density_gradient_spin is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        rho = np.asarray(density_spin, dtype=float)
+        grad = np.asarray(density_gradient_spin, dtype=float)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+
+        per_volume = np.zeros_like(total)
+        vrho = np.zeros((2, total.shape[0]))
+        vsigma = np.zeros((2, 2, total.shape[0]))
+        for sigma in (0, 1):
+            active = rho[sigma] > _DENSITY_FLOOR
+            channel = np.where(active, rho[sigma], 1.0)
+            grad_norm2 = np.sum(grad[sigma] ** 2, axis=1)
+            s_squared = np.zeros_like(total)
+            s_squared[active] = grad_norm2[active] / (
+                _PBE_SPIN_S2_DENOM * channel[active] ** (8.0 / 3.0)
+            )
+            denominator = 1.0 + _PBE_MU * s_squared / _PBE_KAPPA
+            enhancement = 1.0 + _PBE_KAPPA - _PBE_KAPPA / denominator
+            d_enhancement = _PBE_MU / denominator**2
+            base = _SPIN_SLATER_FACTOR * channel ** (4.0 / 3.0)
+            per_volume -= np.where(active, base * enhancement, 0.0)
+            vrho[sigma] = np.where(
+                active,
+                -(4.0 / 3.0) * _SPIN_SLATER_FACTOR * np.cbrt(channel) * enhancement
+                + (8.0 / 3.0) * _SPIN_SLATER_FACTOR * np.cbrt(channel) * s_squared * d_enhancement,
+                0.0,
+            )
+            # ∂s²/∂σ_σσ = 6^{1/3}/(24π^{4/3} ρ_σ^{8/3}) = 1/(_PBE_SPIN_S2_DENOM·ρ_σ^{8/3})
+            vsigma[sigma, sigma] = np.where(
+                active,
+                -_SPIN_SLATER_FACTOR * d_enhancement * channel ** (-4.0 / 3.0) / _PBE_SPIN_S2_DENOM,
+                0.0,
+            )
+        return XcEvaluationSpin(
+            energy_density=np.where(valid, per_volume / np.where(valid, total, 1.0), 0.0),
+            vrho=vrho,
+            vsigma=vsigma,
+        )
+
 
 class PbeCorrelation:
     """Корреляция PBE (GGA_C_PBE), неполяризованный случай.
@@ -789,6 +1103,53 @@ class PbeCorrelation:
             energy_density=np.asarray(exc), vrho=np.asarray(vrho), vsigma=np.asarray(vsigma)
         )
 
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спинная корреляция PBE (GGA_C_PBE, поляризованный случай).
+
+        Ядро — транскрипция maple2c-кода libxc (сверка с 7.0.0 — до машинной
+        точности, см. :mod:`xc_spin_cores`). Зависит только от ``s_tot =
+        |∇ρ_tot|²`` и собственных ``s_σσ`` каналов — межканальных членов
+        ``∇ρ_α·∇ρ_β`` у функционала нет, но они входят в ``s_tot``, поэтому
+        ``vsigma[αβ]`` ненулевой. Параметры — полноточные из C-кода:
+        ``β = 0.06672455060314922`` (а не округлённое 0.066725 из
+        неполяризованного пути).
+        """
+        del points
+        if density_gradient_spin is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        rho = np.asarray(density_spin, dtype=float)
+        grad = np.asarray(density_gradient_spin, dtype=float)
+        s_aa = np.sum(grad[0] ** 2, axis=1)
+        s_ab = np.sum(grad[0] * grad[1], axis=1)
+        s_bb = np.sum(grad[1] ** 2, axis=1)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+
+        work = _spin_work(rho[0], rho[1], s_aa, s_ab, s_bb)
+        dens, z, _ds0, _ds1, rs, _sigmat, _s00c, _s11c, xt, xs0, xs1 = work
+        # Ядро — генерируемая транскрипция без аннотаций (см. :mod:`xc_spin_cores`).
+        f, dfdrs, dfdz, dfdxt, dfdxs0, dfdxs1 = _pbe_spin_core(  # type: ignore[no-untyped-call]
+            _PBE_BETA_FULL, _PBE_GAMMA, 1.0, dens, z, rs, xt, xs0, xs1
+        )
+        v_rho_a, v_rho_b, vs_aa, vs_ab, vs_bb = _spin_gga_chain(
+            f, dfdrs, dfdz, dfdxt, dfdxs0, dfdxs1, work
+        )
+        vrho = np.stack([v_rho_a, v_rho_b], axis=0)
+        vsigma = np.stack(
+            [np.stack([vs_aa, vs_ab], axis=0), np.stack([vs_ab, vs_bb], axis=0)], axis=0
+        )
+        return XcEvaluationSpin(
+            energy_density=np.where(valid, f, 0.0),
+            vrho=np.where(valid[None, :], vrho, 0.0),
+            vsigma=np.where(valid[None, None, :], vsigma, 0.0),
+        )
+
 
 class Pbe:
     """PBE: обмен PBE + корреляция PBE (на базе PW92).
@@ -818,8 +1179,8 @@ class Pbe:
     ) -> XcEvaluation:
         """Энергия и потенциалы PBE; см. протокол."""
         if spin_polarized:
-            msg = "Спиново-поляризованный XC требует UKS (отдельные плотности α и β)."
-            raise NotImplementedError(msg)
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
         exchange = self._exchange.evaluate(points, density, density_gradient)
         correlation = self._correlation.evaluate(points, density, density_gradient)
         vsigma = None
@@ -829,6 +1190,20 @@ class Pbe:
             energy_density=exchange.energy_density + correlation.energy_density,
             vrho=exchange.vrho + correlation.vrho,
             vsigma=vsigma,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Сумма спинного обмена PBE и спинной корреляции PBE."""
+        return _sum_spin_evaluations(
+            points,
+            density_spin,
+            density_gradient_spin,
+            ((self._exchange, 1.0), (self._correlation, 1.0)),
         )
 
 
@@ -876,8 +1251,8 @@ class Pbe0:
         Корреляция входит целиком: в PBE0 её не масштабируют.
         """
         if spin_polarized:
-            msg = "Спиново-поляризованный XC требует UKS (отдельные плотности α и β)."
-            raise NotImplementedError(msg)
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
         exchange = self._exchange.evaluate(points, density, density_gradient)
         correlation = self._correlation.evaluate(points, density, density_gradient)
         weight = self.dft_exchange_fraction
@@ -890,6 +1265,20 @@ class Pbe0:
             energy_density=weight * exchange.energy_density + correlation.energy_density,
             vrho=weight * exchange.vrho + correlation.vrho,
             vsigma=vsigma,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """DFT-часть PBE0 для UKS: ¾ обмена PBE + корреляция PBE целиком."""
+        return _sum_spin_evaluations(
+            points,
+            density_spin,
+            density_gradient_spin,
+            ((self._exchange, self.dft_exchange_fraction), (self._correlation, 1.0)),
         )
 
 
@@ -1015,6 +1404,62 @@ class BeckeExchange:
             vsigma=np.where(valid, vsigma, 0.0),
         )
 
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спинный обмен B88, формула по каналу.
+
+        ``ε_x^σ = −C'_x ρ_σ^{4/3} − β ρ_σ^{4/3} x_σ²/(1 + 6β x_σ asinh x_σ)``.
+
+        Форма сверена с эталоном на 84 точках (включая антипараллельные
+        градиенты) до 6.4e-16. Производные по ``s_σσ`` записаны через
+        ``H'(x)/x``, чтобы не иметь деления на ``√s_σσ``: при ``∇ρ_σ = 0``
+        предел конечен и равен ``−(β/2)·2/ρ_σ^{4/3}``, и именно он
+        воспроизводится, а не шум от клампа.
+        """
+        del points
+        if density_gradient_spin is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        rho = np.asarray(density_spin, dtype=float)
+        grad = np.asarray(density_gradient_spin, dtype=float)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+
+        per_volume = np.zeros_like(total)
+        vrho = np.zeros((2, total.shape[0]))
+        vsigma = np.zeros((2, 2, total.shape[0]))
+        for sigma in (0, 1):
+            active = rho[sigma] > _DENSITY_FLOOR
+            channel = np.where(active, rho[sigma], 1.0)
+            grad_norm2 = np.maximum(np.sum(grad[sigma] ** 2, axis=1), _SPIN_GRAD2_MIN)
+            x = np.sqrt(grad_norm2) / channel ** (4.0 / 3.0)
+            asinh_x = np.arcsinh(x)
+            denom = 1.0 + 6.0 * _B88_BETA * x * asinh_x
+            correction = x * x / denom
+            # H'(x)/x — стабильна при x → 0 (предел 2), делений на x нет.
+            dcorr_over_x = (
+                2.0 * denom - x * 6.0 * _B88_BETA * (asinh_x + x / np.sqrt(1.0 + x * x))
+            ) / denom**2
+            base = channel ** (4.0 / 3.0)
+            b88_term = _SPIN_SLATER_FACTOR * base + _B88_BETA * base * correction
+            per_volume -= np.where(active, b88_term, 0.0)
+            vrho[sigma] = np.where(
+                active,
+                -(4.0 / 3.0) * _SPIN_SLATER_FACTOR * np.cbrt(channel)
+                - (4.0 / 3.0) * _B88_BETA * np.cbrt(channel) * (correction - x * x * dcorr_over_x),
+                0.0,
+            )
+            vsigma[sigma, sigma] = np.where(active, -0.5 * _B88_BETA * dcorr_over_x / base, 0.0)
+        return XcEvaluationSpin(
+            energy_density=np.where(valid, per_volume / np.where(valid, total, 1.0), 0.0),
+            vrho=vrho,
+            vsigma=vsigma,
+        )
+
 
 class LypCorrelation:
     """Корреляция LYP (Colle–Salvetti в форме Lee–Yang–Parr, 1988).
@@ -1126,6 +1571,49 @@ class LypCorrelation:
             vsigma=np.where(valid, vsigma, 0.0),
         )
 
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спинная корреляция LYP (GGA_C_LYP, поляризованный случай).
+
+        Ядро — транскрипция maple2c-кода libxc (сверка с 7.0.0 — до машинной
+        точности, см. :mod:`xc_spin_cores`); цепное правило — общее для
+        спин-GGA (:func:`_spin_gga_chain`).
+        """
+        del points
+        if density_gradient_spin is None:
+            msg = "GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        rho = np.asarray(density_spin, dtype=float)
+        grad = np.asarray(density_gradient_spin, dtype=float)
+        s_aa = np.sum(grad[0] ** 2, axis=1)
+        s_ab = np.sum(grad[0] * grad[1], axis=1)
+        s_bb = np.sum(grad[1] ** 2, axis=1)
+        total = rho[0] + rho[1]
+        valid = total > _DENSITY_FLOOR
+
+        work = _spin_work(rho[0], rho[1], s_aa, s_ab, s_bb)
+        dens, z, _ds0, _ds1, rs, _sigmat, _s00c, _s11c, xt, xs0, xs1 = work
+        # Ядро — генерируемая транскрипция без аннотаций (см. :mod:`xc_spin_cores`).
+        f, dfdrs, dfdz, dfdxt, dfdxs0, dfdxs1 = _lyp_spin_core(  # type: ignore[no-untyped-call]
+            _LYP_A, _LYP_B, _LYP_C, _LYP_D, dens, z, rs, xt, xs0, xs1
+        )
+        v_rho_a, v_rho_b, vs_aa, vs_ab, vs_bb = _spin_gga_chain(
+            f, dfdrs, dfdz, dfdxt, dfdxs0, dfdxs1, work
+        )
+        vrho = np.stack([v_rho_a, v_rho_b], axis=0)
+        vsigma = np.stack(
+            [np.stack([vs_aa, vs_ab], axis=0), np.stack([vs_ab, vs_bb], axis=0)], axis=0
+        )
+        return XcEvaluationSpin(
+            energy_density=np.where(valid, f, 0.0),
+            vrho=np.where(valid[None, :], vrho, 0.0),
+            vsigma=np.where(valid[None, None, :], vsigma, 0.0),
+        )
+
 
 class VwnRpaCorrelation(VwnCorrelation):
     """Корреляция VWN в параметризации IV (RPA).
@@ -1139,6 +1627,9 @@ class VwnRpaCorrelation(VwnCorrelation):
     X0: float = -0.409286
     B: float = 13.0720
     C: float = 42.7198
+
+    #: Спиновое ядро RPA-параметризации (maple2c/lda_c_vwn_rpa.c, func1).
+    _spin_core = staticmethod(_vwn4rpa_spin_core)
 
     @property
     def name(self) -> str:
@@ -1168,7 +1659,9 @@ class Blyp:
         spin_polarized: bool = False,
     ) -> XcEvaluation:
         """Сумма обмена B88 и корреляции LYP."""
-        del spin_polarized
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
         exchange = self._exchange.evaluate(points, density, density_gradient)
         correlation = self._correlation.evaluate(points, density, density_gradient)
         vsigma = None
@@ -1180,6 +1673,20 @@ class Blyp:
             energy_density=exchange.energy_density + correlation.energy_density,
             vrho=exchange.vrho + correlation.vrho,
             vsigma=vsigma,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Сумма спинного обмена B88 и спинной корреляции LYP."""
+        return _sum_spin_evaluations(
+            points,
+            density_spin,
+            density_gradient_spin,
+            ((self._exchange, 1.0), (self._correlation, 1.0)),
         )
 
 
@@ -1226,7 +1733,9 @@ class B3lyp:
         spin_polarized: bool = False,
     ) -> XcEvaluation:
         """Полунелокальная часть B3LYP; точный обмен подставляет решатель."""
-        del spin_polarized
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
         lda = self._lda.evaluate(points, density)
         becke = self._becke.evaluate(points, density, density_gradient)
         lyp = self._lyp.evaluate(points, density, density_gradient)
@@ -1253,6 +1762,25 @@ class B3lyp:
             ),
             vrho=(w_lda * lda.vrho + w_becke * becke.vrho + w_lyp * lyp.vrho + w_vwn * vwn.vrho),
             vsigma=vsigma,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Полунелокальная часть B3LYP для UKS; точный обмен подставляет решатель."""
+        return _sum_spin_evaluations(
+            points,
+            density_spin,
+            density_gradient_spin,
+            (
+                (self._lda, self.lda_exchange_fraction),
+                (self._becke, self.dft_exchange_fraction),
+                (self._lyp, self.lyp_fraction),
+                (self._vwn, 1.0 - self.lyp_fraction),
+            ),
         )
 
 
