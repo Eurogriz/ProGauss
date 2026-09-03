@@ -549,6 +549,113 @@ def xc_gradient_spin(
     return gradient
 
 
+def xc_gradient_spin(
+    basis: BasisSet,
+    molecule: Molecule,
+    grid: QuadratureGrid,
+    density_alpha: Array,
+    density_beta: Array,
+    functional: ExchangeCorrelationFunctional,
+) -> Array:
+    """Обменно-корреляционный вклад в градиент UKS, хартри/бор.
+
+    Спиново-разделённая версия :func:`xc_gradient`. Энергия
+
+    ``E_xc = Σ_g w_g (ρ^α + ρ^β) ε(ρ^α, ρ^β, s_αα, s_αβ, s_ββ)``
+
+    даёт по каждому каналу и каждой слагающей градиента тот же вид, что и
+    в неполяризованном случае:
+
+    * ``∂ρ^σ/∂R_Aa = −2 Σ_{μ∈A} Σ_ν D^σ_μν (∂_a φ_μ) φ_ν`` — тот же член,
+      что в RKS, но по плотности канала ``σ``;
+    * ``s_στ = ∇ρ^σ·∇ρ^τ``, ``∂g^σ/∂R_Aa = −2 (H^σ + G^σ)`` (``H`` — гессиан,
+      ``G`` — градиентный свёрток, как в :func:`xc_gradient`). Диагональные
+      ``s_σσ`` дают ``∂s_σσ/∂R = 2 ∇ρ^σ·∂g^σ/∂R = −4 ∇ρ^σ·(H^σ+G^σ)`` — тот
+      же коэффициент ``−4``, что в RKS. Кросс-член ``s_αβ`` зависит от
+      ``∇ρ`` каждого канала линейно:
+      ``∂s_αβ/∂R = (∂g^α/∂R)·∇ρ^β + ∇ρ^α·(∂g^β/∂R) = −2[(H^α+G^α)·∇ρ^β
+      + ∇ρ^α·(H^β+G^β)]`` — с коэффициентом ``−2``, вдвое меньше диагонали,
+      потому что смешанный градиент не даёт фактора 2 от ``∂(∇ρ·ρ)/∂∇ρ``.
+
+    В замкнутом пределе (``ρ^α = ρ^β = ρ/2``, ``D^α = D^β = D/2``) сумма
+    диагональных и кроссных слагаемых сворачивается ровно в
+    ``−4 Σ_g w_g v_σ ∇ρ·(H+G)`` неполяризованного функционала — встроенная
+    проверка UKS→RKS опирается на это тождество.
+
+    Как и в :func:`xc_gradient`, сетка считается **неподвижной в
+    пространстве**; расхождение с поверхностью перестраиваемой сетки
+    измерено и описано там же.
+    """
+    values, basis_gradients = evaluate_basis_with_gradients(basis, molecule, grid.points)
+    rho_alpha = density_at_points(values, density_alpha)
+    rho_beta = density_at_points(values, density_beta)
+    grad_alpha = density_gradient_at_points(values, basis_gradients, density_alpha)
+    grad_beta = density_gradient_at_points(values, basis_gradients, density_beta)
+    evaluation = functional.evaluate_spin(
+        grid.points,
+        np.stack([rho_alpha, rho_beta], axis=0),
+        np.stack([grad_alpha, grad_beta], axis=0),
+    )
+
+    v_rho = np.asarray(evaluation.vrho)  # (2, n_points)
+    has_sigma = evaluation.vsigma is not None
+    v_sigma = (
+        np.asarray(evaluation.vsigma) if has_sigma else np.zeros((2, 2, rho_alpha.size))
+    )  # (2, 2, n_points)
+
+    # По каналу: свёртки плотности с базисом и его градиентом.
+    contracted = {
+        "a": np.asarray(density_alpha @ values.T),
+        "b": np.asarray(density_beta @ values.T),
+    }
+    grad_contracted = {
+        "a": np.einsum("nm,pnb->mpb", density_alpha, basis_gradients, optimize=True),
+        "b": np.einsum("nm,pnb->mpb", density_beta, basis_gradients, optimize=True),
+    }
+
+    owner = _function_owner(basis)
+    gradient = np.zeros((len(molecule.atoms), 3))
+    for atom in range(len(molecule.atoms)):
+        columns = np.flatnonzero(owner == atom)
+        if columns.size == 0:
+            continue
+        hessian = (
+            evaluate_basis_hessian_for_center(basis, molecule, grid.points, atom)
+            if has_sigma
+            else None
+        )
+        for axis in range(3):
+            d_phi = basis_gradients[:, columns, axis]  # (n_points, n_A)
+            term = 0.0
+            # v_ρ по каналам: −2 Σ_g w v_ρ^σ Σ_{μ∈A}Σ_ν D^σ_μν (∂_a φ_μ) φ_ν.
+            for channel, sigma in enumerate(("a", "b")):
+                inner_rho = np.sum(d_phi * contracted[sigma][columns].T, axis=1)
+                term += -2.0 * float(np.sum(grid.weights * v_rho[channel] * inner_rho))
+            if has_sigma and hessian is not None:
+                # F^σ = H^σ + G^σ (вектор по декартовым осям в каждой точке).
+                f_term = {}
+                for sigma in ("a", "b"):
+                    first = np.einsum(
+                        "pjb,jp->pb", hessian[:, :, axis, :], contracted[sigma][columns]
+                    )
+                    second = np.einsum("pj,jpb->pb", d_phi, grad_contracted[sigma][columns])
+                    f_term[sigma] = first + second
+                # Диагональ s_σσ: −4 Σ_g w v_σ^{σσ} ∇ρ^σ·F^σ.
+                term += -4.0 * float(
+                    np.sum(grid.weights * v_sigma[0, 0] * np.sum(grad_alpha * f_term["a"], axis=1))
+                )
+                term += -4.0 * float(
+                    np.sum(grid.weights * v_sigma[1, 1] * np.sum(grad_beta * f_term["b"], axis=1))
+                )
+                # Кросс s_αβ: −2 Σ_g w v_σ^{αβ} [ F^α·∇ρ^β + ∇ρ^α·F^β ].
+                cross = np.sum(f_term["a"] * grad_beta, axis=1) + np.sum(
+                    grad_alpha * f_term["b"], axis=1
+                )
+                term += -2.0 * float(np.sum(grid.weights * v_sigma[0, 1] * cross))
+            gradient[atom, axis] = term
+    return gradient
+
+
 def rks_gradient(
     basis: BasisSet,
     molecule: Molecule,

@@ -421,3 +421,96 @@ def test_rohf_nuclear_gradient_matches_pyscf(
 
     deviation = float(np.max(np.abs(ours_gradient - theirs_gradient)))
     assert deviation < 1e-6, deviation
+
+
+# --------------------------------------------------------------------------- #
+# ROHF: открытая оболочка с общими орбиталями каналов
+# --------------------------------------------------------------------------- #
+#: Системы для сверки ROHF. Подобраны, чтобы покрыть всю структуру весов:
+#: дублеты с разным числом замкнутых оболочек (включая NO, где блок связности
+#: ``C^cᵀF^αC^o`` заметен), триплеты и краевой случай с пустым замкнутым блоком.
+ROHF_CASES = [
+    ("hydrogen-atom", [("H", (0.0, 0.0, 0.0))], 0, 2),
+    ("ch-doublet", [("C", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 1.117))], 0, 2),
+    ("oh-doublet", [("O", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 0.97))], 0, 2),
+    ("no-doublet", [("N", (0.0, 0.0, 0.0)), ("O", (0.0, 0.0, 1.15))], 0, 2),
+    ("h2-triplet", [("H", (0.0, 0.0, 0.0)), ("H", (0.0, 0.0, 2.0))], 0, 3),
+    ("o2-triplet", [("O", (0.0, 0.0, 0.0)), ("O", (0.0, 0.0, 1.207))], 0, 3),
+]
+
+
+def _rohf_molecule(
+    name: str,
+    atoms: list[tuple[str, tuple[float, float, float]]],
+    charge: int,
+    multiplicity: int,
+) -> Molecule:
+    return Molecule.from_atoms(
+        [symbol for symbol, _ in atoms],
+        [position for _, position in atoms],
+        charge=charge,
+        multiplicity=multiplicity,
+        name=name,
+    )
+
+
+@pytest.mark.parametrize(("name", "atoms", "charge", "multiplicity"), ROHF_CASES)
+def test_rohf_energy_matches_pyscf(
+    name: str,
+    atoms: list[tuple[str, tuple[float, float, float]]],
+    charge: int,
+    multiplicity: int,
+) -> None:
+    """Энергия ROHF совпадает с PySCF.
+
+    ROHF отличается от UHF построением плотности (общие орбитали каналов),
+    поэтому сверка энергии подтверждает именно этот фокиан, а не переиспользует
+    проверку UHF.
+    """
+    molecule = _rohf_molecule(name, atoms, charge, multiplicity)
+    ours = run_rohf(build_basis("sto-3g", molecule), molecule, TIGHT)
+    assert ours.converged
+
+    mol = pyscf.gto.M(
+        atom=[[symbol, list(position)] for symbol, position in atoms],
+        basis="sto-3g",
+        spin=multiplicity - 1,
+        charge=charge,
+        cart=True,
+        verbose=0,
+    )
+    reference = pyscf.scf.ROHF(mol).run(conv_tol=1e-12)
+    assert ours.total_energy == pytest.approx(reference.e_tot, abs=1e-7)
+
+
+@pytest.mark.parametrize(("name", "atoms", "charge", "multiplicity"), ROHF_CASES)
+def test_rohf_nuclear_gradient_matches_pyscf(
+    name: str,
+    atoms: list[tuple[str, tuple[float, float, float]]],
+    charge: int,
+    multiplicity: int,
+) -> None:
+    """Ядерный градиент ROHF против независимого оракула.
+
+    Самая чувствительная проверка: член релаксации строится из фокиан-зависимых
+    весов (замкнутый блок по ``Fc``, открытый по ``F^α``, плюс блок связности).
+    Блок связности заметен именно на NO, поэтому он обязателен в выборке.
+    """
+    molecule = _rohf_molecule(name, atoms, charge, multiplicity)
+    basis = build_basis("sto-3g", molecule)
+    result = run_rohf(basis, molecule, TIGHT)
+    ours_gradient = rohf_gradient(basis, molecule, result).gradient
+
+    mol = pyscf.gto.M(
+        atom=[[symbol, list(position)] for symbol, position in atoms],
+        basis="sto-3g",
+        spin=multiplicity - 1,
+        charge=charge,
+        cart=True,
+        verbose=0,
+    )
+    reference = pyscf.scf.ROHF(mol).run(conv_tol=1e-12)
+    theirs_gradient = np.asarray(reference.nuc_grad_method().kernel())
+
+    deviation = float(np.max(np.abs(ours_gradient - theirs_gradient)))
+    assert deviation < 1e-6, deviation

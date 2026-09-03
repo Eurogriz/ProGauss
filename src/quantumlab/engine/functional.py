@@ -419,6 +419,8 @@ class LdaExchange:
     проверка всей квадратурной обвязки независимо от корреляционной части.
     """
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -514,6 +516,8 @@ class VwnCorrelation:
     B: float = 3.72744
     C: float = 12.9352
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -551,6 +555,7 @@ class VwnCorrelation:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциал корреляционной части.
 
@@ -559,6 +564,8 @@ class VwnCorrelation:
         берётся аналитически, а не численно: конечная разность по ``r_s``
         в области малых плотностей дала бы шум, сравнимый с самой поправкой.
         """
+        del tau
+
         del points, density_gradient, spin_polarized
         rho = np.asarray(density, dtype=float)
         valid = rho > _DENSITY_FLOOR
@@ -761,6 +768,8 @@ class PwCorrelation:
     и назвать его PBE значило бы выдать не то, что считаем (§54 ТЗ).
     """
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -826,8 +835,11 @@ class PwCorrelation:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциал корреляции PW92."""
+        del tau
+
         del points, density_gradient, spin_polarized
         rho = np.asarray(density, dtype=float)
         valid = rho > _DENSITY_FLOOR
@@ -853,6 +865,8 @@ class PbeExchange:
     Потенциалы берутся по ``ρ`` и по ``σ = |∇ρ|²`` раздельно: именно так вариация
     по матрице плотности попадает в матрицу Фока.
     """
+
+    requires_tau: bool = False
 
     @property
     def name(self) -> str:
@@ -881,8 +895,11 @@ class PbeExchange:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциалы обмена PBE."""
+        del tau
+
         del points, spin_polarized
         if density_gradient is None:
             msg = "GGA-функционал требует градиент плотности; передать None нельзя."
@@ -996,6 +1013,8 @@ class PbeCorrelation:
     коммутатору, только по энергии.
     """
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -1023,8 +1042,11 @@ class PbeCorrelation:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциалы корреляции PBE."""
+        del tau
+
         del spin_polarized
         if density_gradient is None:
             msg = "GGA-функционал требует градиент плотности; передать None нельзя."
@@ -1163,6 +1185,7 @@ class Pbe:
     functional_class: str = "gga"
     is_hybrid: bool = False
     exact_exchange_fraction: float = 0.0
+    requires_tau: bool = False
 
     def __init__(self) -> None:
         """Собирает обменную и корреляционную части."""
@@ -1228,6 +1251,7 @@ class Pbe0:
     functional_class: str = "hybrid"
     is_hybrid: bool = True
     exact_exchange_fraction: float = 0.25
+    requires_tau: bool = False
 
     #: Доля полунелокального обмена PBE: дополняет точный обмен до единицы.
     dft_exchange_fraction: float = 0.75
@@ -1320,6 +1344,8 @@ class BeckeExchange:
     поправка с весом ``0.72``.
     """
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -1347,8 +1373,11 @@ class BeckeExchange:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциалы обмена B88."""
+        del tau
+
         del points, spin_polarized
         if density_gradient is None:
             msg = "GGA-функционал требует градиент плотности; передать None нельзя."
@@ -1486,6 +1515,8 @@ class LypCorrelation:
     вторых производных плотности на сетке.
     """
 
+    requires_tau: bool = False
+
     @property
     def name(self) -> str:
         """Имя функционала."""
@@ -1513,8 +1544,11 @@ class LypCorrelation:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциалы корреляции LYP."""
+        del tau
+
         del points, spin_polarized
         if density_gradient is None:
             msg = "GGA-функционал требует градиент плотности; передать None нельзя."
@@ -1644,6 +1678,7 @@ class Blyp:
     functional_class: str = "gga"
     is_hybrid: bool = False
     exact_exchange_fraction: float = 0.0
+    requires_tau: bool = False
 
     def __init__(self) -> None:
         """Собирает обменную и корреляционную части."""
@@ -1709,6 +1744,7 @@ class B3lyp:
     functional_class: str = "hybrid"
     is_hybrid: bool = True
     exact_exchange_fraction: float = 0.20
+    requires_tau: bool = False
 
     #: Вес LDA-обмена сверх того, что уже входит в B88.
     lda_exchange_fraction: float = 0.08

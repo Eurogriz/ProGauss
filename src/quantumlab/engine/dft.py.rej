@@ -1,0 +1,97 @@
+diff a/src/quantumlab/engine/dft.py b/src/quantumlab/engine/dft.py	(rejected hunks)
+@@ -36,11 +36,15 @@ from quantumlab.engine.scf import (
+     ScfHistory,
+     ScfResult,
+     ScfSettings,
++    UhfResult,
+     _diis_extrapolate,
+     build_integrals,
+     canonical_orthogonalizer,
+     coulomb_matrix,
+     density_from_coefficients,
++    exchange_matrix,
++    spin_contamination,
++    spin_population,
+ )
+ 
+ 
+@@ -131,6 +195,70 @@ def xc_matrix_and_energy(
+     return np.asarray(matrix), energy
+ 
+ 
++def xc_matrix_and_energy_spin(
++    grid: QuadratureGrid,
++    values: np.ndarray,
++    gradients: np.ndarray,
++    rho_alpha: np.ndarray,
++    rho_beta: np.ndarray,
++    grad_alpha: np.ndarray,
++    grad_beta: np.ndarray,
++    functional: ExchangeCorrelationFunctional,
++) -> tuple[np.ndarray, np.ndarray, float]:
++    """Спиновые обменно-корреляционные матрицы и энергия.
++
++    Возвращает ``(V_xc^α, V_xc^β, E_xc)``. Потенциал канала α — производная
++    энергии по плотности канала α при фиксированной β:
++
++    ``V_xc^α[μν] = Σ_g w_g [ v_ρ^α φ_μ φ_ν
++        + 2 v_σ^{αα} ∇ρ_α·(∇φ_μ φ_ν + φ_μ ∇φ_ν)
++        + v_σ^{αβ} ∇ρ_β·(∇φ_μ φ_ν + φ_μ ∇φ_ν) ]``
++
++    Диагональный член несёт множитель 2, потому что ``σ_αα = ∇ρ_α·∇ρ_α`` и
++    ``∂σ_αα/∂∇ρ_α = 2∇ρ_α``; кросс-член ``σ_αβ = ∇ρ_α·∇ρ_β`` зависит от
++    ``∇ρ_α`` линейно, поэтому его множитель 1. В замкнутом пределе
++    (ρ_α = ρ_β = ρ/2, ∇ρ_α = ∇ρ_β = ∇ρ/2) сумма свёртывается ровно в
++    ``v_ρ φ_μ φ_ν + 2 v_σ ∇ρ·(∇φ_μ φ_ν + φ_μ ∇ρ_ν)`` неполяризованного
++    функционала — проверка UKS==RKS на замкнутой оболочке опирается именно на
++    это тождество.
++
++    Энергия — ``Σ_g w_g ρ_общ ε_xc``, как в RKS: нелинейный функционал, и след
++    ``D·V_xc`` здесь неверен.
++    """
++    density = np.stack([rho_alpha, rho_beta], axis=0)
++    grad_density = np.stack([grad_alpha, grad_beta], axis=0)
++    xc = functional.evaluate_spin(grid.points, density, grad_density)
++    rho_total = rho_alpha + rho_beta
++    energy = float(np.sum(grid.weights * rho_total * xc.energy_density))
++    # LDA-функционал не зависит от градиентов: vsigma None ⇒ v_σ ≡ 0.
++    v_sigma = xc.vsigma if xc.vsigma is not None else np.zeros((2, 2, rho_alpha.size), dtype=float)
++
++    def channel(
++        v_rho: np.ndarray,
++        v_diag: np.ndarray,
++        v_cross: np.ndarray,
++        grad_self: np.ndarray,
++        grad_other: np.ndarray,
++    ) -> np.ndarray:
++        scaled_rho = grid.weights * v_rho
++        matrix = np.asarray(np.einsum("p,pg,ph->gh", scaled_rho, values, values, optimize=True))
++        # Диагональный член: множитель 2 = ∂(∇ρ·∇ρ)/∂∇ρ.
++        projection_self = np.einsum("pgd,pd->pg", gradients, grad_self, optimize=True)
++        scaled_diag = 2.0 * grid.weights * v_diag
++        matrix += np.einsum("p,pg,ph->gh", scaled_diag, projection_self, values, optimize=True)
++        matrix += np.einsum("p,pg,ph->gh", scaled_diag, values, projection_self, optimize=True)
++        # Кросс-член: множитель 1 (∂(∇ρ_α·∇ρ_β)/∂∇ρ_α = ∇ρ_β).
++        projection_other = np.einsum("pgd,pd->pg", gradients, grad_other, optimize=True)
++        scaled_cross = grid.weights * v_cross
++        matrix += np.einsum("p,pg,ph->gh", scaled_cross, projection_other, values, optimize=True)
++        matrix += np.einsum("p,pg,ph->gh", scaled_cross, values, projection_other, optimize=True)
++        return matrix
++
++    matrix_alpha = channel(xc.vrho[0], v_sigma[0, 0], v_sigma[0, 1], grad_alpha, grad_beta)
++    matrix_beta = channel(xc.vrho[1], v_sigma[1, 1], v_sigma[0, 1], grad_beta, grad_alpha)
++    return matrix_alpha, matrix_beta, energy
++
++
+ def run_rks(
+     basis: BasisSet,
+     molecule: Molecule,
+@@ -154,7 +282,7 @@ def run_rks(
+     if electrons % 2 != 0:
+         msg = (
+             f"RKS требует чётного числа электронов (замкнутая оболочка), получено {electrons}. "
+-            "Для открытой оболочки нужен UKS — он не реализован."
++            "Для открытой оболочки используйте run_uks (спиново-поляризованный UKS)."
+         )
+         raise ValueError(msg)
+     n_occupied = electrons // 2

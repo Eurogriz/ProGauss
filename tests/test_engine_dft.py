@@ -68,7 +68,7 @@ from quantumlab.engine.quadrature import (
 from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import default_registry
 from quantumlab.engine.scf import build_integrals, coulomb_matrix, exchange_matrix, run_rhf
-from quantumlab.errors import FunctionalNotFoundError, MethodNotAvailableError
+from quantumlab.errors import FunctionalNotFoundError
 
 WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 HYDROGEN = Path(__file__).parent / "fixtures" / "hydrogen.xyz"

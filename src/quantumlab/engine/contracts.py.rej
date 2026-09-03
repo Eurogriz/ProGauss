@@ -1,0 +1,32 @@
+diff a/src/quantumlab/engine/contracts.py b/src/quantumlab/engine/contracts.py	(rejected hunks)
+@@ -269,7 +307,29 @@ class ExchangeCorrelationFunctional(Protocol):
+             density: плотность ``ρ`` в точках, ``(n_points,)``.
+             density_gradient: ``∇ρ`` в точках, ``(n_points, 3)``. Обязателен для
+                 GGA и выше; LDA-функционал его игнорирует.
+-            spin_polarized: считать ли спиновые каналы раздельно (требует UKS).
++            spin_polarized: флаг сохранён для совместимости; спин-поляризованное
++                вычисление идёт через :meth:`evaluate_spin`, и передача
++                ``True`` отклоняется — иначе «раздельные каналы» молча
++                перестанут быть различимы от полной плотности.
++            tau: кинетическая плотность ``τ(r) = ½ Σ_μν D_μν ∇φ_μ·∇φ_ν`` в
++                точках, ``(n_points,)``. Обязательна для meta-GGA
++                (``requires_tau == True``); LDA и GGA игнорируют.
++        """
++        ...
++
++    def evaluate_spin(
++        self,
++        points: Array,
++        density_spin: Array,
++        density_gradient_spin: Array | None = None,
++    ) -> XcEvaluationSpin:
++        """Спиново-разделённая версия :meth:`evaluate` для UKS.
++
++        Args:
++            points: координаты точек, ``(n_points, 3)``.
++            density_spin: ``(2, n_points)`` — плотности каналов α и β.
++            density_gradient_spin: ``(2, n_points, 3)`` — градиенты каналов.
++                Обязателен для GGA; LDA-функционал игнорирует.
+         """
+         ...
+ 

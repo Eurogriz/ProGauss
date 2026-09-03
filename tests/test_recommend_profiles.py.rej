@@ -1,0 +1,55 @@
+diff a/tests/test_recommend_profiles.py b/tests/test_recommend_profiles.py	(rejected hunks)
+@@ -194,14 +194,49 @@ def test_functional_substitution_chain_cannot_loop() -> None:
+             current = _FUNCTIONAL_SUBSTITUTES.get(current, "")
+ 
+ 
++def test_available_dispersion_is_kept_and_shown(water: Molecule) -> None:
++    """Доступная дисперсия профиля остаётся в плане и видна пользователю.
++
++    Профиль «Стандартный расчёт» обещает PBE0-D3(BJ); D3(BJ) реализован,
++    поэтому поправка не снимается, а попадает в спецификацию — и строка
++    «Дисперсионная поправка: d3bj» присутствует в обоснованиях (§8 ТЗ).
++    """
++    from quantumlab.domain.spec import DispersionCorrection
++
++    resolution = resolve_profile(PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water)
++    lines = resolution.explain("ru")
++    assert resolution.spec.method is not None
++    assert resolution.spec.method.dispersion is DispersionCorrection.D3_BJ
++    assert "Дисперсионная поправка: d3bj" in lines
++    # Доступная поправка не сопровождается объяснением её «снятия».
++    assert not any("не реализована" in line for line in lines)
++
++
+ def test_unavailable_dispersion_is_explained_not_silent(water: Molecule) -> None:
+     """Снятая дисперсия видна в обоснованиях вместе с тем, что это значит.
+ 
+-    Профиль «Стандартный расчёт» обещает PBE0-D3(BJ). D3(BJ) в ядре нет, и
+-    расчёт идёт без поправки; пользователь обязан увидеть и факт, и следствие,
+-    иначе «стандартный расчёт» означал бы не то, что написано (§8 ТЗ).
++    Правило управляется реестром: если в ядре нет D3(BJ), профиль
++    «Стандартный расчёт» обещает PBE0-D3(BJ), и расчёт идёт без поправки;
++    пользователь обязан увидеть и факт, и следствие, иначе «стандартный
++    расчёт» означал бы не то, что написано (§8 ТЗ). Здесь реестр имитирует
++    ядро без D3, чтобы проверить именно ветку снятия.
+     """
+-    resolution = resolve_profile(PrecisionProfile.STANDARD, task=Task.SINGLE_POINT, molecule=water)
++    from dataclasses import replace
++
++    from quantumlab.engine.capabilities import Availability
++
++    registry = default_registry()
++    capability = registry.get("dispersion:d3bj")
++    registry.register(
++        replace(capability, availability=Availability.NOT_IMPLEMENTED, since_version=None),
++        replace=True,
++    )
++    resolution = resolve_profile(
++        PrecisionProfile.STANDARD,
++        task=Task.SINGLE_POINT,
++        molecule=water,
++        registry=registry,
++    )
+     lines = resolution.explain("ru")
+     assert any("Дисперсионная поправка" in line and "не реализована" in line for line in lines)
+     assert resolution.spec.method is not None

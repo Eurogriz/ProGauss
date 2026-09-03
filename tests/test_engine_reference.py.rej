@@ -1,0 +1,104 @@
+diff a/tests/test_engine_reference.py b/tests/test_engine_reference.py	(rejected hunks)
+@@ -415,6 +415,71 @@ def test_uhf_optimization_is_not_rejected_any_more() -> None:
+     assert result.spin_squared is not None
+ 
+ 
++def test_rohf_optimization_of_an_open_shell_converges() -> None:
++    """ROHF-оптимизация открытой оболочки доходит до конца.
++
++    Раньше запрос отклонялся честной ошибкой: реестр ограничивал ROHF
++    энергией в одной точке, а аналитических градиентов не было. Теперь они
++    есть (с фокиан-зависимыми весами релаксации), и оптимизация идёт по
++    поверхности ROHF, а не по силе другого метода.
++    """
++    ch = Molecule.from_xyz(
++        (Path(__file__).parent / "fixtures" / "ch-radical.xyz").read_text(encoding="utf-8"),
++        name="ch",
++        multiplicity=2,
++    )
++    result = _run(
++        molecule=ch,
++        spec=CalculationSpec(
++            task=Task.OPTIMIZATION,
++            method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.ROHF),
++            optimization=OptimizationSpec(coordinates="cartesian"),
++        ),
++    )
++    assert result.converged
++    assert result.final_molecule is not None
++    assert result.optimization_steps is not None and result.optimization_steps > 0
++    # ROHF — собственное состояние Ŝ²: загрязнение отсутствует в точности.
++    assert result.spin_squared is not None
++    assert result.spin_squared == pytest.approx(0.75, abs=1e-10)
++
++
++def test_rohf_frequencies_run_on_the_optimized_geometry() -> None:
++    """Частоты ROHF: оптимизация → частоты на стационарной геометрии.
++
++    Полный вертикальный срез: оптимизатор считает силу по аналитическому
++    градиенту ROHF, а гессиан строится из тех же градиентов. Двухатомник даёт
++    ровно одну колебательную моду; на оптимизированной геометрии она вещественная
++    и предупреждений о нестационарности нет.
++    """
++    ch = Molecule.from_xyz(
++        (Path(__file__).parent / "fixtures" / "ch-radical.xyz").read_text(encoding="utf-8"),
++        name="ch",
++        multiplicity=2,
++    )
++    rohf = MethodSpec(theory=TheoryFamily.HF, basis="sto-3g", spin=SpinTreatment.ROHF)
++    optimized = _run(
++        molecule=ch,
++        spec=CalculationSpec(
++            task=Task.OPTIMIZATION,
++            method=rohf,
++            optimization=OptimizationSpec(coordinates="cartesian"),
++        ),
++    )
++    assert optimized.final_molecule is not None
++    result = _run(
++        molecule=optimized.final_molecule,
++        spec=CalculationSpec(task=Task.FREQUENCIES, method=rohf),
++    )
++    assert len(result.frequencies_cm1) == 1
++    # Минимум поверхности: колебательная мода вещественная (неотрицательная).
++    assert result.frequencies_cm1[0] > 0.0
++    assert result.zero_point_energy_hartree is not None
++    assert not any(
++        warning.key == "warning.frequencies_off_stationary" for warning in result.warnings
++    )
++
++
+ def test_missing_method_spec_is_rejected_with_an_explanation() -> None:
+     """Без явного метода расчёт не запускается.
+ 
+@@ -736,10 +801,15 @@ def test_spin_combination_is_refused_instead_of_crashing(
+     """Ни одно сочетание не проходит валидацию, чтобы потом упасть внутри ядра.
+ 
+     Проверка матрицей, а не по отдельным случаям: раньше DFT с открытой
+-    оболочкой и ROHF с оптимизацией проходили ``assert_supported``, попадали в
+-    ветку RKS/RHF и падали необработанным ``ValueError`` про нечётное число
+-    электронов. Пользователь получал аварийный сбой вместо честного
+-    «недоступно» (§54 ТЗ), а восемь ячеек из восемнадцати вели себя так.
++    оболочкой проходила ``assert_supported``, попадала в ветку RKS и падала
++    необработанным ``ValueError`` про нечётное число электронов. Пользователь
++    получал аварийный сбой вместо честного «недоступно» (§54 ТЗ). (ROHF с
++    оптимизацией раньше отклонялся отдельно — с введением аналитического
++    градиента ROHF это ограничение снято, и шесть ячеек HF×ROHF проходят.)
++
++    С введением UKS открытая оболочка для DFT доступна как ``spin:uhf``;
++    отклоняется только ``DFT + spin:rohf`` — ограниченная открытая оболочка для
++    DFT не определена (открытооболочечный DFT по построению спиново-неразделён).
+ 
+     Утверждение здесь ровно то, которое отличает честный отказ от сбоя: ошибка
+     обязана быть :class:`QuantumLabError`, то есть локализуемой и diagnosable.
+@@ -747,9 +817,7 @@ def test_spin_combination_is_refused_instead_of_crashing(
+     engine = ReferenceEngine()
+     spec = _matrix_spec(task, theory, spin)
+ 
+-    unsupported = (theory is TheoryFamily.DFT and spin is not SpinTreatment.RHF) or (
+-        spin is SpinTreatment.ROHF and task is not Task.SINGLE_POINT
+-    )
++    unsupported = theory is TheoryFamily.DFT and spin is SpinTreatment.ROHF
+     if unsupported:
+         with pytest.raises(CombinationUnavailableError):
+             engine.assert_supported(spec)

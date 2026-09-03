@@ -1,0 +1,10 @@
+diff a/src/quantumlab/server/app.py b/src/quantumlab/server/app.py	(rejected hunks)
+@@ -375,7 +375,7 @@ def _register_catalog_routes(app: FastAPI) -> None:
+         Разбор выполняется при сохранении, поэтому сюда доходят только
+         принятые структуры: отчёт подтверждает, что структура прошла доменные
+         инварианты, и сообщает число электронов — по нему видно, годится ли
+-        расчёт RHF (нечётное число электронов требует UHF/ROHF, которых нет).
++        расчёт RHF (нечётное число электронов требует UHF/ROHF).
+         """
+         locale = locale_from(accept_language)
+         record = services.catalog.get_molecule(molecule_id)

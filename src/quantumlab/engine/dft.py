@@ -157,6 +157,66 @@ class UksResult:
         )
 
 
+@dataclass(slots=True)
+class UksResult:
+    """Результат UKS — спиново-разделённая версия RKS.
+
+    Плотности, энергии и коэффициенты орбиталей ведутся по каналам α и β
+    (как в UHF); обменно-корреляционный член — ``xc_energy`` и доля точного
+    обмена. ``v_xc_alpha``/``v_xc_beta`` — потенциалы каналов на сошедшейся
+    плотности: проверки качества восстанавливают по ним фокианы, не пересчитывая
+    сетку.
+    """
+
+    total_energy: float
+    electronic_energy: float
+    nuclear_repulsion: float
+    xc_energy: float
+    alpha_energies: tuple[float, ...]
+    beta_energies: tuple[float, ...]
+    alpha_coefficients: np.ndarray
+    beta_coefficients: np.ndarray
+    density_alpha: np.ndarray
+    density_beta: np.ndarray
+    s_squared: float
+    converged: bool
+    iterations: int
+    grid_points: int
+    #: Доля точного обмена α (0.25 для PBE0, 0.20 для B3LYP, 0 для чистых).
+    exact_exchange_fraction: float = 0.0
+    #: V_xc^α и V_xc^β на сошедшейся плотности (см. docstring класса).
+    v_xc_alpha: np.ndarray | None = None
+    v_xc_beta: np.ndarray | None = None
+    history: list[ScfHistory] = field(default_factory=list)
+    strategies_used: tuple[str, ...] = ()
+    elapsed_seconds: float = 0.0
+
+    def as_uhf_result(self) -> UhfResult:
+        """Приводит к виду UHF для переиспользования свойств открытой оболочки.
+
+        Спин-орбитальные энергии, плотности и ⟨Ŝ²⟩ — те же величины, что и в
+        UHF; энергия XC не теряется, она лежит в ``UksResult`` и попадает в
+        отчёт отдельно.
+        """
+        return UhfResult(
+            total_energy=self.total_energy,
+            electronic_energy=self.electronic_energy,
+            nuclear_repulsion=self.nuclear_repulsion,
+            alpha_energies=self.alpha_energies,
+            beta_energies=self.beta_energies,
+            alpha_coefficients=self.alpha_coefficients,
+            beta_coefficients=self.beta_coefficients,
+            density_alpha=self.density_alpha,
+            density_beta=self.density_beta,
+            s_squared=self.s_squared,
+            converged=self.converged,
+            iterations=self.iterations,
+            history=list(self.history),
+            strategies_used=self.strategies_used,
+            elapsed_seconds=self.elapsed_seconds,
+        )
+
+
 def xc_matrix_and_energy(
     grid: QuadratureGrid,
     values: np.ndarray,
@@ -442,6 +502,296 @@ def run_rks(
         iterations=iterations,
         grid_points=quadrature.n_points,
         v_xc=v_xc,
+        history=history,
+        strategies_used=tuple(strategies),
+        elapsed_seconds=time.perf_counter() - started,
+    )
+
+
+def run_uks(
+    basis: BasisSet,
+    molecule: Molecule,
+    functional: ExchangeCorrelationFunctional,
+    settings: ScfSettings | None = None,
+    *,
+    integrals: PrecomputedIntegrals | None = None,
+    grid: QuadratureGrid | None = None,
+    grid_preset: GridPreset = GridPreset.FINE,
+) -> UksResult:
+    """Выполняет UKS-расчёт — DFT с разделёнными спиновыми каналами.
+
+    Структура — как в UHF (два фокиана, кулон по полной плотности, обмен по
+    своему каналу), плюс обменно-корреляционный член, как в RKS: потенциал
+    ``V_xc^σ`` строится по спиново-разделённым ``v_ρ^σ`` и ``v_σ^{στ}``.
+
+    Фокиан канала α:
+
+    ``F^α = H + J + V_xc^α − ½α K_α``
+
+    где ``α`` — доля точного обмена функционала (PBE0: 0.25, B3LYP: 0.20).
+    В энергии обменная часть идёт с ¼α:
+
+    ``E = Σ D_tot H + ½ Σ D_tot J + E_xc − ¼α Σ_σ D_σ:K_σ + V_ядер``
+
+    При α = 0 расчёт — «чистый» GGA/LDA в спин-разделённом представлении; при
+    замкнутой оболочке (n_α = n_β) решение обязано совпасть с RKS — это
+    встроенная проверка корректности спинового раздела.
+
+    Точность: сетка и функционалы — те же, что в RKS (см. их ограничения);
+    спин-ядра сверены с LibXC 7.0.0 по 60 случайным точкам до ≤1e−14.
+    """
+    config = settings or ScfSettings()
+    started = time.perf_counter()
+    strategies: list[str] = ["core-hamiltonian-guess"]
+
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+
+    prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+    quadrature = grid if grid is not None else build_grid(molecule, grid_preset)
+    core = prepared.core
+    eri = prepared.eri
+    v_nuc = nuclear_repulsion(molecule)
+    orthogonalizer = canonical_orthogonalizer(prepared.overlap)
+
+    values, gradients = evaluate_basis_with_gradients(basis, molecule, quadrature.points)
+
+    def xc_at(d_alpha: np.ndarray, d_beta: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
+        """Спиновые XC-матрицы и энергия для текущих плотностей."""
+        rho_a = density_at_points(values, d_alpha)
+        rho_b = density_at_points(values, d_beta)
+        grad_a = density_gradient_at_points(values, gradients, d_alpha)
+        grad_b = density_gradient_at_points(values, gradients, d_beta)
+        return xc_matrix_and_energy_spin(
+            quadrature, values, gradients, rho_a, rho_b, grad_a, grad_b, functional
+        )
+
+    def diagonalize(fock_prime: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        symmetric = 0.5 * (fock_prime + fock_prime.T)
+        energies, coefficients_prime = np.linalg.eigh(symmetric)
+        return energies, orthogonalizer @ coefficients_prime, coefficients_prime
+
+    alpha_exchange = functional.exact_exchange_fraction
+    alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
+        orthogonalizer.T @ core @ orthogonalizer
+    )
+    beta_energies, beta_coefficients, beta_prime = (
+        alpha_energies,
+        alpha_coefficients,
+        alpha_prime,
+    )
+    # Стартовая догадка — как в UHF: одинаковые α и β из ядра Гамильтона.
+    # Для замкнутой оболочки это RKS-стартовое решение, для открытой —
+    # Hund-совместимое (лишняя орбиталь занята в α).
+    density_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
+    density_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
+
+    diis_alpha: list[np.ndarray] = []
+    diis_beta: list[np.ndarray] = []
+    error_alpha: list[np.ndarray] = []
+    error_beta: list[np.ndarray] = []
+    history: list[ScfHistory] = []
+    previous_energy = 0.0
+    converged = False
+    iterations = 0
+    level_shift_active = False
+    xc_energy = 0.0
+
+    for iteration in range(1, config.max_iterations + 1):
+        iterations = iteration
+        v_xc_alpha, v_xc_beta, xc_energy = xc_at(density_alpha, density_beta)
+        density_total = density_alpha + density_beta
+        coulomb = coulomb_matrix(density_total, eri)
+        fock_alpha = core + coulomb + v_xc_alpha
+        fock_beta = core + coulomb + v_xc_beta
+        exact_exchange_energy = 0.0
+        if alpha_exchange > 0.0:
+            exchange_alpha = exchange_matrix(density_alpha, eri)
+            exchange_beta = exchange_matrix(density_beta, eri)
+            # E_x^exact = −½α Σ_σ D_σ:K_σ ⇒ ∂E/∂D_σ = −α K_σ. Коэффициент 1 при
+            # K_σ (а не ½, как в RHF): спин-орбиталь занята **один** раз, и
+            # точный обмен UKS — это доля α от UHF-обмена −½Σ_σD_σ:K_σ. Ловушка:
+            # скопировать ½/¼ из RKS — значит потерять фактор 2, невидимый по
+            # сходимости, но сдвигающий энергию гибрида вдвое. В замкнутом
+            # пределе (D_σ = D/2) −½αΣ_σD_σK_σ сворачивается ровно в −¼αD:K RKS.
+            fock_alpha = fock_alpha - alpha_exchange * exchange_alpha
+            fock_beta = fock_beta - alpha_exchange * exchange_beta
+            exact_exchange_energy = (
+                -0.5
+                * alpha_exchange
+                * (
+                    float(np.sum(density_alpha * exchange_alpha))
+                    + float(np.sum(density_beta * exchange_beta))
+                )
+            )
+
+        # E = Σ D_tot H + ½ Σ D_tot J + E_xc − ½α Σ D_σ:K_σ + V_ядер.
+        # XC-член — только E_xc (нелинейный функционал, след D·V_xc не равен
+        # энергии) — то же, что в RKS; кулоновский член здесь с ½, как в RHF,
+        # а не с 1 (это ловушка: Σ_σ D_σF_σ содержит J дважды).
+        energy = (
+            float(np.sum(density_total * core) + 0.5 * np.sum(density_total * coulomb))
+            + xc_energy
+            + exact_exchange_energy
+            + v_nuc
+        )
+        energy_change = energy - previous_energy
+
+        fock_alpha_prime = orthogonalizer.T @ fock_alpha @ orthogonalizer
+        fock_beta_prime = orthogonalizer.T @ fock_beta @ orthogonalizer
+        # Коммутатор — с орбиталями предыдущей диагонализации (как в UHF):
+        # [D', F'], где D' строится из ортогонализированных занятых орбиталей.
+        occupied_alpha = alpha_prime[:, :n_alpha]
+        occupied_beta = beta_prime[:, :n_beta]
+        density_alpha_prime = occupied_alpha @ occupied_alpha.T
+        density_beta_prime = occupied_beta @ occupied_beta.T
+        residual_alpha = density_alpha_prime @ fock_alpha_prime - fock_alpha_prime @ (
+            density_alpha_prime
+        )
+        residual_beta = density_beta_prime @ fock_beta_prime - fock_beta_prime @ (
+            density_beta_prime
+        )
+        diis_error = float(max(np.max(np.abs(residual_alpha)), np.max(np.abs(residual_beta))))
+
+        strategy = "plain"
+        effective_alpha = fock_alpha_prime
+        effective_beta = fock_beta_prime
+
+        if iteration >= config.diis_start:
+            diis_alpha.append(fock_alpha_prime)
+            diis_beta.append(fock_beta_prime)
+            error_alpha.append(residual_alpha)
+            error_beta.append(residual_beta)
+            if len(diis_alpha) > config.diis_space:
+                diis_alpha.pop(0)
+                diis_beta.pop(0)
+                error_alpha.pop(0)
+                error_beta.pop(0)
+            extrapolated_alpha = _diis_extrapolate(diis_alpha, error_alpha)
+            extrapolated_beta = _diis_extrapolate(diis_beta, error_beta)
+            if extrapolated_alpha is not None and extrapolated_beta is not None:
+                effective_alpha = extrapolated_alpha
+                effective_beta = extrapolated_beta
+                strategy = "diis"
+                if "diis" not in strategies:
+                    strategies.append("diis")
+
+        if level_shift_active and diis_error < config.level_shift_release:
+            level_shift_active = False
+            diis_alpha.clear()
+            diis_beta.clear()
+            error_alpha.clear()
+            error_beta.clear()
+            strategies.append("level-shift-released")
+
+        stalled = (
+            len(history) >= config.diis_space + config.diis_start
+            and diis_error > config.stall_ratio * history[-config.diis_space].diis_error
+            and diis_error > config.density_tolerance
+        )
+        if stalled and not level_shift_active:
+            level_shift_active = True
+            strategies.append("level-shift")
+        if level_shift_active:
+            identity = np.eye(fock_alpha_prime.shape[0])
+            effective_alpha = effective_alpha + config.level_shift * (
+                identity - occupied_alpha @ occupied_alpha.T
+            )
+            effective_beta = effective_beta + config.level_shift * (
+                identity - occupied_beta @ occupied_beta.T
+            )
+            strategy = "level-shift"
+
+        alpha_energies, alpha_coefficients, alpha_prime = diagonalize(effective_alpha)
+        beta_energies, beta_coefficients, beta_prime = diagonalize(effective_beta)
+        new_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
+        new_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
+
+        regressed = iteration > 1 and energy_change > 0.0
+        if iteration <= config.damping_rounds or (regressed and not level_shift_active):
+            new_alpha = (
+                config.damping_factor * density_alpha + (1.0 - config.damping_factor) * new_alpha
+            )
+            new_beta = config.damping_factor * density_beta + (1.0 - config.damping_factor) * (
+                new_beta
+            )
+            diis_alpha.clear()
+            diis_beta.clear()
+            error_alpha.clear()
+            error_beta.clear()
+            strategy = "damping"
+            if "damping" not in strategies:
+                strategies.append("damping")
+
+        density_change = float(
+            max(np.max(np.abs(new_alpha - density_alpha)), np.max(np.abs(new_beta - density_beta)))
+        )
+        history.append(
+            ScfHistory(
+                iteration=iteration,
+                energy=energy,
+                energy_change=energy_change,
+                density_change=density_change,
+                diis_error=diis_error,
+                strategy=strategy,
+            )
+        )
+        previous_energy = energy
+        density_alpha = new_alpha
+        density_beta = new_beta
+
+        if (
+            iteration > 1
+            and abs(energy_change) < config.energy_tolerance
+            and diis_error < config.density_tolerance
+        ):
+            converged = True
+            break
+
+    v_xc_alpha, v_xc_beta, xc_energy = xc_at(density_alpha, density_beta)
+    density_total = density_alpha + density_beta
+    coulomb = coulomb_matrix(density_total, eri)
+    fock_alpha = core + coulomb + v_xc_alpha
+    fock_beta = core + coulomb + v_xc_beta
+    exact_exchange_energy = 0.0
+    if alpha_exchange > 0.0:
+        exchange_alpha = exchange_matrix(density_alpha, eri)
+        exchange_beta = exchange_matrix(density_beta, eri)
+        fock_alpha = fock_alpha - alpha_exchange * exchange_alpha
+        fock_beta = fock_beta - alpha_exchange * exchange_beta
+        exact_exchange_energy = (
+            -0.5
+            * alpha_exchange
+            * (
+                float(np.sum(density_alpha * exchange_alpha))
+                + float(np.sum(density_beta * exchange_beta))
+            )
+        )
+    total = (
+        float(np.sum(density_total * core) + 0.5 * np.sum(density_total * coulomb))
+        + xc_energy
+        + exact_exchange_energy
+        + v_nuc
+    )
+    return UksResult(
+        total_energy=total,
+        electronic_energy=total - v_nuc,
+        nuclear_repulsion=v_nuc,
+        xc_energy=xc_energy,
+        exact_exchange_fraction=alpha_exchange,
+        alpha_energies=tuple(float(value) for value in alpha_energies),
+        beta_energies=tuple(float(value) for value in beta_energies),
+        alpha_coefficients=alpha_coefficients,
+        beta_coefficients=beta_coefficients,
+        density_alpha=density_alpha,
+        density_beta=density_beta,
+        s_squared=spin_contamination(
+            alpha_coefficients, beta_coefficients, n_alpha, n_beta, prepared.overlap
+        ),
+        converged=converged,
+        iterations=iterations,
+        grid_points=quadrature.n_points,
+        v_xc_alpha=v_xc_alpha,
+        v_xc_beta=v_xc_beta,
         history=history,
         strategies_used=tuple(strategies),
         elapsed_seconds=time.perf_counter() - started,

@@ -1,0 +1,14 @@
+diff a/tests/test_crosscheck_pyscf.py b/tests/test_crosscheck_pyscf.py	(rejected hunks)
+@@ -34,10 +34,10 @@ from quantumlab.engine.basis import build_basis
+ from quantumlab.engine.constants import angstrom_to_bohr
+ from quantumlab.engine.dft import run_rks
+ from quantumlab.engine.functional import get_functional
+-from quantumlab.engine.gradients import rks_gradient, uhf_gradient
++from quantumlab.engine.gradients import rks_gradient, rohf_gradient, uhf_gradient
+ from quantumlab.engine.integrals import build_dipole_integrals, build_overlap
+ from quantumlab.engine.quadrature import build_grid
+-from quantumlab.engine.scf import ScfSettings, run_rhf, run_uhf
++from quantumlab.engine.scf import ScfSettings, run_rhf, run_rohf, run_uhf
+ 
+ pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
+ 

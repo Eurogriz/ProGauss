@@ -253,6 +253,33 @@ class XcEvaluationSpin:
     vtau: Array | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class XcEvaluationSpin:
+    """Спиново-разделённая XC-энергия и потенциалы в точках сетки (UKS).
+
+    Каналы — ось 0: ``[0]`` = α, ``[1]`` = β. Обозначения — те же, что у
+    :class:`XcEvaluation`, но производные берутся от энергии **на единицу
+    объёма** ``E_V(r) = (ρ^α + ρ^β)·ε_xc`` по соответствующей переменной:
+
+    Attributes:
+        energy_density: ``ε_xc(r)`` — энергия на один электрон (по полной
+            плотности). Энергия считается как ``Σ_g w_g (ρ^α + ρ^β) ε_xc``;
+            величина одна на оба канала, потому что ``ε_xc`` — функция полной
+            системы, а не сумма двух независимых функционалов.
+        vrho: ``(2, n_points)`` — ``∂E_V/∂ρ^σ``. В фокиан канала α входит
+            строка ``[0]``, в β — строка ``[1]``.
+        vsigma: ``(2, 2, n_points)`` — ``∂E_V/∂s_στ``, где
+            ``s_στ = ∇ρ^σ·∇ρ^τ``; ``None`` для LDA. Диагональ — производные по
+            собственным градиентам каналов, внедиагональ — по смешанным.
+        vtau: ``∂E_V/∂τ`` — не используется пока (meta-GGA вне текущего среза).
+    """
+
+    energy_density: Array
+    vrho: Array
+    vsigma: Array | None = None
+    vtau: Array | None = None
+
+
 @runtime_checkable
 class ExchangeCorrelationFunctional(Protocol):
     """Обменно-корреляционный функционал (§5 ТЗ).
@@ -281,6 +308,16 @@ class ExchangeCorrelationFunctional(Protocol):
         """Доля точного обмена (0 для LDA/GGA, 0.25 для PBE0, …)."""
         ...
 
+    @property
+    def requires_tau(self) -> bool:
+        """Нужен ли функционалу кинетический функционал ``τ`` (meta-GGA).
+
+        Решатель, видя ``True``, вычисляет ``τ(r) = ½ Σ_μν D_μν ∇φ_μ·∇φ_ν``
+        на сетке и передаёт его в :meth:`evaluate`; LDA и GGA всегда ``False``
+        и ``tau`` игнорируют.
+        """
+        ...
+
     def evaluate(
         self,
         points: Array,
@@ -288,6 +325,7 @@ class ExchangeCorrelationFunctional(Protocol):
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Вычисляет ``ε_xc`` и потенциалы в точках сетки.
 

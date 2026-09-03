@@ -45,6 +45,19 @@ cases:
     runs: 3
     warmup: 1
 
+  # ROHF-градиент радикала CH: фиксация стоимости фокиан-зависимых весов
+  # релаксации (базовый ERI + сборка Fc/F^α/F^β) против RHF-градиента.
+  - id: ch-rohf-sto3g-grad
+    suite: small
+    molecule: tests/fixtures/ch-radical.xyz
+    multiplicity: 2
+    spec:
+      task: single_point
+      method: { theory: hf, basis: sto-3g, spin: rohf }
+    measure_gradient: true
+    runs: 3
+    warmup: 1
+
   - id: water-rhf-631g-sp
     suite: small
     molecule: tests/fixtures/water.xyz
@@ -73,6 +86,23 @@ cases:
       task: optimization
       method: { theory: hf, basis: sto-3g }
       optimization: { coordinates: cartesian, max_steps: 40 }
+    runs: 3
+    warmup: 1
+
+  # UKS-точка радикала CH: фиксирует стоимость спиново-поляризованного DFT —
+  # два канала SCF + GGA-сетка (∇ρ^α, ∇ρ^β, σ), путь, которого нет у RKS.
+  # Градиент здесь не измеряется: ветвь measure_gradient пока знает только HF.
+  # Ставится ПОСЛЕДНИМ в наборе: пиковая память DFT-сетки (~370 МБ) выше, чем у
+  # всех HF-кейсов, а пик в отчёте — монотонный максимум по потомкам (см. README);
+  # иначе его память приписалась бы кейсам, идущим после.
+  - id: ch-uks-pbe-sto3g-sp
+    suite: small
+    molecule: tests/fixtures/ch-radical.xyz
+    multiplicity: 2
+    spec:
+      task: single_point
+      method: { theory: dft, basis: sto-3g, functional: pbe, spin: uhf }
+      grid: { preset: fine }
     runs: 3
     warmup: 1
 

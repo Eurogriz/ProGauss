@@ -1,0 +1,13 @@
+diff a/pyproject.toml b/pyproject.toml	(rejected hunks)
+@@ -101,6 +101,11 @@ ignore = [
+ [tool.ruff.lint.per-file-ignores]
+ "tests/**" = ["ANN", "D"]
+ "docs/**" = ["ALL"]
++# xc_spin_cores — механическая транскрипция C (maple2c) libxc: имена функций и
++# аргументов, длина строк формул и докстринги — из исходного C-кода и меняться
++# не должны (см. docstring модуля). Стилевые правила отключены, корректностные
++# (F, B, W) — нет.
++"src/quantumlab/engine/xc_spin_cores.py" = ["ANN", "ARG", "D", "E501", "N"]
+ 
+ [tool.ruff.lint.pydocstyle]
+ convention = "google"
