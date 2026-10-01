@@ -87,5 +87,6 @@ class Capability:
     def describe(self, locale: str = DEFAULT_LOCALE) -> str:
         """Локализованное пояснение статуса — для раздела «База методов»."""
         if self.availability is Availability.PARTIAL:
-            return t(self.notes_key, locale, scope="; ".join(self.limitations))
+            scope = "; ".join(item.rstrip(".") for item in self.limitations)
+            return t(self.notes_key, locale, scope=scope)
         return t(self.notes_key, locale)

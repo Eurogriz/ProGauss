@@ -148,7 +148,7 @@ def _add_calculation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--basis", default=None, help="явный базис, например def2-tzvp")
     parser.add_argument(
         "--dispersion",
-        choices=("none", "d3bj", "d3zero"),
+        choices=("none", "d3bj", "d3zero", "d4"),
         default="none",
         help=(
             "дисперсионная поправка (экспертный режим: только с явным "

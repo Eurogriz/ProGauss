@@ -280,10 +280,39 @@ def test_cli_run_reports_unavailable_task_honestly(
     assert not store.result_path(store.list()[0].id).exists()
 
 
+@pytest.mark.parametrize("correction", ["d3bj", "d3zero", "d4"])
+def test_cli_run_applies_dispersion_correction(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], correction: str
+) -> None:
+    """``--dispersion`` принимает все реализованные поправки и кладёт вклад в результат."""
+    code = main(
+        [
+            "--lang",
+            "ru",
+            "--data-dir",
+            str(tmp_path),
+            "run",
+            str(WATER),
+            "--task",
+            "energy",
+            "--method",
+            "hf",
+            "--basis",
+            "sto-3g",
+            "--dispersion",
+            correction,
+        ]
+    )
+    assert code == 0, capsys.readouterr().out
+    store = LocalJobStore(tmp_path)
+    result = json.loads(store.result_path(store.list()[0].id).read_text(encoding="utf-8"))
+    assert result["dispersion_energy_hartree"] < 0.0
+
+
 def test_cli_run_rejects_unimplemented_functional(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """TPSSh не реализован: запрос отклоняется до создания задания, а не в середине расчёта."""
+    """M06-2X не реализован: запрос отклоняется до создания задания, а не в середине расчёта."""
     code = main(
         [
             "--lang",
@@ -297,7 +326,7 @@ def test_cli_run_rejects_unimplemented_functional(
             "--method",
             "dft",
             "--functional",
-            "tpssh",
+            "m062x",
             "--basis",
             "sto-3g",
         ]

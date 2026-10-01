@@ -153,8 +153,9 @@ _METHODS: tuple[tuple[str, str], ...] = (
 #: Статус «реализован/заявлено» реестр читает из ``FUNCTIONALS`` (см. ниже):
 #: здесь только справочные имена и классы, чтобы «заявлено» и «умеет» не
 #: разъезжались. Реализованы SVWN, PBE, BLYP, PBE0, B3LYP (сверены с LibXC и
-#: PySCF, в том числе со спиновой поляризацией); meta-GGA и дальнодействующие
-#: гибриды — заявлены в ТЗ, кода нет.
+#: PySCF, в том числе со спиновой поляризацией) и meta-GGA гибрид TPSSh (только
+#: RKS, энергия в точке); M06, M06-2X и дальнодействующие гибриды — заявлены в
+#: ТЗ, кода нет.
 _FUNCTIONALS: tuple[tuple[str, str, str], ...] = (
     ("svwn", "SVWN (Слейтер + VWN-5)", "lda"),
     ("lda", "LDA (синоним SVWN)", "lda"),
@@ -279,10 +280,12 @@ def _method_limitations(name: str) -> tuple[str, ...]:
         )
     if name == "dft":
         return (
-            "Реализованы SVWN (LDA), PBE и BLYP (GGA), PBE0 и B3LYP (гибриды); "
-            "meta-GGA (TPSSh, M06, M06-2X) и дальнодействующие гибриды "
-            "(ωB97X, ωB97X-D) не реализованы.",
-            "Дисперсионные поправки: D3 реализован, D4 не реализован.",
+            "Реализованы SVWN (LDA), PBE и BLYP (GGA), PBE0 и B3LYP (гибриды), "
+            "TPSSh (meta-GGA гибрид, только RKS и энергия в точке); meta-GGA "
+            "M06 и M06-2X и дальнодействующие гибриды (ωB97X, ωB97X-D) не "
+            "реализованы.",
+            "Дисперсионные поправки: D3 (BJ, zero) и D4 реализованы для "
+            "функционалов с обученными параметрами.",
             "Замкнутая оболочка — RKS, открытая — спиново-поляризованный UKS "
             "(spin:uhf); для DFT нет ограниченной открытой оболочки "
             "(spin:rohf отклоняется).",
@@ -310,6 +313,17 @@ def _functional_limitations(name: str) -> tuple[str, ...]:
             "GGA: зависит от плотности и её градиента; кинетическая плотность "
             "(meta-GGA) не используется."
         )
+    elif functional.functional_class == "mgga":
+        limits.append(
+            "meta-GGA: зависит от плотности, её градиента и кинетической плотности τ; "
+            f"доля точного обмена — {functional.exact_exchange_fraction:g}."
+        )
+        limits.append(
+            "Только замкнутая оболочка (RKS) и энергия в одной точке: UKS, "
+            "аналитический градиент (оптимизация, частоты) для meta-GGA не реализованы "
+            "и отклоняются, а не подменяются приближением."
+        )
+        return tuple(limits)
     else:
         limits.append(
             f"Гибрид: {functional.exact_exchange_fraction:g} точного обмена; "
@@ -445,6 +459,11 @@ def default_registry() -> CapabilityRegistry:
                 since_version=__version__ if availability.is_usable else None,
                 limitations=limitations,
                 metadata={"label": label},
+                notes_key=(
+                    "capability.note.partial"
+                    if availability is Availability.PARTIAL
+                    else "capability.note.not_implemented"
+                ),
             )
         )
 
@@ -463,6 +482,9 @@ def default_registry() -> CapabilityRegistry:
                 since_version=__version__ if implemented else None,
                 limitations=(_functional_limitations(name) if implemented else ()),
                 metadata={"label": label, "class": functional_class},
+                notes_key=(
+                    "capability.note.partial" if implemented else "capability.note.not_implemented"
+                ),
             )
         )
 
@@ -536,12 +558,12 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for correction in DispersionCorrection:
-        # D3 реализован, но область применения уже, чем у остальных методов:
-        # элементы H–F, Si, P, S, Cl, Br, I и функционалы с обученными
-        # параметрами (hf, pbe, pbe0, blyp, b3lyp). За это — PARTIAL с
-        # описанными ограничениями, а не молчаливый IMPLEMENTED (§54 ТЗ):
-        # для LDA (svwn) D3-параметры не существуют, и запрос отклоняется.
-        # D4 по-прежнему не реализован.
+        # D3 и D4 реализованы, но область применения уже, чем у остальных
+        # методов: у D3 — элементы H–F, Si, P, S, Cl, Br, I и функционалы
+        # (hf, pbe, pbe0, blyp, b3lyp); у D4 — обученные функционалы dftd4
+        # v4.0.1 (включая hf). За это — PARTIAL с описанными ограничениями, а
+        # не молчаливый IMPLEMENTED (§54 ТЗ): для LDA (svwn) обученных
+        # параметров не существует, и запрос отклоняется.
         if correction is DispersionCorrection.NONE:
             availability = Availability.IMPLEMENTED
             since_version = __version__
@@ -557,8 +579,22 @@ def default_registry() -> CapabilityRegistry:
                 "такой запрос отклоняется, а не приближается.",
             )
             notes_key = "capability.note.dispersion_d3"
+        elif correction is DispersionCorrection.D4:
+            availability = Availability.PARTIAL
+            since_version = __version__
+            limitations = (
+                "Область применения: элементы H, B, C, N, O, F, Si, P, S, "
+                "Cl, Br, I (поддержка домена); сама модель D4 покрывает "
+                "элементы 1..103 и 118 обученных функционалов dftd4 v4.0.1, "
+                "включая hf.",
+                "Для LDA (svwn) обученных параметров D4 не существует — "
+                "такой запрос отклоняется, а не приближается.",
+            )
+            notes_key = "capability.note.dispersion_d4"
         else:
-            availability = Availability.NOT_IMPLEMENTED
+            # Защита от будущих членов enum: новый член без явной ветки не
+            # сможет молча пройти как IMPLEMENTED.
+            availability = Availability.NOT_IMPLEMENTED  # type: ignore[unreachable]
             since_version = None
             limitations = ()
             notes_key = "capability.note.not_implemented"

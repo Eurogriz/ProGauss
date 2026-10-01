@@ -67,7 +67,11 @@ from quantumlab.engine.checkpoint import (
 )
 from quantumlab.engine.contracts import EngineRequest, ProgressReporter
 from quantumlab.engine.dft import RksResult, UksResult, run_rks, run_uks
-from quantumlab.engine.dispersion import DispersionContribution, dftd3_contribution
+from quantumlab.engine.dispersion import (
+    DispersionContribution,
+    dftd3_contribution,
+    dftd4_contribution,
+)
 from quantumlab.engine.functional import (
     density_at_points,
     evaluate_basis,
@@ -272,6 +276,7 @@ class ReferenceEngine:
         """
         spec = request.spec
         basis_name = self.assert_supported(spec)
+        self._assert_meta_gga_open_shell(spec, request.molecule)
         if spec.task is Task.OPTIMIZATION:
             return self._run_optimization(request, basis_name, progress=progress)
         if spec.task is Task.FREQUENCIES:
@@ -1087,6 +1092,22 @@ class ReferenceEngine:
         if method is None:
             return
 
+        if (
+            method.theory is TheoryFamily.DFT
+            and method.functional is not None
+            and spec.task is not Task.SINGLE_POINT
+            and get_functional(method.functional).requires_tau
+        ):
+            # Аналитического градиента meta-GGA нет (нужны производные τ по
+            # ядрам), а оптимизация и частоты строятся на градиенте: без
+            # явного отказа они упали бы глубоко внутри решателя.
+            raise CombinationUnavailableError(
+                f"DFT/{method.functional} + {spec.task.value}",
+                "Для meta-GGA-функционала реализована только энергия в одной "
+                "точке: аналитический градиент (нужный оптимизации и частотам) "
+                "не реализован.",
+            )
+
         if method.theory is TheoryFamily.DFT and method.spin is SpinTreatment.ROHF:
             # В ``combination`` — только технические идентификаторы: движок по
             # устройству не знает локали вызывающей стороны, а подставлять
@@ -1098,6 +1119,28 @@ class ReferenceEngine:
                 "открытооболочечный DFT считается как спиново-поляризованный "
                 "UKS. Для открытой оболочки используйте "
                 "spin:uhf.",
+            )
+
+    def _assert_meta_gga_open_shell(self, spec: CalculationSpec, molecule: Molecule) -> None:
+        """Отклоняет meta-GGA для открытой оболочки: UKS с ``τ`` не реализован.
+
+        Нужна молекула, а не только спецификация: открытая оболочка
+        определяется числом электронов и мультиплетностью системы.
+        """
+        method = spec.method
+        if (
+            method is None
+            or method.theory is not TheoryFamily.DFT
+            or method.functional is None
+            or not get_functional(method.functional).requires_tau
+        ):
+            return
+        if molecule.n_electrons % 2 != 0 or molecule.multiplicity != 1:
+            raise CombinationUnavailableError(
+                f"DFT/{method.functional} + open-shell",
+                "Для meta-GGA-функционала реализована только замкнутая оболочка "
+                "(RKS): спин-поляризованный UKS с кинетической плотностью не "
+                "реализован. Используйте GGA или гибрид (PBE, BLYP, PBE0, B3LYP).",
             )
 
     def assert_supported(self, spec: CalculationSpec) -> str:
@@ -1145,7 +1188,7 @@ class ReferenceEngine:
 def _dispersion_contribution(
     spec: CalculationSpec, molecule: Molecule
 ) -> DispersionContribution | None:
-    """Вклад D3 для текущей геометрии; ``None``, если поправка не запрошена.
+    """Вклад дисперсионной поправки (D3 или D4); ``None``, если не запрошена.
 
     Вызывается на каждой геометрии расчёта (в оптимизации — на каждом шаге),
     поэтому все проверки отклоняющего типа (функционал без параметров,
@@ -1156,6 +1199,8 @@ def _dispersion_contribution(
     if method is None or method.dispersion is DispersionCorrection.NONE:
         return None
     functional = None if method.theory is TheoryFamily.HF else method.functional
+    if method.dispersion is DispersionCorrection.D4:
+        return dftd4_contribution(molecule, functional)
     return dftd3_contribution(molecule, method.dispersion, functional)
 
 
@@ -1166,7 +1211,7 @@ _DISPERSION_FORCE_TOL: float = 1e-8
 
 
 def _dispersion_check(contribution: DispersionContribution) -> QualityCheck:
-    """Проверка сохранения силы в D3-градиенте (§26 ТЗ)."""
+    """Проверка сохранения силы в градиенте дисперсионной поправки (§26 ТЗ)."""
     net_force = float(np.max(np.abs(contribution.gradient.sum(axis=0))))
     return QualityCheck(
         name_key="quality.dispersion_force_conservation",

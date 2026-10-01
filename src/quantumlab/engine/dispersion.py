@@ -48,13 +48,17 @@ import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import DispersionCorrection
+from quantumlab.engine import dispersion_d4_data as d4d
 from quantumlab.engine import dispersion_data as dd
 from quantumlab.engine.constants import angstrom_to_bohr
+from quantumlab.engine.dispersion_d4 import DFTD4
 
 __all__ = [
     "DispersionContribution",
     "dftd3_contribution",
     "dftd3_functionals",
+    "dftd4_contribution",
+    "dftd4_functionals",
 ]
 
 #: Квадрат пространственного отсечения (bohr²) для парной энергии.
@@ -73,10 +77,10 @@ _MIN_DISTANCE_SQ: float = 1e-12
 
 @dataclass(frozen=True)
 class DispersionContribution:
-    """Вклад поправки D3 в энергию и ядерный градиент.
+    """Вклад дисперсионной поправки (D3 или D4) в энергию и ядерный градиент.
 
-    ``energy_hartree`` — полная D3-энергия (отрицательная), хартри;
-    ``gradient`` — вклад D3 в градиент энергии, форма ``(n_atoms, 3)``,
+    ``energy_hartree`` — полная дисперсионная энергия (отрицательная), хартри;
+    ``gradient`` — вклад поправки в градиент энергии, форма ``(n_atoms, 3)``,
     хартри/bohr, ориентирован так же, как градиент SCF (движок складывает
     их без преобразований).
     """
@@ -408,4 +412,49 @@ def dftd3_contribution(
         functional=name,
         energy_hartree=energy,
         gradient=gradient,
+    )
+
+
+def dftd4_functionals() -> tuple[str, ...]:
+    """Функционалы с обученными параметрами D4 (``hf`` — Хартри–Фок)."""
+    return tuple(d4d.D4_DAMPING_PARAMS)
+
+
+def dftd4_contribution(molecule: Molecule, functional: str | None) -> DispersionContribution:
+    """Энергия и аналитический градиент поправки DFT-D4 для молекулы.
+
+    Модель — ``bj-eeq-atm`` (по умолчанию dftd4): BJ-затухание, частичные
+    заряды из EEQ (eeq2019) с учётом полного заряда молекулы, трёхчленный
+    вклад C9. Градиент включает явную геометрию, связь через координационные
+    числа и через заряды (CP-решение ``dq/dR``), э/bohr.
+
+    ``functional`` — обменно-корреляционный функционал (``None`` для HF):
+    параметры затухания обучаются на конкретный функционал (§54 ТЗ).
+
+    Отклоняет (``ValueError`` до начала расчёта): функционал без обученных
+    параметров (включая LDA) и элементы вне области модели.
+    """
+    name = "hf" if functional is None else functional.lower()
+    known = dftd4_functionals()
+    if name not in known:
+        msg = (
+            f"D4 не обучен для функционала «{name}». "
+            "Это не приближение, а недоступный метод (§54 ТЗ). "
+            f"Обучено функционалов: {len(known)} (см. D4_DAMPING_PARAMS)."
+        )
+        raise ValueError(msg)
+    zs, pos = _atom_arrays(molecule)
+    model = DFTD4(
+        [int(z) for z in zs],
+        pos,
+        xc=name,
+        total_charge=float(molecule.charge),
+    )
+    energy = model.energy()
+    gradient = model.gradient()
+    return DispersionContribution(
+        model="d4",
+        functional=name,
+        energy_hartree=float(energy),
+        gradient=np.asarray(gradient, dtype=float),
     )

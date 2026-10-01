@@ -409,6 +409,16 @@ def density_gradient_at_points(
     return np.asarray(2.0 * np.einsum("pgd,gp->pd", gradients, contracted, optimize=True))
 
 
+def kinetic_density_at_points(gradients: np.ndarray, density: np.ndarray) -> np.ndarray:
+    """Кинетическая плотность ``τ(r)`` в точках сетки, форма ``(n_points,)``.
+
+    ``τ = ½ Σ_μν D_μν ∇φ_μ·∇φ_ν`` — соглашение libxc/PySCF (``½`` включено в
+    определение; для замкнутой оболочки это ``½ Σ_i n_i |∇ψ_i|²``).
+    """
+    contracted = np.einsum("pgd,gh->phd", gradients, density, optimize=True)
+    return np.asarray(0.5 * np.einsum("phd,phd->p", contracted, gradients, optimize=True))
+
+
 class LdaExchange:
     """Обмен Слэтера (ЛДА, Дирак).
 
@@ -448,8 +458,11 @@ class LdaExchange:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциал обмена Слэтера в точках сетки."""
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -675,6 +688,7 @@ class Svwn:
     functional_class: str = "lda"
     is_hybrid: bool = False
     exact_exchange_fraction: float = 0.0
+    requires_tau: bool = False
 
     def __init__(self) -> None:
         """Собирает обменную и корреляционную части."""
@@ -688,8 +702,11 @@ class Svwn:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциал обмена+корреляции; см. протокол."""
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -1199,8 +1216,11 @@ class Pbe:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Энергия и потенциалы PBE; см. протокол."""
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -1268,12 +1288,15 @@ class Pbe0:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """DFT-часть PBE0; см. протокол.
 
         Обмен умножается на ¾ — именно эта часть сочетается с ¼ точного обмена.
         Корреляция входит целиком: в PBE0 её не масштабируют.
         """
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -1692,8 +1715,11 @@ class Blyp:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Сумма обмена B88 и корреляции LYP."""
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -1767,8 +1793,11 @@ class B3lyp:
         density_gradient: Array | None = None,
         *,
         spin_polarized: bool = False,
+        tau: Array | None = None,
     ) -> XcEvaluation:
         """Полунелокальная часть B3LYP; точный обмен подставляет решатель."""
+        del tau
+
         if spin_polarized:
             msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
             raise ValueError(msg)
@@ -1820,19 +1849,711 @@ class B3lyp:
         )
 
 
+# --------------------------------------------------------------------------- #
+# Meta-GGA: TPSS-x, PBC-корреляция (MGGA_C_TPSS) и гибрид TPSSh
+# --------------------------------------------------------------------------- #
+#
+# Оба ядра сверены с оракулом (PySCF 2.14.0, libxc 7.0.0) на 500 физических
+# точках по энергии и всем трём потенциалам (worst rel 4.8e-13 / 1.6e-8):
+#
+# * обмен TPSS (MGGA_X_TPSS) — формула из maple-источника libxc (tpss_x.mpl),
+#   параметры vanilla TPSS {b=0.40, c=1.59096, e=1.537, kappa=0.8040,
+#   mu=0.21951, BLOC_a=2, BLOC_b=0};
+# * корреляция PBC (в libxc — MGGA_C_TPSS) — PBE-корреляция на модифицированном
+#   PW92-ядре плюс поправка кинетической плотности (см. :class:`TpssCorrelation`).
+#
+# Область применения — физический регион σ ≤ 8ρτ (условие FHC). За его
+# пределами oракул не считает формулу «как есть»: оба ядра libxc вычисляют её
+# при σ' = min(σ, 8ρτ) и возвращают производные по **свободной** переменной в
+# клампованной точке (численно подтверждено: совпадение до 17 цифр на энергии
+# и всех трёх потенциалах). Реализация повторяет ровно это поведение — иначе
+# расхождение с PySCF появлялось бы на хвостовых точках сетки, где σ/(8ρτ) > 1.
+
+
+class _MGGA3:
+    """Значение и частные производные по ``(ρ, σ, τ)`` — мини-автодифф.
+
+    Meta-GGA-ядра — выражения с корнями, степенями и логарифмами; писать
+    производные по трём переменным от каждого промежуточного величина руками —
+    тот самый класс ошибок, который у GGA-ядер давал расхождение потенциала с
+    энергией (см. docstring :class:`PbeCorrelation`). Здесь производные —
+    **следствие того же кода**, что считает энергию: каждое значение несёт
+    свои частные, и алгебраические операции распространяют их по правилу
+    цепочки. Ядро записывается один раз, «как формула», и производные не могут
+    разойтись с энергией.
+
+    ``v`` — значения в точках сетки, ``(n_points,)``; ``d`` — частные
+    ``(3, n_points)``: ``d[0]`` — по ρ, ``d[1]`` — по σ, ``d[2]`` — по τ.
+    """
+
+    __slots__ = ("d", "v")
+
+    def __init__(self, v: np.ndarray, d: np.ndarray) -> None:
+        self.v = np.asarray(v, dtype=float)
+        self.d = np.asarray(d, dtype=float)
+
+    def _new(self, v: np.ndarray, d: np.ndarray) -> _MGGA3:
+        return _MGGA3(v, d)
+
+    def __neg__(self) -> _MGGA3:
+        return self._new(-self.v, -self.d)
+
+    def __add__(self, other: _MGGA3 | float) -> _MGGA3:
+        if isinstance(other, _MGGA3):
+            return self._new(self.v + other.v, self.d + other.d)
+        return self._new(self.v + other, self.d)
+
+    def __radd__(self, other: float) -> _MGGA3:
+        return self.__add__(other)
+
+    def __sub__(self, other: _MGGA3 | float) -> _MGGA3:
+        if isinstance(other, _MGGA3):
+            return self._new(self.v - other.v, self.d - other.d)
+        return self._new(self.v - other, self.d)
+
+    def __rsub__(self, other: float) -> _MGGA3:
+        return self._new(other - self.v, -self.d)
+
+    def __mul__(self, other: _MGGA3 | float) -> _MGGA3:
+        if isinstance(other, _MGGA3):
+            return self._new(self.v * other.v, self.v * other.d + self.d * other.v[None, :])
+        return self._new(self.v * other, self.d * other)
+
+    def __rmul__(self, other: float) -> _MGGA3:
+        return self.__mul__(other)
+
+    def __truediv__(self, other: _MGGA3 | float) -> _MGGA3:
+        if isinstance(other, _MGGA3):
+            denom = other.v**2
+            return self._new(
+                self.v / other.v, (self.d * other.v[None, :] - self.v * other.d) / denom[None, :]
+            )
+        return self._new(self.v / other, self.d / other)
+
+    def __rtruediv__(self, other: float) -> _MGGA3:
+        denom = self.v**2
+        return self._new(other / self.v, -other * self.d / denom[None, :])
+
+    def power(self, n: float) -> _MGGA3:
+        """``x^n`` при **константном** n: d(x^n)/dx = n·x^{n−1}·dx.
+
+        Дробные и отрицательные степени допустимы только для положительно
+        неотрицательных аргументов — в ядрах ниже все они по построению таковы
+        (ρ > 0, σ', τ ≥ 0); в хвостах сетки промежуточные значения могут
+        пойти в ∞, но выходные величины маскируются по ``ρ > _DENSITY_FLOOR``.
+        """
+        return self._new(self.v**n, n * self.v ** (n - 1.0) * self.d)
+
+    def __pow__(self, n: float) -> _MGGA3:
+        return self.power(n)
+
+    def sqrt(self) -> _MGGA3:
+        return self.power(0.5)
+
+    def log(self) -> _MGGA3:
+        """``ln(x)``, x > 0: d = dx/x.
+
+        История: метод назывался ``log1p``, но считал
+        именно ``ln(x)`` (не ``ln(1+x)``) — это ломало PBC-канал
+        ``γφ³·ln(1 + (1−g_sat)·E)`` на ~2.5 % энергии. Имя теперь
+        совпадает с математикой; ``ln(1+x)`` собирается явно как
+        ``(1.0 + x).log()``.
+        """
+        return self._new(np.log(self.v), self.d / self.v[None, :])
+
+    def expm1(self) -> _MGGA3:
+        """``exp(x) − 1``.
+
+        Производная: ``d = exp(x)·dx = (out + 1)·dx`` — ``exp(x)`` равен
+        **выходу** плюс единица, а не входу плюс единица.
+        """
+        ev = np.expm1(self.v)
+        return self._new(ev, (ev + 1.0) * self.d)
+
+
+def _mgga_where(cond: np.ndarray, a: _MGGA3, b: _MGGA3) -> _MGGA3:
+    """``np.where`` для :class:`_MGGA3`.
+
+    Значение и производные активного ветвления (та же семантика, что у
+    piecewise в коде libxc).
+    """
+    return _MGGA3(np.where(cond, a.v, b.v), np.where(cond[None, :], a.d, b.d))
+
+
+def _mgga_maximum(a: _MGGA3, b: _MGGA3) -> _MGGA3:
+    """``max(a, b)``: производная активного ветвления (piecewise-семантика)."""
+    return _mgga_where(a.v >= b.v, a, b)
+
+
+def _mgga_minimum(a: _MGGA3, b: _MGGA3) -> _MGGA3:
+    """``min(a, b)``: производная активного ветвления (piecewise-семантика)."""
+    return _mgga_where(a.v <= b.v, a, b)
+
+
+def _mgga_zero(shape: int) -> _MGGA3:
+    return _MGGA3(np.zeros(shape), np.zeros((3, shape)))
+
+
+#: Параметры обмена TPSS (Perdew–Ruzsinszky–Csonka–Sun–Becke–Ernzerhoff):
+#: стандартный набор vanilla TPSS из libxc (mgga_x_tpss.c). b — знаменатель
+#: qb, c — вес BLOC-члена, e — «экспоненциальный» параметр, kappa и mu —
+#: параметры усиления F, BLOC_a/BLOC_b — ширина BLOC-члена (vanilla: U²/(1+U²)²).
+_TPSS_B: float = 0.40
+_TPSS_C: float = 1.59096
+_TPSS_E: float = 1.537
+_TPSS_KAPPA: float = 0.8040
+_TPSS_MU: float = 0.21951
+
+#: K_FACTOR_C = (3/10)(6π²)^{2/3}; α = (t − S/8)/K_FACTOR_C (maple-форма).
+_TPSS_K_FACTOR_C: float = (3.0 / 10.0) * (6.0 * np.pi**2) ** (2.0 / 3.0)
+
+#: X2S² = 1/(4(6π²)^{2/3}) — коэффициент p = X2S²·S.
+_TPSS_X2S2: float = 1.0 / (4.0 * (6.0 * np.pi**2) ** (2.0 / 3.0))
+
+#: Подкоренное в qb-члене fxnum: ½(9/25·z² + p²) в форме C-кода —
+#: √(100·2^{1/3}6^{2/3}π^{−8/3}·A + 162·B), A = σ²ρ^{−16/3} = S²/2^{4/3},
+#: B = σ²ρ^{−2}τ^{−2} = S²ρ^{−4}τ^{−2}/2^{4/3} (эквивалентность проверена
+#: численно против maple-записи на 40 точках, < 1e-15).
+_TPSS_T101_COEF: float = 100.0 * 2.0 ** (1.0 / 3.0) * 6.0 ** (2.0 / 3.0) * np.pi ** (-8.0 / 3.0)
+
+
+def _tpss_exchange_kernel(
+    rho: np.ndarray, sigma: np.ndarray, tau: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Ядро обмена TPSS (неполяризованный): ``E_V`` и частные по ``(ρ, σ, τ)``.
+
+    Возвращает ``(E_V, dE_V)``: ``E_V`` — энергия на единицу объёма
+    ``(n_points,)``, ``dE_V`` — частные ``(3, n_points)``.
+
+    Формула (maple-источник libxc; сверена с оракулом libxc 7.0.0, см. модульный
+    docstring): при ``S = 2^{2/3}σ'ρ^{−8/3}``, ``t = 2^{2/3}τρ^{−5/3}``,
+    ``U = S/(8t)``:
+
+    * ``p = X2S²·S``, ``α = (t − S/8)/K_FACTOR_C`` (то есть ``α−1 = (t−S/8)/K − 1``);
+    * ``qb = (9/20)(α−1)/√(1 + b·α(α−1)) + 2p/3`` — знаменатель именно
+      ``1 + b·α(α−1)`` (maple-форма; устаревший сгенерированный C архива
+      7.0.0 несёт другую форму и расходится с оракулом на 4.6e-3);
+    * ``h = U²/(1+U²)²`` — BLOC-член при BLOC_a=2, BLOC_b=0 (знаменатель
+      ``(1+U²)²`` = ``1 + σ'²ρ⁻²τ⁻²/64`` в C-коде libxc);
+    * ``fxnum = (10/81 + c·h)·p + (146/2025)qb² − (73/97200)qb·t101
+      + (25/472392)(6^{2/3}/κ)π^{−8/3}2^{1/3}A + √e·B/720 + eμS³/(2304π⁴)``,
+      где ``A = σ'²ρ^{−16/3}``, ``B = σ'²ρ^{−2}τ^{−2} = Aρ^{10/3}τ^{−2}``
+      (``t101 = √(100·6^{2/3}2^{1/3}π^{−8/3}A + 162B)``);
+    * ``fx = fxnum/(1 + √e·p)²``, ``F = 1 + κ(1 − κ/(κ + fx))``;
+    * ``ε = −(3/4)(3/π)^{1/3}ρ^{1/3}F``, ``E_V = ρ·ε``.
+
+    Поведение на границе — ровно оракульское. Кламп ``σ' = min(σ, 8ρτ)``
+    (условие FHC σ ≤ 8ρτ) вычисляется как значение, а ``σ'`` входит в формулу
+    как **свободная** переменная (градиент ``(0, 1, 0)``): в клампованной точке
+    оракул возвращает частные формулы при ``σ = σ'``, не дифференцируя кламп
+    (численно подтверждено до 17 цифр). Кламп также гарантирует, что единственная
+    вырожденная точка ``(S, t) = (0, 0)`` — единственная с ``t = 0``: там
+    выражение конечно (``F → 1.0144``, предел формулы), и ни одного 0/0 в
+    результатах.
+    """
+    n = rho.size
+    zero = np.zeros(n)
+    one = np.ones(n)
+
+    # Кламп FHC как значение: σ' = min(σ, 8ρτ).
+    sigma_eff = np.minimum(np.maximum(sigma, 0.0), 8.0 * np.maximum(rho * tau, 0.0))
+
+    # Свободные листья: σ' ведёт себя как σ (семантика оракула в клампе),
+    # ρ и τ — по своим переменным.
+    rho_l = _MGGA3(rho, np.array([one, zero, zero]))
+    sig_l = _MGGA3(sigma_eff, np.array([zero, one, zero]))
+    tau_l = _MGGA3(tau, np.array([zero, zero, one]))
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        s_red = 2.0 ** (2.0 / 3.0) * sig_l * rho_l.power(-8.0 / 3.0)
+        t = 2.0 ** (2.0 / 3.0) * tau_l * rho_l.power(-5.0 / 3.0)
+
+        # h = U²/(1+U²)², U = S/(8t) — BLOC-член при BLOC_a=2, BLOC_b=0
+        # (знаменатель (1+U²)²: в C-коде libxc это 1 + σ²ρ⁻²τ⁻²/64 = 1+U²).
+        # Стабильная форма: h = m²/(1+m²)², m = min(U, 1/U) ≤ 1; при t = 0
+        # кламп даёт S = 0 и m = 0.
+        m = _mgga_minimum(s_red / (8.0 * t), (8.0 * t) / s_red)
+        m = _mgga_where(t.v > 0.0, m, _mgga_zero(n))
+        h = (m * m) / (1.0 + m * m).power(2.0)
+
+        p = _TPSS_X2S2 * s_red
+        alpha_minus_1 = (t - s_red / 8.0) / _TPSS_K_FACTOR_C - 1.0
+        qb = (9.0 / 20.0) * alpha_minus_1 / (
+            1.0 + _TPSS_B * (1.0 + alpha_minus_1) * alpha_minus_1
+        ).sqrt() + (2.0 / 3.0) * p
+
+        a_leaf = s_red * s_red / 2.0 ** (4.0 / 3.0)
+        b_leaf = a_leaf * rho_l.power(10.0 / 3.0) * tau_l.power(-2.0)
+        b_leaf = _mgga_where(s_red.v > 0.0, b_leaf, _mgga_zero(n))
+
+        # t101 = sqrt(coef·A + 162·B). Оба слагаемых ∝ σ'² (A = σ'²ρ^{−16/3},
+        # B = σ'²ρ⁻²τ⁻²), поэтому выносим σ' за корень — иначе при σ' = 0
+        # производная sqrt даёт 0/0 → NaN, хотя предел конечен
+        # (dt101/dσ' = sqrt(Q) ≠ 0).
+        q_leaf = _TPSS_T101_COEF * rho_l.power(-16.0 / 3.0) + 162.0 * (rho_l * tau_l).power(-2.0)
+        q_leaf = _mgga_where(tau_l.v > 0.0, q_leaf, _mgga_zero(n))
+        t101 = sig_l * q_leaf.sqrt()
+        term_kappa = (
+            (25.0 / 472392.0)
+            * (6.0 ** (2.0 / 3.0) / _TPSS_KAPPA)
+            * np.pi ** (-8.0 / 3.0)
+            * 2.0 ** (1.0 / 3.0)
+            * a_leaf
+        )
+        term_e_b = np.sqrt(_TPSS_E) * b_leaf / 720.0
+        term_c6 = _TPSS_E * _TPSS_MU * s_red * s_red * s_red / (4.0 * 576.0 * np.pi**4)
+
+        fxnum = (
+            (10.0 / 81.0 + _TPSS_C * h) * p
+            + (146.0 / 2025.0) * qb * qb
+            - (73.0 / 97200.0) * qb * t101
+            + term_kappa
+            + term_e_b
+            + term_c6
+        )
+        fx = fxnum / (1.0 + np.sqrt(_TPSS_E) * p).power(2.0)
+        f_enh = 1.0 + _TPSS_KAPPA * (1.0 - _TPSS_KAPPA / (_TPSS_KAPPA + fx))
+
+        eps = -(3.0 / 4.0) * (3.0 / np.pi) ** (1.0 / 3.0) * rho_l.power(1.0 / 3.0) * f_enh
+        e_volume = rho_l * eps
+    return e_volume.v, e_volume.d
+
+
+def _pbc_correlation_kernel(
+    rho: np.ndarray, sigma: np.ndarray, tau: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Ядро PBC-корреляции (MGGA_C_TPSS, z=0): ``E_V`` и частные по ``(ρ,σ,τ)``.
+
+    Формула (сверена с libxc 7.0.0 до машинной точности, см. модульный
+    docstring):
+
+    * ``rs = (3/(4πρ))^{1/3}``, ``xt2 = σ'ρ^{−8/3}``, ``t_kin = τρ^{−5/3}``;
+    * кламп ``xt2' = min(xt2, 8·t_kin)`` (условие FHC; как и в обмене, кламп
+      — значение, а ``σ'`` в формуле свободная переменная);
+    * ``u = xt2'/(8·t_kin)`` (предел 0 при ``t_kin = 0``), ``t2_eff = xt2'``;
+    * ``g = f_pbe_c(rs, z=0, t2_eff)``, каналы
+      ``f_pbe_c(rs·2^{1/3}, z=±1, 2^{2/3}·t2_eff)``;
+      ``br = ½max(chan_p, g) + ½max(chan_m, g)``;
+    * ``f0 = (1+0.53u²)g − (1+0.53)u²br``, ``ε = f0(1+2.8·f0·u³)``,
+      ``E_V = ρ·ε``.
+
+    ``f_pbe_c(rs, z, t2) = f_pw_mod(rs, z) + γφ³·ln(1 + E(1 − 1/(1+Af1)))``,
+    ``E = e^{−f_pw/γφ³} − 1``, ``A = β/(γE)``, ``f1 = tt2 + A·tt2²``,
+    ``tt2 = t2/(16·2^{2/3}φ²·rs)``, ``φ = ((1+z)^{2/3}+(1−z)^{2/3})/2``.
+    При ``z = ±1`` LDA-слагаемое тождественно ``g2`` (fz(±1) = 1), поэтому
+    каналы используют один и тот же ``_pw92_mod_lda(rs·2^{1/3}, 1)``.
+
+    Кламп-производные (ограничение точности, сверено численно с .so):
+    в заглушенной области (``σ > 8ρτ``) частные libxc-7.0.0 ``.so``
+    недетерминированы в зависимости от битов внутренней float-сравнения —
+    точка «глубокого» клампа возвращает либо производные ветви A
+    (``u = σ'/(8ρτ)`` свободная переменная), либо ветви B
+    (``u`` заморожена, ``v_τ = 0``); раскидка ~30/70 не имеет
+    пространственной структуры (шум от потери значащих цифр при
+    вычислении ``min`` через вычитание, артефакт реализации, а не свойство
+    функционала). Мы детерминированно выбираем ветвь A: она C¹-непрерывна
+    с физической областью на границе ``σ = 8ρτ`` (на границе .so ведёт себя
+    непрерывно, как A), совпадает с .so на границе и на ~2/3 точек
+    глубокого клампа; на остальных точках разность с .so порядка
+    ``|∂E/∂u|`` — область нарушает FHC, в физическом SCF не достигается.
+    Значение ``E`` в клампе совпадает с .so везде (1e-11).
+    """
+    n = rho.size
+    zero = np.zeros(n)
+    one = np.ones(n)
+
+    sigma_eff = np.minimum(np.maximum(sigma, 0.0), 8.0 * np.maximum(rho * tau, 0.0))
+
+    rho_l = _MGGA3(rho, np.array([one, zero, zero]))
+    # sigma' как лист: d(sigma')/dsigma = 1, но в углу tau = 0 sigma' ≡ 0
+    # (константа, .so: производная угла чистая u-цепь без sigma-члена).
+    sig_l = _MGGA3(
+        sigma_eff,
+        np.stack([zero, np.where(tau > 0.0, one, zero), zero]),
+    )
+    tau_l = _MGGA3(tau, np.array([zero, zero, one]))
+
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        rs = (3.0 / (4.0 * np.pi)) ** (1.0 / 3.0) * rho_l.power(-1.0 / 3.0)
+        xt2 = sig_l * rho_l.power(-8.0 / 3.0)
+        t_kin = tau_l * rho_l.power(-5.0 / 3.0)
+
+        # u = xt2'/(8 t_kin) — свободный лист (ветвь A, см. docstring).
+        # Угол tau = 0 (σверено численно с .so): при sigma > 0 берётся
+        # u = 1 (предел заглушённого u при tau -> 0) со свободными
+        # производными du/drho = -1/rho (конечен, vr угла совпадает с
+        # .so до 1e-17) и du/dsigma, du/dtau — расходящиеся при tau -> 0+
+        # (функционал сингулярен: v_sigma, v_tau бесконечны; .so
+        # возвращает большие конечные артефакты ~1e18). Для расходящихся
+        # каналов ставится конечный сентинел 1e300 с тем же соотношением
+        # (du/dsigma)/(du/dtau) = -1/(8 rho), что и в предельной формуле.
+        # При sigma = 0: u = 0.
+        pos_sigma = np.maximum(sigma, 0.0) > 0.0
+        safe_rho = np.where(np.maximum(rho, 0.0) > 0.0, rho, 1.0)
+        diverge = 1.0e300
+        u_tau0 = _MGGA3(
+            np.where(pos_sigma, 1.0, 0.0),
+            np.stack(
+                [
+                    np.where(pos_sigma, -1.0 / safe_rho, 0.0),
+                    np.where(pos_sigma, diverge / (8.0 * safe_rho), 0.0),
+                    np.where(pos_sigma, -diverge, 0.0),
+                ]
+            ),
+        )
+        u = _mgga_where(t_kin.v > 0.0, xt2 / (8.0 * t_kin), u_tau0)
+
+        def f_pbe_c(
+            rs_local: _MGGA3,
+            phi_cubed: float,
+            phi_squared: float,
+            t2_arg: _MGGA3,
+            lda: _MGGA3,
+        ) -> _MGGA3:
+            """PBE-корреляция с фиксированным φ (канал z) на LDA-ядре ``lda``."""
+            e_term = (-lda / (_PBC_GAMMA * phi_cubed)).expm1()
+            a_coeff = _PBC_BETA / (_PBC_GAMMA * e_term)
+            tt2 = t2_arg / (16.0 * 2.0 ** (2.0 / 3.0) * phi_squared * rs_local)
+            f1 = tt2 + a_coeff * tt2 * tt2
+            g_sat = 1.0 / (1.0 + a_coeff * f1)
+            correction: _MGGA3 = (1.0 + (1.0 - g_sat) * e_term).log()
+            return lda + correction * float(_PBC_GAMMA * phi_cubed)
+
+        g = f_pbe_c(rs, 1.0, 1.0, xt2, _pw92_mod_lda(rs, 0))
+        # Канал z=±1: mphi = 2^{−1/3} (φ³ = ½, φ² = 2^{−2/3}),
+        # rs → rs·2^{1/3}, t2 → 2^{2/3}t2_eff; LDA-слагаемое тождественно g1
+        # (fz(±1) = 1). 0.5 — литерал: 2.0**(-1/3.0)**3 в Python — это
+        # 2^{(−1/3)³} = 2^{−1/27} ≈ 0.9747 (оператор ** правосочетателен),
+        # а не (2^{−1/3})³ = 0.5.
+        rs_channel = rs * 2.0 ** (1.0 / 3.0)
+        chan = f_pbe_c(
+            rs_channel,
+            0.5,
+            2.0 ** (-2.0 / 3.0),
+            2.0 ** (2.0 / 3.0) * xt2,
+            _pw92_mod_lda(rs_channel, 1),
+        )
+
+        branch = 0.5 * _mgga_maximum(chan, g) + 0.5 * _mgga_maximum(chan, g)
+        f0 = (1.0 + _PBC_C0 * u * u) * g - (1.0 + _PBC_C0) * u * u * branch
+        eps = f0 * (1.0 + _PBC_D_KIN * f0 * u * u * u)
+        e_volume = rho_l * eps
+    return e_volume.v, e_volume.d
+
+
+#: Константы PW92-ядра с модифицированными параметрами — именно те, что в
+#: LDA-ядре GGA_C_PBE / PBC (НЕ стандартный LDA_C_PW; сверено численно
+#: с LibXC, ``tests/test_engine_mgga.py``). Индексация: [0] — z=0, [1] — z=+1, [2] — z=−1.
+_PW92_MOD_A: tuple[float, float, float] = (0.0310907, 0.01554535, 0.0168869)
+_PW92_MOD_ALPHA1: tuple[float, float, float] = (0.21370, 0.20548, 0.11125)
+_PW92_MOD_BETA1: tuple[float, float, float] = (7.5957, 14.1189, 10.357)
+_PW92_MOD_BETA2: tuple[float, float, float] = (3.5876, 6.1977, 3.6231)
+_PW92_MOD_BETA3: tuple[float, float, float] = (1.6382, 3.3662, 0.88026)
+_PW92_MOD_BETA4: tuple[float, float, float] = (0.49294, 0.62517, 0.49671)
+_PW92_MOD_FZ20: float = 1.709920934161365617563962776245
+
+#: PBE-корреляция: γ выводится из RPA, β — полноточный параметр C-кода libxc.
+_PBC_GAMMA: float = (1.0 - np.log(2.0)) / np.pi**2
+_PBC_BETA: float = 0.06672455060314922
+
+#: Коэффициенты поправки кинетической плотности PBC-корреляции (tpss_c.mpl):
+#: d = 2.8, C0 = 0.53.
+_PBC_D_KIN: float = 2.8
+_PBC_C0: float = 0.53
+
+
+def _pw92_mod_lda(rs: _MGGA3, channel: int) -> _MGGA3:
+    """Одно из трёх LDA-слагаемых модифицированного PW92-ядра, канал ``channel``.
+
+    ``g_k = −2a_k(1+α₁r_s)·ln(1 + 1/(2a_k(β₁√r_s + β₂r_s + β₃r_s^{3/2}
+    + β₄r_s²)))``
+    """
+    a = _PW92_MOD_A[channel]
+    alpha1 = _PW92_MOD_ALPHA1[channel]
+    polynomial = (
+        _PW92_MOD_BETA1[channel] * rs.sqrt()
+        + _PW92_MOD_BETA2[channel] * rs
+        + _PW92_MOD_BETA3[channel] * rs.power(1.5)
+        + _PW92_MOD_BETA4[channel] * rs.power(2.0)
+    )
+    inner = (1.0 / (2.0 * a)) / polynomial
+    log_term = (1.0 + inner).log()
+    return -2.0 * a * (1.0 + alpha1 * rs) * log_term
+
+
+class TpssExchange:
+    """Обмен TPSS (meta-GGA, MGGA_X_TPSS).
+
+    ``ε_x = ε_x^LDA · F(σ, τ)``, где усиление ``F`` зависит и от градиента
+    плотности, и от кинетической плотности ``τ`` (meta-GGA-зависимость; при
+    ``τ`` Томаса–Ферми функционал совпадает с TPSS в виде Голда). Параметры —
+    vanilla TPSS; формула — maple-источник libxc (см. модульный docstring).
+
+    Потенциалы возвращаются по всем трём переменным: ``vrho``, ``vsigma`` и
+    ``vtau`` — именно они входят в матрицу Фока (член ``v_τ`` умножает метрику
+    ``Σ_a ∂_aφ_μ ∂_aφ_ν``, см. :func:`quantumlab.engine.dft.xc_matrix_and_energy`).
+    """
+
+    requires_tau: bool = True
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "tpss_x"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "mgga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+        tau: Array | None = None,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы обмена TPSS в точках сетки."""
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
+        del points
+        if density_gradient is None:
+            msg = "Meta-GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        if tau is None:
+            msg = (
+                "Meta-GGA-функционал требует кинетическую плотность tau; "
+                "решатель обязан передать её (requires_tau)."
+            )
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient, dtype=float) ** 2, axis=1)
+        tau = np.asarray(tau, dtype=float)
+        valid = rho > _DENSITY_FLOOR
+
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            e_volume, de = _tpss_exchange_kernel(rho, sigma, tau)
+
+        vrho = np.where(valid, de[0], 0.0)
+        vsigma = np.where(valid, de[1], 0.0)
+        vtau = np.where(valid, de[2], 0.0)
+        energy = np.where(valid, e_volume / np.where(valid, rho, 1.0), 0.0)
+        return XcEvaluation(
+            energy_density=np.asarray(energy),
+            vrho=np.asarray(vrho),
+            vsigma=np.asarray(vsigma),
+            vtau=np.asarray(vtau),
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спиновая версия не реализована — см. ограничения TPSSh."""
+        del points, density_spin, density_gradient_spin
+        msg = (
+            "UKS (спин-поляризованный расчёт) для meta-GGA-функционалов "
+            "не реализован: TPSSh доступен только для замкнутой оболочки (RKS)."
+        )
+        raise NotImplementedError(msg)
+
+
+class TpssCorrelation:
+    """Корреляция PBC (в libxc — MGGA_C_TPSS, meta-GGA).
+
+    Это корреляционная часть гибрида TPSSH: PBE-корреляция на модифицированном
+    PW92-ядре (константы из LDA-ядра GGA_C_PBE, не стандартный LDA_C_PW) плюс
+    поправка кинетической плотности ``f0(1 + 2.8·f0·u³)``. Полная форма — в
+    docstring :func:`_pbc_correlation_kernel`; сверка с oракулом до машинной
+    точности — в модульном docstring и в тестах.
+    """
+
+    requires_tau: bool = True
+
+    @property
+    def name(self) -> str:
+        """Имя функционала."""
+        return "tpss_c"
+
+    @property
+    def functional_class(self) -> str:
+        """Класс функционала."""
+        return "mgga"
+
+    @property
+    def is_hybrid(self) -> bool:
+        """Точного обмена нет."""
+        return False
+
+    @property
+    def exact_exchange_fraction(self) -> float:
+        """Доля точного обмена."""
+        return 0.0
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+        tau: Array | None = None,
+    ) -> XcEvaluation:
+        """Энергия и потенциалы корреляции PBC (MGGA_C_TPSS)."""
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
+        del points
+        if density_gradient is None:
+            msg = "Meta-GGA-функционал требует градиент плотности; передать None нельзя."
+            raise ValueError(msg)
+        if tau is None:
+            msg = (
+                "Meta-GGA-функционал требует кинетическую плотность tau; "
+                "решатель обязан передать её (requires_tau)."
+            )
+            raise ValueError(msg)
+
+        rho = np.asarray(density, dtype=float)
+        sigma = np.sum(np.asarray(density_gradient, dtype=float) ** 2, axis=1)
+        tau = np.asarray(tau, dtype=float)
+        valid = rho > _DENSITY_FLOOR
+
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            e_volume, de = _pbc_correlation_kernel(rho, sigma, tau)
+
+        vrho = np.where(valid, de[0], 0.0)
+        vsigma = np.where(valid, de[1], 0.0)
+        vtau = np.where(valid, de[2], 0.0)
+        energy = np.where(valid, e_volume / np.where(valid, rho, 1.0), 0.0)
+        return XcEvaluation(
+            energy_density=np.asarray(energy),
+            vrho=np.asarray(vrho),
+            vsigma=np.asarray(vsigma),
+            vtau=np.asarray(vtau),
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спиновая версия не реализована — см. ограничения TPSSh."""
+        del points, density_spin, density_gradient_spin
+        msg = (
+            "UKS (спин-поляризованный расчёт) для meta-GGA-функционалов "
+            "не реализован: TPSSh доступен только для замкнутой оболочки (RKS)."
+        )
+        raise NotImplementedError(msg)
+
+
+class Tpssh:
+    """TPSSh (Staroverov et al. 2003): 10 % точного обмена + 90 % обмена TPSS + корреляция PBC.
+
+    ``E_xc = 0.10·E_x^HF + 0.90·E_x^TPSS + E_c^PBC`` — гибрид meta-GGA TPSS с
+    долей точного обмена 0.10 (libxc ``HYB_MGGA_XC_TPSSH``; 0.25 — это другой
+    функционал, TPSS0). Точный обмен, как и для PBE0/B3LYP, подставляет
+    решатель: ``evaluate`` возвращает только полунелокальную часть
+    (0.90·TPSS-x + PBC-c), а доля ``α = 0.10`` идёт через
+    :attr:`exact_exchange_fraction` в фокиан (−½αK) и в энергию (−¼α·D:K).
+
+    Реализовано для замкнутой оболочки (RKS) и энергии в одной точке. UKS и
+    аналитический градиент — не реализованы; система отказывается от них явной
+    ошибкой, а не приближением (см. :meth:`evaluate_spin` и реестр).
+    """
+
+    name: str = "tpssh"
+    functional_class: str = "mgga"
+    is_hybrid: bool = True
+    exact_exchange_fraction: float = 0.10
+    requires_tau: bool = True
+
+    #: Доля meta-GGA-обмена TPSS: дополняет точный обмен до единицы.
+    dft_exchange_fraction: float = 0.90
+
+    def __init__(self) -> None:
+        """Собирает обменную и корреляционную части."""
+        self._exchange = TpssExchange()
+        self._correlation = TpssCorrelation()
+
+    def evaluate(
+        self,
+        points: Array,
+        density: Array,
+        density_gradient: Array | None = None,
+        *,
+        spin_polarized: bool = False,
+        tau: Array | None = None,
+    ) -> XcEvaluation:
+        """Полунелокальная часть TPSSh; точный обмен подставляет решатель.
+
+        Обмен умножается на 0.90 — эта часть сочетается с 0.10 точного обмена;
+        корреляция PBC входит целиком.
+        """
+        if spin_polarized:
+            msg = "Спин-поляризованное вычисление идёт через evaluate_spin."
+            raise ValueError(msg)
+        weight = self.dft_exchange_fraction
+        exchange = self._exchange.evaluate(points, density, density_gradient, tau=tau)
+        correlation = self._correlation.evaluate(points, density, density_gradient, tau=tau)
+        # Мета-GGA-ядра всегда возвращают все три потенциала.
+        assert exchange.vsigma is not None and correlation.vsigma is not None
+        assert exchange.vtau is not None and correlation.vtau is not None
+        return XcEvaluation(
+            energy_density=weight * exchange.energy_density + correlation.energy_density,
+            vrho=weight * exchange.vrho + correlation.vrho,
+            vsigma=(weight * exchange.vsigma) + correlation.vsigma,
+            vtau=(weight * exchange.vtau) + correlation.vtau,
+        )
+
+    def evaluate_spin(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array | None = None,
+    ) -> XcEvaluationSpin:
+        """Спиновая версия не реализована — см. ограничения TPSSh."""
+        del points, density_spin, density_gradient_spin
+        msg = (
+            "UKS (спин-поляризованный расчёт) для meta-GGA-функционалов "
+            "не реализован: TPSSh доступен только для замкнутой оболочки (RKS)."
+        )
+        raise NotImplementedError(msg)
+
+
 #: Функционалы, которые ядро действительно умеет считать. Реестр обращается к
 #: этому словарю, поэтому «заявлено» и «реализовано» не могут разойтись.
-FUNCTIONALS: dict[str, type[Svwn] | type[Pbe] | type[Pbe0] | type[Blyp] | type[B3lyp]] = {
+FUNCTIONALS: dict[
+    str, type[Svwn] | type[Pbe] | type[Pbe0] | type[Blyp] | type[B3lyp] | type[Tpssh]
+] = {
     "svwn": Svwn,
     "lda": Svwn,
     "pbe": Pbe,
     "blyp": Blyp,
     "pbe0": Pbe0,
     "b3lyp": B3lyp,
+    "tpssh": Tpssh,
 }
 
 
-def get_functional(name: str) -> Svwn | Pbe | Pbe0 | Blyp | B3lyp:
+def get_functional(name: str) -> Svwn | Pbe | Pbe0 | Blyp | B3lyp | Tpssh:
     """Возвращает реализованный функционал по имени.
 
     Бросает ``FunctionalNotFoundError`` — ту же ошибку, что и реестр

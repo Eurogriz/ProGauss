@@ -214,7 +214,7 @@ def test_get_functional_rejects_unimplemented() -> None:
     assert get_functional("svwn").name == "svwn"
     assert get_functional("pbe").name == "pbe"
     with pytest.raises(FunctionalNotFoundError):
-        get_functional("tpssh")
+        get_functional("m062x")
 
 
 def test_functional_registry_and_capabilities_agree() -> None:
@@ -223,7 +223,7 @@ def test_functional_registry_and_capabilities_agree() -> None:
     for name in FUNCTIONALS:
         assert registry.availability(f"functional:{name}").is_usable, name
     # Заявленное в ТЗ, но не реализованное — по-прежнему честно недоступно.
-    assert not registry.availability("functional:tpssh").is_usable
+    assert not registry.availability("functional:m062x").is_usable
     assert not registry.availability("functional:wb97x-d").is_usable
 
 
@@ -340,11 +340,11 @@ def test_engine_runs_dft_geometry_optimization(water: Molecule) -> None:
 
 
 def test_engine_refuses_unimplemented_functional(water: Molecule) -> None:
-    """TPSSh заявлен в ТЗ, но не реализован — честный отказ вместо числа."""
+    """M06-2X заявлен в ТЗ, но не реализован — честный отказ вместо числа."""
     with pytest.raises(FunctionalNotFoundError):
         ReferenceEngine().run(
             EngineRequest(
-                job_id="dft", spec=_dft_spec(functional="tpssh"), molecule=water, threads=1
+                job_id="dft", spec=_dft_spec(functional="m062x"), molecule=water, threads=1
             )
         )
 
@@ -618,22 +618,23 @@ def test_pbe_energy_matches_pyscf(water: Molecule) -> None:
     assert ours.total_energy == pytest.approx(float(their_scf.e_tot), abs=5e-6)
 
 
-def test_engine_refuses_unimplemented_dispersion(water: Molecule) -> None:
-    """План с нереализованной дисперсией не должен выполняться как расчёт без поправки (§54 ТЗ).
+def test_engine_refuses_lda_with_d4(water: Molecule) -> None:
+    """LDA не имеет обученных параметров D4: запрос отклоняется, а не приближается (§54 ТЗ).
 
-    D4 в ядре до сих пор нет: спецификация с ``d4`` отклоняется до начала
-    расчёта, а не молча считается как расчёт без поправки.
+    Реестр считает d4 доступным (PARTIAL — для обученных функционалов), но
+    для конкретного функционала решение принимает модуль поправок: для LDA
+    параметров не существует, и это не приближение, а недоступный метод.
     """
     spec = CalculationSpec(
         task=Task.SINGLE_POINT,
         method=MethodSpec(
             theory=TheoryFamily.DFT,
             basis="sto-3g",
-            functional="pbe",
+            functional="svwn",
             dispersion=DispersionCorrection.D4,
         ),
     )
-    with pytest.raises(MethodNotAvailableError):
+    with pytest.raises(ValueError, match="D4 не обучен для функционала"):
         ReferenceEngine().run(EngineRequest(job_id="dft", spec=spec, molecule=water, threads=1))
 
 
@@ -660,18 +661,18 @@ def test_engine_refuses_lda_with_d3(water: Molecule) -> None:
 def test_registry_reports_dispersion_honestly() -> None:
     """Дисперсионные поправки видны в реестре со своим статусом.
 
-    d3bj/d3zero реализованы частично (область применения уже, чем у остальных
-    методов), d4 — не реализован, none — доступен.
+    d3bj/d3zero/d4 реализованы частично (область применения уже, чем у
+    остальных методов), none — доступен.
     """
     registry = default_registry()
     assert registry.is_available("dispersion:none")
     assert registry.is_available("dispersion:d3bj")
     assert registry.is_available("dispersion:d3zero")
-    assert not registry.is_available("dispersion:d4")
+    assert registry.is_available("dispersion:d4")
     from quantumlab.engine.capabilities import Availability
 
     assert registry.availability("dispersion:d3bj") is Availability.PARTIAL
-    assert registry.availability("dispersion:d4") is Availability.NOT_IMPLEMENTED
+    assert registry.availability("dispersion:d4") is Availability.PARTIAL
 
 
 # --------------------------------------------------------------------------- #

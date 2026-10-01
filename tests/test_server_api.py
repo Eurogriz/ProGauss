@@ -87,7 +87,7 @@ def test_capabilities_reports_registry(client: TestClient) -> None:
     assert _availability(body, "method", "method:dft") == "partial"
     assert _availability(body, "functional", "functional:svwn") == "partial"
     assert _availability(body, "functional", "functional:b3lyp") == "partial"
-    assert _availability(body, "functional", "functional:tpssh") == "not_implemented"
+    assert _availability(body, "functional", "functional:m062x") == "not_implemented"
     # Системы координат и спин — не методы: «База методов» в GUI строится отсюда.
     assert "coordinates" in body and "spin" in body
     assert not any(item["id"].startswith(("spin:", "coordinates:")) for item in body["method"])
