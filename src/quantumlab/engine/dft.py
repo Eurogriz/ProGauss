@@ -39,6 +39,7 @@ from quantumlab.engine.scf import (
     ScfSettings,
     UhfResult,
     _diis_extrapolate,
+    _EdiisHistory,
     _regression_floor,
     _validated_spin_densities,
     build_integrals,
@@ -350,9 +351,7 @@ def run_rks(
         restart_xc, _ = xc_at(density)
         restart_fock = core + coulomb_matrix(density, eri) + restart_xc
         if alpha_exchange > 0.0:
-            restart_fock = restart_fock - 0.5 * alpha_exchange * np.einsum(
-                "ls,ulvs->uv", density, eri, optimize=True
-            )
+            restart_fock = restart_fock - 0.5 * alpha_exchange * exchange_matrix(density, eri)
         energies, coefficients, coefficients_prime = diagonalize(
             orthogonalizer.T @ restart_fock @ orthogonalizer
         )
@@ -364,6 +363,7 @@ def run_rks(
 
     fock_history: list[np.ndarray] = []
     error_history: list[np.ndarray] = []
+    ediis = _EdiisHistory(config.diis_space) if config.ediis else None
     history: list[ScfHistory] = []
     previous_energy = 0.0
     converged = False
@@ -377,7 +377,7 @@ def run_rks(
         fock = core + coulomb + v_xc
         exact_exchange_energy = 0.0
         if alpha_exchange > 0.0:
-            exchange = np.einsum("ls,ulvs->uv", density, eri, optimize=True)
+            exchange = exchange_matrix(density, eri)
             # E_x^exact = −¼α·D:K, значит ∂E/∂D = −½α·K: в фокиане коэффициент ½
             # при α — тот же, что у RHF-обмена, а не «просто α». Перепутать
             # легко, потому что в энергию входит ¼α, а не ½α, и оба числа
@@ -419,6 +419,21 @@ def run_rks(
                 strategy = "diis"
                 if "diis" not in strategies:
                     strategies.append("diis")
+
+        if ediis is not None:
+            mixed = ediis.step(
+                energy,
+                (density,),
+                (fock,),
+                diis_error,
+                (effective_fock_prime,) if strategy == "diis" else None,
+                orthogonalizer,
+            )
+            if mixed is not None and mixed[1]:
+                effective_fock_prime = mixed[0][0]
+                strategy = "ediis"
+                if "ediis" not in strategies:
+                    strategies.append("ediis")
 
         if level_shift_engaged(history, diis_error, config, iteration):
             if "level-shift" not in strategies:
@@ -472,7 +487,7 @@ def run_rks(
         # Энергия пересобирается на сошедшейся плотности, поэтому обменный
         # член нужно добавить и здесь — иначе он есть в истории итераций, но
         # теряется в возвращаемом результате.
-        exchange = np.einsum("ls,ulvs->uv", density, eri, optimize=True)
+        exchange = exchange_matrix(density, eri)
         total -= 0.25 * alpha_exchange * float(np.sum(density * exchange))
     return RksResult(
         total_energy=total,
@@ -603,6 +618,7 @@ def run_uks(
     diis_beta: list[np.ndarray] = []
     error_alpha: list[np.ndarray] = []
     error_beta: list[np.ndarray] = []
+    ediis = _EdiisHistory(config.diis_space) if config.ediis else None
     history: list[ScfHistory] = []
     previous_energy = 0.0
     converged = False
@@ -688,6 +704,21 @@ def run_uks(
                 strategy = "diis"
                 if "diis" not in strategies:
                     strategies.append("diis")
+
+        if ediis is not None and not level_shift_active:
+            mixed = ediis.step(
+                energy,
+                (density_alpha, density_beta),
+                (fock_alpha, fock_beta),
+                diis_error,
+                (effective_alpha, effective_beta) if strategy == "diis" else None,
+                orthogonalizer,
+            )
+            if mixed is not None and mixed[1]:
+                effective_alpha, effective_beta = mixed[0]
+                strategy = "ediis"
+                if "ediis" not in strategies:
+                    strategies.append("ediis")
 
         if level_shift_active and diis_error < config.level_shift_release:
             level_shift_active = False

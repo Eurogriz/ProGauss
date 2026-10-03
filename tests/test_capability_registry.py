@@ -292,6 +292,7 @@ def test_scf_and_optimizer_options_are_declared_not_just_unknown() -> None:
         "scf:damping",
         "scf:level_shift",
         "scf:ediis",
+        "scf:direct",
         "scf:soscf",
         "scf:stability_analysis",
         "scf:fractional_occupations",
@@ -303,5 +304,6 @@ def test_scf_and_optimizer_options_are_declared_not_just_unknown() -> None:
     ):
         assert registry.get(capability_id).name, capability_id
     assert registry.get("scf:diis").availability is Availability.IMPLEMENTED
-    assert registry.get("scf:ediis").availability is Availability.NOT_IMPLEMENTED
+    assert registry.get("scf:ediis").availability is Availability.PARTIAL
+    assert registry.get("scf:direct").availability is Availability.PARTIAL
     assert registry.get("optimizer:constraints").availability is Availability.NOT_IMPLEMENTED

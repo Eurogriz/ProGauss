@@ -84,6 +84,7 @@ from quantumlab.engine.gradients import (
     uhf_gradient,
     uks_gradient,
 )
+from quantumlab.engine.integrals import DirectEri
 from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -436,7 +437,7 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        prepared = build_integrals(basis, request.molecule)
+        prepared = _build_integrals(spec, basis, request.molecule, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 35.0, "integrals")
@@ -525,7 +526,7 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        prepared = build_integrals(basis, request.molecule)
+        prepared = _build_integrals(spec, basis, request.molecule, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 35.0, "integrals")
@@ -605,7 +606,7 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        prepared = build_integrals(basis, request.molecule)
+        prepared = _build_integrals(spec, basis, request.molecule, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 45.0, "integrals")
@@ -638,7 +639,7 @@ class ReferenceEngine:
                 rhf_stability(
                     rhf.coefficients,
                     rhf.orbital_energies,
-                    prepared.eri,
+                    _dense_eri(prepared),
                     request.molecule.n_electrons // 2,
                 )
                 if rhf.converged
@@ -697,7 +698,7 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        prepared = build_integrals(basis, request.molecule)
+        prepared = _build_integrals(spec, basis, request.molecule, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 45.0, "integrals")
@@ -735,7 +736,7 @@ class ReferenceEngine:
                     uhf.beta_coefficients,
                     uhf.alpha_energies,
                     uhf.beta_energies,
-                    prepared.eri,
+                    _dense_eri(prepared),
                     n_alpha,
                     n_beta,
                 )
@@ -798,7 +799,7 @@ class ReferenceEngine:
         _report(progress, 5.0, "basis", functions=basis.n_functions)
 
         started = time.perf_counter()
-        prepared = build_integrals(basis, request.molecule)
+        prepared = _build_integrals(spec, basis, request.molecule, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, request.molecule)
         timings.append(_timing("integrals", started))
         _report(progress, 45.0, "integrals")
@@ -868,10 +869,14 @@ class ReferenceEngine:
         started = time.perf_counter()
         hessian = numerical_hessian(
             request.molecule,
-            lambda molecule: _solve_energy_and_gradient(spec, basis_name, molecule)[1],
+            lambda molecule: _solve_energy_and_gradient(
+                spec, basis_name, molecule, request.threads
+            )[1],
         )
         vibrations = vibrational_analysis(hessian, request.molecule)
-        _, gradient = _solve_energy_and_gradient(spec, basis_name, request.molecule)
+        _, gradient = _solve_energy_and_gradient(
+            spec, basis_name, request.molecule, request.threads
+        )
         timings = [*base.timings, _timing("hessian", started)]
 
         warnings = list(base.warnings)
@@ -936,7 +941,9 @@ class ReferenceEngine:
         is_rohf = method is not None and method.spin is SpinTreatment.ROHF
 
         def energy_and_gradient(molecule: Molecule) -> tuple[float, np.ndarray]:
-            total_energy, gradient = _solve_energy_and_gradient(spec, basis_name, molecule)
+            total_energy, gradient = _solve_energy_and_gradient(
+                spec, basis_name, molecule, request.threads
+            )
             done.append(1)
             _report(
                 progress,
@@ -957,7 +964,7 @@ class ReferenceEngine:
         final = optimization.molecule
         started = time.perf_counter()
         basis = build_basis(basis_name, final)
-        prepared = build_integrals(basis, final)
+        prepared = _build_integrals(spec, basis, final, request.threads)
         dipole_integrals = integrals.build_dipole_integrals(basis, final)
         final_solution: RhfResult | RksResult | UhfResult | RohfResult | UksResult
         open_shell_final: UhfResult | RohfResult | None = None
@@ -1170,6 +1177,8 @@ class ReferenceEngine:
         """
         for strategy in scf.fallback_strategies:
             self._registry.assert_available(f"scf:{strategy}")
+        if scf.direct:
+            self._registry.assert_available("scf:direct")
         if scf.stability_analysis:
             self._registry.assert_available("scf:stability_analysis")
         if scf.fractional_occupations:
@@ -1232,6 +1241,19 @@ class ReferenceEngine:
                     f"scf:stability_analysis + {spec.task.value}",
                     "Анализ устойчивости выполняется только в одноточечном расчёте.",
                 )
+
+        if spec.scf.direct and spec.scf.stability_analysis:
+            raise CombinationUnavailableError(
+                "scf:direct + scf:stability_analysis",
+                "Анализу устойчивости нужен полный тензор ERI, а прямой SCF его не хранит.",
+            )
+
+        if "ediis" in spec.scf.fallback_strategies and method.spin is SpinTreatment.ROHF:
+            raise CombinationUnavailableError(
+                "scf:ediis + rohf",
+                "EDIIS реализован для RHF, UHF, RKS и UKS: у ROHF один эффективный "
+                "фокиан, и энергетическая модель EDIIS для него не определена.",
+            )
 
         if method.theory is TheoryFamily.DFT and method.spin is SpinTreatment.ROHF:
             # В ``combination`` — только технические идентификаторы: движок по
@@ -1359,8 +1381,35 @@ def _timing(stage: str, started: float) -> TimingRecord:
 _STATIONARY_FORCE_TOLERANCE: float = 4.5e-4
 
 
+#: Порог скрининга Шварца в движке: каждый пропущенный интеграл по модулю
+#: меньше порога (неравенство Коши–Шварца строгое), поэтому вклад в энергию —
+#: порядка 1e-10 Eh и ниже на сотнях тысяч пропущенных квартетов.
+INTEGRAL_SCREENING: float = 1e-12
+
+
+def _build_integrals(
+    spec: CalculationSpec, basis: BasisSet, molecule: Molecule, threads: int
+) -> PrecomputedIntegrals:
+    """Интегралы с настройками движка: потоки, скрининг Шварца, прямой режим."""
+    return build_integrals(
+        basis,
+        molecule,
+        direct=spec.scf.direct,
+        threads=threads,
+        screening=INTEGRAL_SCREENING,
+    )
+
+
+def _dense_eri(prepared: PrecomputedIntegrals) -> np.ndarray:
+    """Полный тензор ERI; в прямом режиме его нет — анализ устойчивости им не обойтись."""
+    if isinstance(prepared.eri, DirectEri):
+        msg = "Для этого анализа нужен полный тензор ERI, а в прямом режиме он не хранится."
+        raise CombinationUnavailableError("scf:direct + stability_analysis", msg)
+    return prepared.eri
+
+
 def _solve_energy_and_gradient(
-    spec: CalculationSpec, basis_name: str, molecule: Molecule
+    spec: CalculationSpec, basis_name: str, molecule: Molecule, threads: int = 1
 ) -> tuple[float, np.ndarray]:
     """Энергия и аналитический градиент в одной точке тем методом, что в спецификации.
 
@@ -1369,6 +1418,7 @@ def _solve_energy_and_gradient(
     """
     method = spec.method
     basis = build_basis(basis_name, molecule)
+    prepared = _build_integrals(spec, basis, molecule, threads)
     if method is not None and method.theory is TheoryFamily.DFT:
         if method.functional is None:
             msg = "DFT-расчёт требует явного обменно-корреляционного функционала."
@@ -1378,7 +1428,9 @@ def _solve_energy_and_gradient(
         # же величиной, что и в расчёте в одной точке.
         grid = build_grid(molecule, spec.grid.preset)
         if method.spin is SpinTreatment.RHF:
-            rks = run_rks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+            rks = run_rks(
+                basis, molecule, functional, _scf_settings(spec), integrals=prepared, grid=grid
+            )
             _require_converged(rks)
             energy, gradient = (
                 rks.total_energy,
@@ -1387,28 +1439,30 @@ def _solve_energy_and_gradient(
         else:
             # Открытая оболочка: спиново-поляризованный UKS со своим
             # аналитическим градиентом (``uks_gradient``).
-            uks = run_uks(basis, molecule, functional, _scf_settings(spec), grid=grid)
+            uks = run_uks(
+                basis, molecule, functional, _scf_settings(spec), integrals=prepared, grid=grid
+            )
             _require_converged(uks)
             energy, gradient = (
                 uks.total_energy,
                 uks_gradient(basis, molecule, uks, grid, functional).gradient,
             )
     elif method is not None and method.spin is SpinTreatment.UHF:
-        uhf = run_uhf(basis, molecule, _scf_settings(spec))
+        uhf = run_uhf(basis, molecule, _scf_settings(spec), integrals=prepared)
         _require_converged(uhf)
         energy, gradient = (
             uhf.total_energy,
             uhf_gradient(basis, molecule, uhf).gradient,
         )
     elif method is not None and method.spin is SpinTreatment.ROHF:
-        rohf = run_rohf(basis, molecule, _scf_settings(spec))
+        rohf = run_rohf(basis, molecule, _scf_settings(spec), integrals=prepared)
         _require_converged(rohf)
         energy, gradient = (
             rohf.total_energy,
             rohf_gradient(basis, molecule, rohf).gradient,
         )
     else:
-        rhf = run_rhf(basis, molecule, _scf_settings(spec))
+        rhf = run_rhf(basis, molecule, _scf_settings(spec), integrals=prepared)
         _require_converged(rhf)
         energy, gradient = rhf.total_energy, rhf_gradient(basis, molecule, rhf).gradient
 
@@ -1478,6 +1532,7 @@ def _scf_settings(spec: CalculationSpec) -> ScfSettings:
         damping_factor=scf.damping if use_damping else 0.5,
         damping_rounds=2 if use_damping else 0,
         level_shift=scf.level_shift if use_level_shift else 0.25,
+        ediis="ediis" in allowed and "diis" in allowed,
     )
 
 
@@ -1643,9 +1698,11 @@ def _quality_checks_uhf(
 
     kinetic = float(np.sum(density_total * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(density_total * integrals.build_nuclear_attraction(basis, molecule)))
-    coulomb = float(np.einsum("uv,ls,uvls", density_total, density_total, repulsion))
-    exchange_alpha = float(np.einsum("uv,ls,ulvs", uhf.density_alpha, uhf.density_alpha, repulsion))
-    exchange_beta = float(np.einsum("uv,ls,ulvs", uhf.density_beta, uhf.density_beta, repulsion))
+    coulomb = float(np.sum(density_total * coulomb_matrix(density_total, repulsion)))
+    exchange_alpha = float(
+        np.sum(uhf.density_alpha * exchange_matrix(uhf.density_alpha, repulsion))
+    )
+    exchange_beta = float(np.sum(uhf.density_beta * exchange_matrix(uhf.density_beta, repulsion)))
     # Обмен в UHF строится по плотности канала с занятием 1, поэтому перед
     # суммой обменов стоит ½, а не ¼ как в RHF. Проверка: для замкнутой
     # оболочки D^α = D^β = D_зан и D_полн = 2D_зан, тогда
@@ -1806,8 +1863,8 @@ def _quality_checks(
     kinetic = float(np.sum(rhf.density * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(rhf.density * integrals.build_nuclear_attraction(basis, molecule)))
     repulsion = prepared.eri
-    coulomb = float(np.einsum("uv,ls,uvls", rhf.density, rhf.density, repulsion))
-    exchange = float(np.einsum("uv,ls,ulvs", rhf.density, rhf.density, repulsion))
+    coulomb = float(np.sum(rhf.density * coulomb_matrix(rhf.density, repulsion)))
+    exchange = float(np.sum(rhf.density * exchange_matrix(rhf.density, repulsion)))
     electron_electron = 0.5 * (coulomb - 0.5 * exchange)
     decomposition_error = abs(
         kinetic + attraction + electron_electron + rhf.nuclear_repulsion - rhf.total_energy
@@ -1897,13 +1954,13 @@ def _quality_checks_rks(
 
     kinetic = float(np.sum(density * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(density * integrals.build_nuclear_attraction(basis, molecule)))
-    coulomb = float(np.einsum("uv,ls,uvls", density, density, prepared.eri))
+    coulomb = float(np.sum(density * coulomb_matrix(density, prepared.eri)))
     # Гибрид добавляет долю точного обмена и в фокиан, и в разложение энергии.
     # Без обоих членов проверка выдала бы FAIL на корректном гибриде — или, что
     # хуже, PASS на гибриде, где точный обмен потерялся.
     alpha = rks.exact_exchange_fraction
     exchange_integral = (
-        float(np.einsum("uv,ls,ulvs", density, density, prepared.eri)) if alpha > 0.0 else 0.0
+        float(np.sum(density * exchange_matrix(density, prepared.eri))) if alpha > 0.0 else 0.0
     )
 
     rho = density_at_points(basis_values, density)
@@ -2025,9 +2082,9 @@ def _quality_checks_uks(
 
     kinetic = float(np.sum(density_total * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(density_total * integrals.build_nuclear_attraction(basis, molecule)))
-    coulomb = float(np.einsum("uv,ls,uvls", density_total, density_total, eri))
-    exchange_alpha = float(np.einsum("uv,ls,ulvs", uks.density_alpha, uks.density_alpha, eri))
-    exchange_beta = float(np.einsum("uv,ls,ulvs", uks.density_beta, uks.density_beta, eri))
+    coulomb = float(np.sum(density_total * coulomb_matrix(density_total, eri)))
+    exchange_alpha = float(np.sum(uks.density_alpha * exchange_matrix(uks.density_alpha, eri)))
+    exchange_beta = float(np.sum(uks.density_beta * exchange_matrix(uks.density_beta, eri)))
     exact_exchange = 0.5 * alpha * (exchange_alpha + exchange_beta)
 
     decomposition_error = abs(

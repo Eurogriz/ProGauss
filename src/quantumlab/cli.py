@@ -505,7 +505,11 @@ def _execute_job(
     try:
         result = engine.run(
             EngineRequest(
-                job_id=job.id, molecule=molecule, spec=spec, checkpoint=stored_checkpoint
+                job_id=job.id,
+                molecule=molecule,
+                spec=spec,
+                checkpoint=stored_checkpoint,
+                threads=spec.resources.threads or 1,
             ),
             checkpoint_sink=_persist_checkpoint,
         )

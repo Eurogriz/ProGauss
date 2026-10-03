@@ -103,7 +103,14 @@ def _run_one(
 
     jobs.update(job.id, partial(_transition, status=JobStatus.RUNNING))
     try:
-        result = engine.run(EngineRequest(job_id=job.id, molecule=molecule, spec=job.spec))
+        result = engine.run(
+            EngineRequest(
+                job_id=job.id,
+                molecule=molecule,
+                spec=job.spec,
+                threads=job.spec.resources.threads or 1,
+            )
+        )
     except QuantumLabError as error:
         code = str(error.code)
         params = {key: str(value) for key, value in error.params.items()}

@@ -47,7 +47,10 @@ def _rhf_channels(molecule: Molecule, basis_name: str = "6-31g") -> dict[str, fl
     prepared = build_integrals(basis, molecule)
     result = run_rhf(basis, molecule, TIGHT, integrals=prepared)
     stability = rhf_stability(
-        result.coefficients, result.orbital_energies, prepared.eri, molecule.n_electrons // 2
+        result.coefficients,
+        result.orbital_energies,
+        np.asarray(prepared.eri),
+        molecule.n_electrons // 2,
     )
     return {channel.name: channel.lowest_eigenvalue for channel in stability.channels}
 
@@ -81,7 +84,7 @@ def test_uhf_stability_reports_unstable_radical_saddle() -> None:
         result.beta_coefficients,
         result.alpha_energies,
         result.beta_energies,
-        prepared.eri,
+        np.asarray(prepared.eri),
         n_alpha,
         n_beta,
     )

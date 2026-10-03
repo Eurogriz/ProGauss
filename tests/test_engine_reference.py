@@ -654,14 +654,14 @@ def _option_spec(**overrides: object) -> CalculationSpec:
 
 
 def test_unimplemented_scf_strategies_are_rejected_not_silently_skipped() -> None:
-    """Запрос EDIIS/SOSCF отклоняется, а не выполняется без них.
+    """Запрос SOSCF отклоняется, а не выполняется без них.
 
     Это ключевой случай §54 ТЗ: расчёт сошёлся бы и вернул число, посчитанное
     другим алгоритмом. Пользователь выбрал метод — он обязан получить либо его,
     либо отказ.
     """
     engine = ReferenceEngine()
-    for strategies in (("ediis",), ("diis", "soscf"), ("ediis", "damping", "level_shift")):
+    for strategies in (("diis", "soscf"), ("soscf", "damping", "level_shift")):
         with pytest.raises(MethodNotAvailableError):
             engine.assert_supported(_option_spec(scf=ScfSpec(fallback_strategies=strategies)))
     # Анализ устойчивости реализован для HF в одной точке; для DFT — отказ.

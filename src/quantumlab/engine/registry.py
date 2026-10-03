@@ -336,8 +336,20 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
     ("diis", True, ""),
     ("damping", True, ""),
     ("level_shift", True, ""),
-    ("ediis", False, "EDIIS не реализован; запрос отклоняется, а не выполняется без него."),
+    (
+        "ediis",
+        True,
+        "EDIIS (Кудин–Скузерия–Кансес) для RHF, UHF, RKS и UKS; для ROHF запрос отклоняется.",
+    ),
     ("soscf", False, "SOSCF (второй порядок) не реализован."),
+    (
+        "direct",
+        True,
+        "Прямой SCF: J и K собираются на лету без хранения тензора ERI, со скринингом "
+        "Шварца 1e-12; инкрементальный Fock (по ΔD) не реализован, интегралы "
+        "пересчитываются целиком на каждой итерации. Анализ устойчивости требует "
+        "полный тензор и в прямом режиме отклоняется.",
+    ),
     (
         "stability_analysis",
         True,
@@ -349,7 +361,7 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
 )
 
 #: Параметры SCF, реализованные частично (ограничения — в примечании).
-_PARTIAL_SCF_OPTIONS: frozenset[str] = frozenset({"stability_analysis"})
+_PARTIAL_SCF_OPTIONS: frozenset[str] = frozenset({"stability_analysis", "ediis", "direct"})
 
 #: Возможности диспетчера заданий. Контрольная точка заявлена отдельно от
 #: повтора: повтор выполняется, а продолжать прерванный расчёт не с чего —

@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -566,7 +567,13 @@ def build_core_hamiltonian(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     return np.asarray(build_kinetic(basis, molecule) + build_nuclear_attraction(basis, molecule))
 
 
-def build_electron_repulsion(basis: BasisSet, molecule: Molecule) -> np.ndarray:
+def build_electron_repulsion(
+    basis: BasisSet,
+    molecule: Molecule,
+    *,
+    threads: int = 1,
+    screening: float = 0.0,
+) -> np.ndarray:
     """Тензор двухэлектронных интегралов ``(μν|λσ)`` формы ``(n, n, n, n)``.
 
     Вычисляются только уникальные квартеты оболочек (условие
@@ -577,27 +584,256 @@ def build_electron_repulsion(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     приближение, а другой порядок обхода — значения совпадают с поквартиетной
     сборкой :func:`_quartet_block` с точностью до порядка суммирования.
 
+    ``screening`` — порог скрининга Шварца: квартет пропускается, если
+    ``Q_ij·Q_kl < screening``, где ``Q_ij = max √|(μν|μν)|``. Неравенство
+    Коши–Шварца строгое, поэтому каждый пропущенный интеграл меньше порога по
+    модулю; ``0`` — без скрининга (точный тензор). ``threads`` — число потоков
+    над пачками: записи разных уникальных квартетов не пересекаются.
+
     В сферической схеме декартов тензор сворачивается матрицей перехода.
     """
     if basis.spherical:
         return _to_spherical_4(
-            build_electron_repulsion(basis.cartesian(), molecule), basis.transformation_matrix()
+            build_electron_repulsion(
+                basis.cartesian(), molecule, threads=threads, screening=screening
+            ),
+            basis.transformation_matrix(),
         )
     shells = basis.shells
     centers = _shell_centers(basis, molecule)
     offsets = _shell_offsets(basis)
     tensor = np.zeros((basis.n_functions,) * 4)
+    bounds = schwarz_bounds(basis, molecule, threads=threads) if screening > 0.0 else None
+    tasks = _eri_tasks(shells, _screened_quartets(len(shells), bounds, screening))
 
-    for quartets in _group_by_class(shells, _unique_quartets(len(shells))).values():
-        geometry = _class_geometry(shells, quartets[0])
+    def work(task: _EriTask) -> None:
+        geometry, chunk, budget = task
+        arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget)
+        blocks = _batch_eri_blocks(arrays, geometry)
+        _place_quartet_batch(tensor, offsets, chunk, geometry, blocks)
+
+    _parallel_for_each(work, tasks, threads)
+    return tensor
+
+
+_EriTask = tuple["_ClassGeometry", list["Quartet"], int]
+
+
+def _eri_tasks(shells: Sequence[Shell], quartets: Iterable[Quartet]) -> list[_EriTask]:
+    """Раскладывает квартеты по классам и режет на пачки: список независимых задач."""
+    tasks: list[_EriTask] = []
+    for group in _group_by_class(shells, quartets).values():
+        geometry = _class_geometry(shells, group[0])
         budget = geometry.angular_budget
         step = _batch_step(geometry, budget)
-        for start in range(0, len(quartets), step):
-            chunk = quartets[start : start + step]
-            arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget)
+        for start in range(0, len(group), step):
+            tasks.append((geometry, group[start : start + step], budget))
+    return tasks
+
+
+def _parallel_for_each(
+    function: Callable[[_EriTask], None], tasks: list[_EriTask], threads: int
+) -> None:
+    """Выполняет задачи в ``threads`` потоках (NumPy отпускает GIL на больших массивах)."""
+    if threads <= 1 or len(tasks) <= 1:
+        for task in tasks:
+            function(task)
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        for future in [pool.submit(function, task) for task in tasks]:
+            future.result()
+
+
+def _screened_quartets(
+    n_shells: int, bounds: np.ndarray | None, threshold: float
+) -> Iterator[Quartet]:
+    """Уникальные квартеты, прошедшие скрининг Шварца (или все, если порога нет)."""
+    if bounds is None or threshold <= 0.0:
+        yield from _unique_quartets(n_shells)
+        return
+    for quartet in _unique_quartets(n_shells):
+        i, j, k, m = quartet
+        if bounds[i, j] * bounds[k, m] >= threshold:
+            yield quartet
+
+
+def schwarz_bounds(basis: BasisSet, molecule: Molecule, *, threads: int = 1) -> np.ndarray:
+    """Оценки Шварца ``Q_ij = max_{μ∈i, ν∈j} √|(μν|μν)|`` для пар оболочек.
+
+    Считаются в декартовой схеме (для сферической базис приводится к ней):
+    ``|(μν|λσ)| ≤ Q_ij·Q_kl`` для любых функций, а сферические функции —
+    линейные комбинации декартовых с коэффициентами порядка 1.
+    """
+    cart = basis.cartesian()
+    shells = cart.shells
+    n = len(shells)
+    centers = _shell_centers(cart, molecule)
+    bounds = np.zeros((n, n))
+    pairs = [(i, j, i, j) for i in range(n) for j in range(i + 1)]
+
+    def work(task: _EriTask) -> None:
+        geometry, chunk, budget = task
+        arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget)
+        blocks = _batch_eri_blocks(arrays, geometry)
+        diagonal = np.einsum("nabab->nab", blocks)
+        values = np.sqrt(np.max(np.abs(diagonal), axis=(1, 2)))
+        for (i, j, _, _), value in zip(chunk, values, strict=True):
+            bounds[i, j] = bounds[j, i] = value
+
+    _parallel_for_each(work, _eri_tasks(shells, pairs), threads)
+    return bounds
+
+
+class DirectEri:
+    """Прямой (direct) режим: ERI не хранятся, ``J`` и ``K`` собираются на лету.
+
+    Вместо тензора ``n⁴`` держится только пачка интегралов: память растёт как
+    ``n²``. Цена — пересчёт интегралов при каждом построении фокиана (в
+    чистом NumPy это дорого: режим нужен там, где тензор не помещается в
+    память, а не ради скорости). Скрининг Шварца применяется всегда.
+
+    Объект подставляется вместо ndarray в ``coulomb_matrix``/``exchange_matrix``.
+    Для сферического базиса плотность переводится в декартову, а ``J``/``K``
+    обратно — это точное следствие ``ERI_sph = T⊗T⊗T⊗T ERI_cart``.
+    """
+
+    def __init__(
+        self,
+        basis: BasisSet,
+        molecule: Molecule,
+        *,
+        threshold: float = 1e-12,
+        threads: int = 1,
+    ) -> None:
+        """Готовит оценки Шварца и список задач; интегралы пока не считаются."""
+        self.cartesian = basis.cartesian()
+        self.transform = basis.transformation_matrix() if basis.spherical else None
+        self.molecule = molecule
+        self.threads = threads
+        self.n_functions = basis.n_functions
+        self.shells = self.cartesian.shells
+        self.centers = _shell_centers(self.cartesian, molecule)
+        self.offsets = _shell_offsets(self.cartesian)
+        self.bounds = schwarz_bounds(basis, molecule, threads=threads)
+        self.tasks = _eri_tasks(
+            self.shells,
+            _screened_quartets(len(self.shells), self.bounds, threshold),
+        )
+        self._cache: tuple[bytes, np.ndarray, np.ndarray] | None = None
+        self.passes = 0
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Форма «виртуального» тензора — как у обычного ERI."""
+        return (self.n_functions,) * 4
+
+    def coulomb(self, density: np.ndarray) -> np.ndarray:
+        """``J_μν = Σ (μν|λσ) D_λσ``."""
+        return self._jk(density)[0]
+
+    def exchange(self, density: np.ndarray) -> np.ndarray:
+        """``K_μλ = Σ (μν|λσ) D_νσ``."""
+        return self._jk(density)[1]
+
+    def _jk(self, density: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        key = np.ascontiguousarray(density).tobytes()
+        if self._cache is not None and self._cache[0] == key:
+            return self._cache[1], self._cache[2]
+        d_cart = density if self.transform is None else self.transform @ density @ self.transform.T
+        size = d_cart.shape[0]
+        locals_: list[tuple[np.ndarray, np.ndarray]] = []
+        lock = threading.Lock()
+
+        def work(task: _EriTask) -> None:
+            geometry, chunk, budget = task
+            arrays = _batch_arrays(self.shells, self.centers, chunk, angular_budget=budget)
             blocks = _batch_eri_blocks(arrays, geometry)
-            _place_quartet_batch(tensor, offsets, chunk, geometry, blocks)
-    return tensor
+            coulomb = np.zeros((size, size))
+            exchange = np.zeros((size, size))
+            _accumulate_jk(coulomb, exchange, d_cart, self.offsets, chunk, geometry, blocks)
+            with lock:
+                locals_.append((coulomb, exchange))
+
+        _parallel_for_each(work, self.tasks, self.threads)
+        self.passes += 1
+        coulomb = np.zeros((size, size))
+        exchange = np.zeros((size, size))
+        for part_j, part_k in locals_:
+            coulomb += part_j
+            exchange += part_k
+        # Накопленные «половинные» обновления симметризуются: каждый уникальный
+        # квартет записывает одну из двух транспонированных позиций.
+        coulomb = 0.5 * (coulomb + coulomb.T)
+        exchange = 0.5 * (exchange + exchange.T)
+        if self.transform is not None:
+            coulomb = self.transform.T @ coulomb @ self.transform
+            exchange = self.transform.T @ exchange @ self.transform
+        self._cache = (key, coulomb, exchange)
+        return coulomb, exchange
+
+
+def _accumulate_jk(
+    coulomb: np.ndarray,
+    exchange: np.ndarray,
+    density: np.ndarray,
+    offsets: np.ndarray,
+    quartets: Sequence[Quartet],
+    geometry: _ClassGeometry,
+    blocks: np.ndarray,
+) -> None:
+    """Добавляет вклад пачки уникальных квартетов в ``J`` и ``K``.
+
+    Восемь перестановок квартета дают для ``J`` по два обновления на пару
+    ``(ab)`` и ``(cd)`` и восемь обновлений ``K``; вырожденные квартеты
+    (``i=j``, ``k=l``, ``(ij)=(kl)``) входят с весом ``1/2`` за каждое
+    совпадение, иначе совпавшие перестановки учлись бы дважды.
+    """
+    n = len(quartets)
+    weights = np.ones(n)
+    for index, (i, j, k, m) in enumerate(quartets):
+        if i == j:
+            weights[index] *= 0.5
+        if k == m:
+            weights[index] *= 0.5
+        if (i, j) == (k, m):
+            weights[index] *= 0.5
+    w = weights[:, None, None]
+    ia, ib, ic, idd = (
+        np.array([offsets[q[side]] for q in quartets], dtype=int)[:, None]
+        + np.arange(geometry.shape[side], dtype=int)[None, :]
+        for side in range(4)
+    )
+
+    def pick(row: np.ndarray, col: np.ndarray) -> np.ndarray:
+        return np.asarray(density[row[:, :, None], col[:, None, :]])
+
+    d_ab, d_cd = pick(ia, ib), pick(ic, idd)
+    d_bd, d_bc, d_ad, d_ac = pick(ib, idd), pick(ib, ic), pick(ia, idd), pick(ia, ic)
+    d_db, d_cb, d_da, d_ca = pick(idd, ib), pick(ic, ib), pick(idd, ia), pick(ic, ia)
+
+    j_ab = 2.0 * w * np.einsum("nabcd,ncd->nab", blocks, d_cd)
+    j_cd = 2.0 * w * np.einsum("nabcd,nab->ncd", blocks, d_ab)
+    np.add.at(coulomb, (ia[:, :, None], ib[:, None, :]), j_ab)
+    np.add.at(coulomb, (ib[:, :, None], ia[:, None, :]), j_ab.transpose(0, 2, 1))
+    np.add.at(coulomb, (ic[:, :, None], idd[:, None, :]), j_cd)
+    np.add.at(coulomb, (idd[:, :, None], ic[:, None, :]), j_cd.transpose(0, 2, 1))
+
+    # (pq|rs) D_qs → K[p, r]; все восемь перестановок квартета (ab|cd).
+    updates = (
+        (ia, ic, "nabcd,nbd->nac", d_bd),
+        (ib, ic, "nabcd,nad->nbc", d_ad),
+        (ia, idd, "nabcd,nbc->nad", d_bc),
+        (ib, idd, "nabcd,nac->nbd", d_ac),
+        (ic, ia, "nabcd,ndb->nca", d_db),
+        (idd, ia, "nabcd,ncb->nda", d_cb),
+        (ic, ib, "nabcd,nda->ncb", d_da),
+        (idd, ib, "nabcd,nca->ndb", d_ca),
+    )
+    for rows, cols, spec, dens in updates:
+        contribution = w * np.einsum(spec, blocks, dens)
+        np.add.at(exchange, (rows[:, :, None], cols[:, None, :]), contribution)
 
 
 def _quartet_block_scalar(

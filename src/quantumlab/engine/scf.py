@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -29,6 +30,7 @@ import numpy as np
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, nuclear_repulsion
 from quantumlab.engine.integrals import (
+    DirectEri,
     build_core_hamiltonian,
     build_electron_repulsion,
     build_overlap,
@@ -75,6 +77,9 @@ class ScfSettings:
     #: 1e-2 → 44 итерации, 1e-3 → 77, 1e-4 → 133, 1e-5 → не сходится за 300.
     #: Замкнутой оболочки порог не касается: там сдвиг не включается.
     level_shift_release: float = 1e-2
+    #: EDIIS (Кудин–Скузерия–Кансес): минимизация энергии на симплексе весов
+    #: при большой невязке, плавный переход к DIIS Пулея при малой.
+    ediis: bool = False
 
 
 @dataclass(slots=True)
@@ -120,25 +125,29 @@ def canonical_orthogonalizer(overlap: np.ndarray) -> np.ndarray:
     return np.asarray(eigenvectors @ np.diag(inverse_sqrt) @ eigenvectors.T)
 
 
-def coulomb_matrix(density: np.ndarray, eri: np.ndarray) -> np.ndarray:
+def coulomb_matrix(density: np.ndarray, eri: np.ndarray | DirectEri) -> np.ndarray:
     """Кулоновская матрица ``J_μν = Σ_λσ D_λσ (μν|λσ)``.
 
     В UHF кулоновский член строится по **полной** плотности (α + β): электрон
     любого спина отталкивается от полного заряда.
     """
+    if isinstance(eri, DirectEri):
+        return eri.coulomb(density)
     return np.asarray(np.einsum("ls,uvls->uv", density, eri, optimize=True))
 
 
-def exchange_matrix(density: np.ndarray, eri: np.ndarray) -> np.ndarray:
+def exchange_matrix(density: np.ndarray, eri: np.ndarray | DirectEri) -> np.ndarray:
     """Обменная матрица ``K_μν = Σ_λσ D_λσ (μλ|νσ)``.
 
     В UHF обмен действует только между электронами **одного** спина, поэтому
     K строится по плотности соответствующего спинового канала.
     """
+    if isinstance(eri, DirectEri):
+        return eri.exchange(density)
     return np.asarray(np.einsum("ls,ulvs->uv", density, eri, optimize=True))
 
 
-def build_fock(core: np.ndarray, density: np.ndarray, eri: np.ndarray) -> np.ndarray:
+def build_fock(core: np.ndarray, density: np.ndarray, eri: np.ndarray | DirectEri) -> np.ndarray:
     """Фок-матрица ``F = H + J − ½K``.
 
     Коэффициент ½ у обменного члена — следствие RHF (двойное занятие).
@@ -200,6 +209,127 @@ def _diis_extrapolate(
     return sum(float(w) * f for w, f in zip(weights, fock_history, strict=True))  # type: ignore[return-value]
 
 
+class _EdiisHistory:
+    """Предыстория EDIIS: энергии, плотности и фокианы в АО-базисе.
+
+    Для квадратичной модели энергии (точной для HF)
+
+    ``E(c) = Σ c_i E_i − ½ Σ c_i c_j Σ_σ Tr[(D_i−D_j)(F_i−F_j)]``,
+
+    ``c_i ≥ 0, Σ c_i = 1``. В отличие от DIIS Пулея метод опирается на энергию,
+    поэтому устойчив вдали от сходимости, где невязка ещё не определяет шаг.
+    Для DFT модель приближённая (XC нелинейно), но её роль — только выбрать
+    стартовую смесь: сходимость доводит DIIS.
+    """
+
+    #: Невязка, выше которой используется чистый EDIIS, и ниже которой — чистый DIIS.
+    UPPER = 1e-1
+    LOWER = 1e-4
+
+    def __init__(self, space: int) -> None:
+        self.space = space
+        self.energies: list[float] = []
+        self.densities: list[tuple[np.ndarray, ...]] = []
+        self.focks: list[tuple[np.ndarray, ...]] = []
+
+    def weights(self) -> np.ndarray | None:
+        """Веса на симплексе или ``None``, если история слишком коротка."""
+        size = len(self.energies)
+        if size < 2:
+            return None
+        energies = np.asarray(self.energies)
+        quad = np.zeros((size, size))
+        for i in range(size):
+            for j in range(i + 1, size):
+                value = 0.0
+                for d_i, d_j, f_i, f_j in zip(
+                    self.densities[i], self.densities[j], self.focks[i], self.focks[j], strict=True
+                ):
+                    value += float(np.sum((d_i - d_j) * (f_i - f_j)))
+                quad[i, j] = quad[j, i] = value
+
+        def value_and_gradient(c: np.ndarray) -> tuple[float, np.ndarray]:
+            value = float(energies @ c - 0.5 * c @ quad @ c)
+            return value, energies - quad @ c
+
+        best_value = np.inf
+        best = np.full(size, 1.0 / size)
+        starts = [np.full(size, 1.0 / size)] + [np.eye(size)[k] for k in range(size)]
+        for start in starts:
+            candidate = _simplex_descent(value_and_gradient, start)
+            value, _ = value_and_gradient(candidate)
+            if value < best_value:
+                best_value, best = value, candidate
+        return best
+
+    def step(
+        self,
+        energy: float,
+        densities: tuple[np.ndarray, ...],
+        focks: tuple[np.ndarray, ...],
+        error: float,
+        cdiis: tuple[np.ndarray, ...] | None,
+        orthogonalizer: np.ndarray,
+    ) -> tuple[tuple[np.ndarray, ...], bool] | None:
+        """Смесь EDIIS/DIIS в ортогональном базисе; второй элемент — EDIIS участвовал."""
+        self.energies.append(energy)
+        self.densities.append(densities)
+        self.focks.append(focks)
+        if len(self.energies) > self.space:
+            self.energies.pop(0)
+            self.densities.pop(0)
+            self.focks.pop(0)
+        if cdiis is not None and error < self.LOWER:
+            return cdiis, False
+        weights = self.weights()
+        if weights is None:
+            return None
+        edi = tuple(
+            orthogonalizer.T
+            @ sum(float(w) * f[k] for w, f in zip(weights, self.focks, strict=True))
+            @ orthogonalizer
+            for k in range(len(focks))
+        )
+        if cdiis is None or error >= self.UPPER:
+            return edi, True
+        t = (np.log10(error) - np.log10(self.LOWER)) / (np.log10(self.UPPER) - np.log10(self.LOWER))
+        return tuple(t * e + (1.0 - t) * c for e, c in zip(edi, cdiis, strict=True)), True
+
+
+def _simplex_descent(
+    function: Callable[[np.ndarray], tuple[float, np.ndarray]], start: np.ndarray
+) -> np.ndarray:
+    """Проекционный градиентный спуск на симплексе (размер ≤ ``diis_space``)."""
+    point = start.copy()
+    value, gradient = function(point)
+    for _ in range(200):
+        step = 1.0
+        improved = False
+        while step > 1e-12:
+            trial = _project_to_simplex(point - step * gradient)
+            trial_value, trial_gradient = function(trial)
+            if trial_value < value - 1e-15:
+                if float(np.max(np.abs(trial - point))) < 1e-12:
+                    return trial
+                point, value, gradient = trial, trial_value, trial_gradient
+                improved = True
+                break
+            step *= 0.5
+        if not improved:
+            break
+    return point
+
+
+def _project_to_simplex(vector: np.ndarray) -> np.ndarray:
+    """Евклидова проекция на ``{c ≥ 0, Σ c = 1}`` (алгоритм сортировки)."""
+    ordered = np.sort(vector)[::-1]
+    cumulative = np.cumsum(ordered) - 1.0
+    indices = np.arange(1, vector.size + 1)
+    rho = int(np.nonzero(ordered - cumulative / indices > 0)[0][-1])
+    theta = cumulative[rho] / (rho + 1)
+    return np.asarray(np.maximum(vector - theta, 0.0))
+
+
 @dataclass(frozen=True, slots=True)
 class PrecomputedIntegrals:
     """Одноэлектронные и двухэлектронные интегралы, собранные заранее.
@@ -213,15 +343,36 @@ class PrecomputedIntegrals:
 
     overlap: np.ndarray
     core: np.ndarray
-    eri: np.ndarray
+    eri: np.ndarray | DirectEri
 
 
-def build_integrals(basis: BasisSet, molecule: Molecule) -> PrecomputedIntegrals:
-    """Собирает все интегралы, нужные RHF."""
+def build_integrals(
+    basis: BasisSet,
+    molecule: Molecule,
+    *,
+    direct: bool = False,
+    threads: int = 1,
+    screening: float = 0.0,
+) -> PrecomputedIntegrals:
+    """Собирает все интегралы, нужные RHF.
+
+    ``direct`` — не хранить тензор ERI, а собирать ``J``/``K`` на лету
+    (:class:`~quantumlab.engine.integrals.DirectEri`); ``screening`` — порог
+    Шварца, ``threads`` — потоки сборки.
+    """
+    two_electron: np.ndarray | DirectEri
+    if direct:
+        two_electron = DirectEri(
+            basis, molecule, threshold=screening if screening > 0.0 else 1e-12, threads=threads
+        )
+    else:
+        two_electron = build_electron_repulsion(
+            basis, molecule, threads=threads, screening=screening
+        )
     return PrecomputedIntegrals(
         overlap=build_overlap(basis, molecule),
         core=build_core_hamiltonian(basis, molecule),
-        eri=build_electron_repulsion(basis, molecule),
+        eri=two_electron,
     )
 
 
@@ -306,6 +457,7 @@ def run_rhf(
 
     fock_history: list[np.ndarray] = []
     error_history: list[np.ndarray] = []
+    ediis = _EdiisHistory(config.diis_space) if config.ediis else None
     history: list[ScfHistory] = []
     previous_energy = 0.0
     converged = False
@@ -344,6 +496,21 @@ def run_rhf(
                 strategy = "diis"
                 if "diis" not in strategies:
                     strategies.append("diis")
+
+        if ediis is not None and not level_shift_active:
+            mixed = ediis.step(
+                energy,
+                (density,),
+                (fock,),
+                diis_error,
+                (effective_fock_prime,) if strategy == "diis" else None,
+                orthogonalizer,
+            )
+            if mixed is not None and mixed[1]:
+                effective_fock_prime = mixed[0][0]
+                strategy = "ediis"
+                if "ediis" not in strategies:
+                    strategies.append("ediis")
 
         # --- сдвиг уровней: только если DIIS застопорился ------------------
         # Сдвиг уровней выключается, как только невязка достаточно мала: дальше
@@ -581,6 +748,7 @@ def run_uhf(
     diis_beta: list[np.ndarray] = []
     error_alpha: list[np.ndarray] = []
     error_beta: list[np.ndarray] = []
+    ediis = _EdiisHistory(config.diis_space) if config.ediis else None
     history: list[ScfHistory] = []
     previous_energy = 0.0
     converged = False
@@ -648,6 +816,21 @@ def run_uhf(
                 strategy = "diis"
                 if "diis" not in strategies:
                     strategies.append("diis")
+
+        if ediis is not None and not level_shift_active:
+            mixed = ediis.step(
+                energy,
+                (density_alpha, density_beta),
+                (fock_alpha, fock_beta),
+                diis_error,
+                (effective_alpha, effective_beta) if strategy == "diis" else None,
+                orthogonalizer,
+            )
+            if mixed is not None and mixed[1]:
+                effective_alpha, effective_beta = mixed[0]
+                strategy = "ediis"
+                if "ediis" not in strategies:
+                    strategies.append("ediis")
 
         # Сдвиг уровней — временный стабилизатор: сдвинутый фокиан имеет другую
         # стационарную точку, поэтому держать его до конца нельзя (§10 ТЗ).
