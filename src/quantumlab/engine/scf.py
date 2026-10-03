@@ -34,6 +34,18 @@ from quantumlab.engine.integrals import (
     build_overlap,
 )
 
+#: Рост энергии меньше этого порога после рестарта — шум округления (порядка
+#: ε·|E|), а не регресс траектории; гашение по нему не включается. Без порога
+#: рестарт из сошедшейся плотности «регрессировал» на 1e-14 и зря гасился.
+#: Для расчёта с нуля порог нулевой: там реактивное гашение при любом росте
+#: энергии измеримо улучшает сходимость (проверено на UKS/PBE радикала CH).
+ENERGY_REGRESSION_NOISE = 1e-12
+
+
+def _regression_floor(strategies: list[str]) -> float:
+    """Порог роста энергии, выше которого шаг считается регрессом."""
+    return ENERGY_REGRESSION_NOISE if "checkpoint-restart" in strategies else 0.0
+
 
 @dataclass(frozen=True, slots=True)
 class ScfSettings:
@@ -365,7 +377,7 @@ def run_rhf(
         # В обоих случаях буферы DIIS сбрасываются: векторы из другой
         # траектории экстраполировать нельзя — именно это и останавливало
         # сходимость, пока гашение стояло на первых итерациях всегда.
-        regressed = iteration > 1 and energy_change > 0.0
+        regressed = iteration > 1 and energy_change > _regression_floor(strategies)
         if iteration <= config.damping_rounds or (regressed and not level_shift_active):
             new_density = (
                 config.damping_factor * density + (1.0 - config.damping_factor) * new_density
@@ -485,12 +497,28 @@ def spin_population(electrons: int, multiplicity: int) -> tuple[int, int]:
     return (electrons + unpaired) // 2, (electrons - unpaired) // 2
 
 
+def _validated_spin_densities(
+    densities: tuple[np.ndarray, np.ndarray], shape: tuple[int, ...]
+) -> tuple[np.ndarray, np.ndarray]:
+    """Приводит пару стартовых плотностей к массивам и проверяет размер."""
+    alpha = np.asarray(densities[0], dtype=float)
+    beta = np.asarray(densities[1], dtype=float)
+    if alpha.shape != shape or beta.shape != shape:
+        msg = (
+            f"Начальные плотности имеют размеры {alpha.shape} и {beta.shape}, "
+            f"а базис требует {shape}."
+        )
+        raise ValueError(msg)
+    return alpha, beta
+
+
 def run_uhf(
     basis: BasisSet,
     molecule: Molecule,
     settings: ScfSettings | None = None,
     *,
     integrals: PrecomputedIntegrals | None = None,
+    initial_densities: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> UhfResult:
     """Выполняет UHF-расчёт.
 
@@ -501,6 +529,11 @@ def run_uhf(
 
     Стартовая догадка — одинаковые α и β из ядра Гамильтона, поэтому для
     замкнутой оболочки UHF сходится к RHF-решению (и обязан дать ту же энергию).
+
+    ``initial_densities`` — пара плотностей ``(D^α, D^β)`` из контрольной точки:
+    стартовая плотность берётся из неё, а орбитали для коммутатора DIIS на
+    первой итерации получаются одной диагонализацией фокианов по этим плотностям
+    (как в :func:`run_rhf`).
     """
     config = settings or ScfSettings()
     started = time.perf_counter()
@@ -518,16 +551,31 @@ def run_uhf(
         energies, coefficients_prime = np.linalg.eigh(symmetric)
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
-    alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
-        orthogonalizer.T @ core @ orthogonalizer
-    )
-    beta_energies, beta_coefficients, beta_prime = (
-        alpha_energies,
-        alpha_coefficients,
-        alpha_prime,
-    )
-    density_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
-    density_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
+    if initial_densities is not None:
+        density_alpha, density_beta = _validated_spin_densities(initial_densities, overlap.shape)
+        strategies = ["checkpoint-restart"]
+        restart_coulomb = coulomb_matrix(density_alpha + density_beta, eri)
+        alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
+            orthogonalizer.T
+            @ (core + restart_coulomb - exchange_matrix(density_alpha, eri))
+            @ orthogonalizer
+        )
+        beta_energies, beta_coefficients, beta_prime = diagonalize(
+            orthogonalizer.T
+            @ (core + restart_coulomb - exchange_matrix(density_beta, eri))
+            @ orthogonalizer
+        )
+    else:
+        alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
+            orthogonalizer.T @ core @ orthogonalizer
+        )
+        beta_energies, beta_coefficients, beta_prime = (
+            alpha_energies,
+            alpha_coefficients,
+            alpha_prime,
+        )
+        density_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
+        density_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
 
     diis_alpha: list[np.ndarray] = []
     diis_beta: list[np.ndarray] = []
@@ -634,7 +682,7 @@ def run_uhf(
         new_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
         new_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
 
-        regressed = iteration > 1 and energy_change > 0.0
+        regressed = iteration > 1 and energy_change > _regression_floor(strategies)
         if iteration <= config.damping_rounds or (regressed and not level_shift_active):
             new_alpha = (
                 config.damping_factor * density_alpha + (1.0 - config.damping_factor) * new_alpha

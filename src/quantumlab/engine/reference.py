@@ -19,10 +19,10 @@ zero-затухание) с аналитическим вкладом в гра�
 * UKS (спиново-поляризованный DFT): функционалы считаются только по полной
   плотности, поэтому DFT с открытой оболочкой отклоняется;
 * MP2, CC, сканирования и поиск переходных состояний;
-* сферическая схема базисов: наборы, опубликованные с d/f в чистых угловых
-  моментах, считаются в декартовой схеме (6 компонент вместо 5 для d). Это
-  больший базис, энергии отличаются от табличных на ~1e-4 Eh; факт отражается
-  в проверке качества ``basis_angular_scheme`` со статусом ``warn``.
+* пользовательская смена угловой схемы: базис всегда считается в той схеме,
+  в которой опубликован (сферической для cc-pV*, def2-*, 6-311G(d,p); для
+  остальных — декартовой), и проверка качества ``basis_angular_scheme``
+  фиксирует это.
 """
 
 from __future__ import annotations
@@ -103,6 +103,7 @@ from quantumlab.engine.scf import (
     spin_population,
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
+from quantumlab.engine.stability import StabilityResult, rhf_stability, uhf_stability
 from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
 from quantumlab.errors import (
     CombinationUnavailableError,
@@ -304,6 +305,64 @@ class ReferenceEngine:
             raise JobCheckpointInvalidError(str(error)) from error
         return state.density
 
+    def _restore_spin_densities(
+        self, request: EngineRequest, basis_name: str, prepared: PrecomputedIntegrals
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        """Стартовые плотности ``(D^α, D^β)`` для UHF/UKS из контрольной точки.
+
+        Контрольная точка замкнутой оболочки для открытой не годится: у неё нет
+        разделения по спинам, и придумывать его нельзя.
+        """
+        if request.checkpoint is None:
+            return None
+        try:
+            state = read_scf_checkpoint(request.checkpoint, overlap=prepared.overlap)
+            assert_matches_job(state, molecule=request.molecule, basis=basis_name)
+        except CheckpointError as error:
+            raise JobCheckpointInvalidError(str(error)) from error
+        if state.density_alpha is None or state.density_beta is None:
+            msg = (
+                "Контрольная точка не содержит спиновых плотностей α и β: она получена "
+                "в расчёте замкнутой оболочки и не годится для UHF/UKS."
+            )
+            raise JobCheckpointInvalidError(msg)
+        return state.density_alpha, state.density_beta
+
+    def _write_checkpoint(
+        self,
+        sink: CheckpointSink | None,
+        request: EngineRequest,
+        basis_name: str,
+        state: RhfResult | RksResult | UhfResult | UksResult,
+    ) -> None:
+        """Передаёт контрольную точку приёмнику, если он есть.
+
+        Пишем состояние, даже если SCF не сошёлся: частично сошедшаяся плотность —
+        лучшее начальное приближение, чем догадка по остову.
+        """
+        if sink is None:
+            return
+        spin = (
+            (state.density_alpha, state.density_beta)
+            if isinstance(state, UhfResult | UksResult)
+            else None
+        )
+        density = (
+            state.density_alpha + state.density_beta
+            if isinstance(state, UhfResult | UksResult)
+            else state.density
+        )
+        sink(
+            write_scf_checkpoint(
+                molecule=request.molecule,
+                basis=basis_name,
+                density=density,
+                total_energy=state.total_energy,
+                iterations=state.iterations,
+                spin_densities=spin,
+            )
+        )
+
     # ------------------------------------------------------------------ #
     # Одноточечный расчёт
     # ------------------------------------------------------------------ #
@@ -317,18 +376,23 @@ class ReferenceEngine:
     ) -> CalculationResult:
         """Одноточечный расчёт в фиксированной геометрии.
 
-        Контрольные точки поддерживаются только в ветке RHF. Для остальных
-        ``checkpoint_sink`` не вызывается: это значит, что рестарт для них
-        недоступен, и ``job resume`` честно откажет, а не начнёт расчёт заново,
-        выдавая его за продолжение.
+        Контрольные точки поддерживаются для RHF, UHF, RKS и UKS. Для ROHF
+        ``checkpoint_sink`` не вызывается: рестарт недоступен, и ``job resume``
+        честно откажет, а не начнёт расчёт заново, выдавая его за продолжение.
         """
         method = request.spec.method
         if method is not None and method.theory is TheoryFamily.DFT:
             if method.spin is SpinTreatment.RHF:
-                return self._run_single_point_rks(request, basis_name, progress=progress)
-            return self._run_single_point_uks(request, basis_name, progress=progress)
+                return self._run_single_point_rks(
+                    request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+                )
+            return self._run_single_point_uks(
+                request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+            )
         if method is not None and method.spin is SpinTreatment.UHF:
-            return self._run_single_point_uhf(request, basis_name, progress=progress)
+            return self._run_single_point_uhf(
+                request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+            )
         if method is not None and method.spin is SpinTreatment.ROHF:
             return self._run_single_point_rohf(request, basis_name, progress=progress)
         return self._run_single_point_rhf(
@@ -336,7 +400,12 @@ class ReferenceEngine:
         )
 
     def _run_single_point_rks(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """RKS (LDA) в фиксированной геометрии.
 
@@ -386,9 +455,11 @@ class ReferenceEngine:
             _scf_settings(spec),
             integrals=prepared,
             grid=grid,
+            initial_density=self._restore_density(request, basis_name, prepared),
         )
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=rks.iterations, converged=rks.converged)
+        self._write_checkpoint(checkpoint_sink, request, basis_name, rks)
 
         started = time.perf_counter()
         d3 = _dispersion_contribution(spec, request.molecule)
@@ -419,15 +490,18 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_rks(
-                rks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
-            ),
+            warnings=_warnings_rks(rks, request.molecule, grid, pruning_requested=spec.grid.prune),
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_uks(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """UKS (спиново-поляризованный DFT) в фиксированной геометрии.
 
@@ -470,9 +544,11 @@ class ReferenceEngine:
             _scf_settings(spec),
             integrals=prepared,
             grid=grid,
+            initial_densities=self._restore_spin_densities(request, basis_name, prepared),
         )
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=uks.iterations, converged=uks.converged)
+        self._write_checkpoint(checkpoint_sink, request, basis_name, uks)
 
         started = time.perf_counter()
         d3 = _dispersion_contribution(spec, request.molecule)
@@ -506,9 +582,7 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_uks(
-                uks, basis, request.molecule, grid, pruning_requested=spec.grid.prune
-            ),
+            warnings=_warnings_uks(uks, request.molecule, grid, pruning_requested=spec.grid.prune),
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -546,19 +620,7 @@ class ReferenceEngine:
         )
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=rhf.iterations, converged=rhf.converged)
-        if checkpoint_sink is not None:
-            # Пишем состояние, даже если SCF не сошёлся: частично сошедшаяся
-            # плотность — лучшее начальное приближение для продолжения, чем
-            # догадка по остову.
-            checkpoint_sink(
-                write_scf_checkpoint(
-                    molecule=request.molecule,
-                    basis=basis_name,
-                    density=rhf.density,
-                    total_energy=rhf.total_energy,
-                    iterations=rhf.iterations,
-                )
-            )
+        self._write_checkpoint(checkpoint_sink, request, basis_name, rhf)
 
         started = time.perf_counter()
         d3 = _dispersion_contribution(spec, request.molecule)
@@ -568,9 +630,29 @@ class ReferenceEngine:
         else:
             d3_checks = ()
 
+        stability_checks: tuple[QualityCheck, ...] = ()
+        stability_warnings: tuple[CalculationWarning, ...] = ()
+        if spec.scf.stability_analysis:
+            started = time.perf_counter()
+            stability = (
+                rhf_stability(
+                    rhf.coefficients,
+                    rhf.orbital_energies,
+                    prepared.eri,
+                    request.molecule.n_electrons // 2,
+                )
+                if rhf.converged
+                else None
+            )
+            check, stability_warnings = _stability_outcome(stability)
+            stability_checks = (check,)
+            timings.append(_timing("stability", started))
+
         started = time.perf_counter()
         properties = _properties(rhf, request.molecule, dipole_integrals)
-        checks = _quality_checks(rhf, basis, request.molecule, prepared) + d3_checks
+        checks = (
+            _quality_checks(rhf, basis, request.molecule, prepared) + d3_checks + stability_checks
+        )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -586,13 +668,18 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings(rhf, basis, request.molecule),
+            warnings=_warnings(rhf, request.molecule) + stability_warnings,
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
 
     def _run_single_point_uhf(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """UHF в фиксированной геометрии.
 
@@ -616,9 +703,16 @@ class ReferenceEngine:
         _report(progress, 45.0, "integrals")
 
         started = time.perf_counter()
-        uhf = run_uhf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
+        uhf = run_uhf(
+            basis,
+            request.molecule,
+            _scf_settings(spec),
+            integrals=prepared,
+            initial_densities=self._restore_spin_densities(request, basis_name, prepared),
+        )
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=uhf.iterations, converged=uhf.converged)
+        self._write_checkpoint(checkpoint_sink, request, basis_name, uhf)
 
         started = time.perf_counter()
         d3 = _dispersion_contribution(spec, request.molecule)
@@ -628,9 +722,37 @@ class ReferenceEngine:
         else:
             d3_checks = ()
 
+        stability_checks: tuple[QualityCheck, ...] = ()
+        stability_warnings: tuple[CalculationWarning, ...] = ()
+        if spec.scf.stability_analysis:
+            started = time.perf_counter()
+            n_alpha, n_beta = spin_population(
+                request.molecule.n_electrons, request.molecule.multiplicity
+            )
+            stability = (
+                uhf_stability(
+                    uhf.alpha_coefficients,
+                    uhf.beta_coefficients,
+                    uhf.alpha_energies,
+                    uhf.beta_energies,
+                    prepared.eri,
+                    n_alpha,
+                    n_beta,
+                )
+                if uhf.converged
+                else None
+            )
+            check, stability_warnings = _stability_outcome(stability)
+            stability_checks = (check,)
+            timings.append(_timing("stability", started))
+
         started = time.perf_counter()
         properties = _properties_uhf(uhf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(uhf, basis, request.molecule, prepared) + d3_checks
+        checks = (
+            _quality_checks_uhf(uhf, basis, request.molecule, prepared)
+            + d3_checks
+            + stability_checks
+        )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -649,7 +771,7 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_uhf(uhf, basis, request.molecule),
+            warnings=_warnings_uhf(uhf, request.molecule) + stability_warnings,
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -715,7 +837,7 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_uhf(rohf, basis, request.molecule),
+            warnings=_warnings_uhf(rohf, request.molecule),
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -908,7 +1030,7 @@ class ReferenceEngine:
                 + d3_checks
             )
             extra_warnings = _warnings_uks(
-                uks_final, basis, final, grid, pruning_requested=spec.grid.prune
+                uks_final, final, grid, pruning_requested=spec.grid.prune
             )
         elif rks_final is not None:
             assert grid is not None and basis_values is not None
@@ -919,7 +1041,7 @@ class ReferenceEngine:
                 + d3_checks
             )
             extra_warnings = _warnings_rks(
-                rks_final, basis, final, grid, pruning_requested=spec.grid.prune
+                rks_final, final, grid, pruning_requested=spec.grid.prune
             )
         elif open_shell_final is not None:
             properties = _properties_uhf(open_shell_final, final, dipole_integrals)
@@ -928,7 +1050,7 @@ class ReferenceEngine:
                 + _optimization_check(optimization)
                 + d3_checks
             )
-            extra_warnings = _warnings_uhf(open_shell_final, basis, final)
+            extra_warnings = _warnings_uhf(open_shell_final, final)
         else:
             properties = _properties(rhf_final, final, dipole_integrals)
             checks = (
@@ -936,7 +1058,7 @@ class ReferenceEngine:
                 + _optimization_check(optimization)
                 + d3_checks
             )
-            extra_warnings = _warnings(rhf_final, basis, final)
+            extra_warnings = _warnings(rhf_final, final)
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -1092,21 +1214,24 @@ class ReferenceEngine:
         if method is None:
             return
 
-        if (
-            method.theory is TheoryFamily.DFT
-            and method.functional is not None
-            and spec.task is not Task.SINGLE_POINT
-            and get_functional(method.functional).requires_tau
-        ):
-            # Аналитического градиента meta-GGA нет (нужны производные τ по
-            # ядрам), а оптимизация и частоты строятся на градиенте: без
-            # явного отказа они упали бы глубоко внутри решателя.
-            raise CombinationUnavailableError(
-                f"DFT/{method.functional} + {spec.task.value}",
-                "Для meta-GGA-функционала реализована только энергия в одной "
-                "точке: аналитический градиент (нужный оптимизации и частотам) "
-                "не реализован.",
-            )
+        if spec.scf.stability_analysis:
+            if method.theory is not TheoryFamily.HF:
+                raise CombinationUnavailableError(
+                    f"scf:stability_analysis + {method.theory.value}",
+                    "Анализ устойчивости реализован только для HF: для DFT нужно "
+                    "обменно-корреляционное ядро второго порядка. Запрос не "
+                    "выполняется молча без анализа (§54 ТЗ).",
+                )
+            if method.spin is SpinTreatment.ROHF:
+                raise CombinationUnavailableError(
+                    "scf:stability_analysis + rohf",
+                    "Анализ устойчивости ROHF не реализован: доступны RHF и UHF.",
+                )
+            if spec.task is not Task.SINGLE_POINT:
+                raise CombinationUnavailableError(
+                    f"scf:stability_analysis + {spec.task.value}",
+                    "Анализ устойчивости выполняется только в одноточечном расчёте.",
+                )
 
         if method.theory is TheoryFamily.DFT and method.spin is SpinTreatment.ROHF:
             # В ``combination`` — только технические идентификаторы: движок по
@@ -1305,7 +1430,7 @@ def _solve_energy_and_gradient(
 #: останется русским — и то и другое нарушает §3 ТЗ.
 WARNING_KEYS: tuple[str, ...] = (
     "warning.scf_not_converged",
-    "warning.basis_spherical_scheme",
+    "warning.scf_unstable",
     "warning.dipole_origin_charged",
     "warning.grid_prune_unimplemented",
     "warning.grid_xc_integration",
@@ -1581,7 +1706,6 @@ def _quality_checks_uhf(
         )
 
     s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
-    scheme = basis_angular_scheme(basis.name)
     return (
         QualityCheck(
             name_key="scf_converged",
@@ -1639,20 +1763,12 @@ def _quality_checks_uhf(
                 f"избыток {uhf.s_squared - s_exact:+.6f}"
             ),
         ),
-        QualityCheck(
-            name_key="basis_angular_scheme",
-            verdict=(QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING),
-            detail=(
-                "расчёт в декартовой схеме"
-                if scheme == "cartesian"
-                else f"базис {basis.name} опубликован в сферической схеме"
-            ),
-        ),
+        _angular_scheme_check(basis),
     )
 
 
 def _warnings_uhf(
-    uhf: UhfResult | RohfResult, basis: BasisSet, molecule: Molecule
+    uhf: UhfResult | RohfResult, molecule: Molecule
 ) -> tuple[CalculationWarning, ...]:
     """Предупреждения UHF: несошедшийся SCF, схема базиса, начало отсчёта диполя."""
     warnings: list[CalculationWarning] = []
@@ -1662,9 +1778,6 @@ def _warnings_uhf(
                 key="warning.scf_not_converged", params={"iterations": str(uhf.iterations)}
             )
         )
-    warning = _angular_scheme_warning(basis)
-    if warning:
-        warnings.append(warning)
     dipole_warning = _dipole_origin_warning(molecule)
     if dipole_warning:
         warnings.append(dipole_warning)
@@ -1710,7 +1823,6 @@ def _quality_checks(
     density_prime = inverse @ rhf.density @ inverse.T
     idempotency_error = float(np.max(np.abs(density_prime @ density_prime - 2.0 * density_prime)))
 
-    scheme = basis_angular_scheme(basis.name)
     return (
         QualityCheck(
             name_key="scf_converged",
@@ -1756,18 +1868,7 @@ def _quality_checks(
             ),
             detail=f"max|D′² − 2D′| = {idempotency_error:.3e}",
         ),
-        QualityCheck(
-            name_key="basis_angular_scheme",
-            verdict=QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING,
-            detail=(
-                "базис опубликован в декартовой схеме — расчёт ей соответствует"
-                if scheme == "cartesian"
-                else (
-                    "базис опубликован в сферической схеме, расчёт идёт в декартовой "
-                    "(6 d-функций вместо 5); энергия ниже табличной примерно на 1e-4 Eh"
-                )
-            ),
-        ),
+        _angular_scheme_check(basis),
     )
 
 
@@ -1840,7 +1941,6 @@ def _quality_checks_rks(
     else:
         grid_verdict = QualityVerdict.FAIL
 
-    scheme = basis_angular_scheme(basis.name)
     return (
         QualityCheck(
             name_key="scf_converged",
@@ -1894,18 +1994,7 @@ def _quality_checks_rks(
             ),
             detail=f"max|D′² − 2D′| = {idempotency_error:.3e}",
         ),
-        QualityCheck(
-            name_key="basis_angular_scheme",
-            verdict=QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING,
-            detail=(
-                "базис опубликован в декартовой схеме — расчёт ей соответствует"
-                if scheme == "cartesian"
-                else (
-                    "базис опубликован в сферической схеме, расчёт идёт в декартовой "
-                    "(6 d-функций вместо 5); энергия ниже табличной примерно на 1e-4 Eh"
-                )
-            ),
-        ),
+        _angular_scheme_check(basis),
     )
 
 
@@ -1993,7 +2082,6 @@ def _quality_checks_uks(
 
     n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
     s_exact = 0.5 * (n_alpha - n_beta) * (0.5 * (n_alpha - n_beta) + 1.0)
-    scheme = basis_angular_scheme(basis.name)
     return (
         QualityCheck(
             name_key="scf_converged",
@@ -2064,18 +2152,7 @@ def _quality_checks_uks(
                 f"избыток {uks.s_squared - s_exact:+.6f}"
             ),
         ),
-        QualityCheck(
-            name_key="basis_angular_scheme",
-            verdict=QualityVerdict.PASS if scheme == "cartesian" else QualityVerdict.WARNING,
-            detail=(
-                "базис опубликован в декартовой схеме — расчёт ей соответствует"
-                if scheme == "cartesian"
-                else (
-                    "базис опубликован в сферической схеме, расчёт идёт в декартовой "
-                    "(6 d-функций вместо 5); энергия ниже табличной примерно на 1e-4 Eh"
-                )
-            ),
-        ),
+        _angular_scheme_check(basis),
     )
 
 
@@ -2089,7 +2166,6 @@ def _require_vxc(vxc: np.ndarray | None) -> np.ndarray:
 
 def _warnings_uks(
     uks: UksResult,
-    basis: BasisSet,
     molecule: Molecule,
     grid: QuadratureGrid,
     *,
@@ -2103,9 +2179,6 @@ def _warnings_uks(
                 key="warning.scf_not_converged", params={"iterations": str(uks.iterations)}
             )
         )
-    scheme = _angular_scheme_warning(basis)
-    if scheme:
-        warnings.append(scheme)
     dipole = _dipole_origin_warning(molecule)
     if dipole:
         warnings.append(dipole)
@@ -2122,7 +2195,6 @@ def _warnings_uks(
 
 def _warnings_rks(
     rks: RksResult,
-    basis: BasisSet,
     molecule: Molecule,
     grid: QuadratureGrid,
     *,
@@ -2136,9 +2208,6 @@ def _warnings_rks(
                 key="warning.scf_not_converged", params={"iterations": str(rks.iterations)}
             )
         )
-    scheme = _angular_scheme_warning(basis)
-    if scheme:
-        warnings.append(scheme)
     dipole = _dipole_origin_warning(molecule)
     if dipole:
         warnings.append(dipole)
@@ -2168,20 +2237,76 @@ def _dipole_origin_warning(molecule: Molecule) -> CalculationWarning | None:
     )
 
 
-def _angular_scheme_warning(basis: BasisSet) -> CalculationWarning | None:
-    """Предупреждение о декартовой схеме, если базис опубликован в сферической.
+def _stability_outcome(
+    result: StabilityResult | None,
+) -> tuple[QualityCheck, tuple[CalculationWarning, ...]]:
+    """Проверка качества и предупреждение по итогам анализа устойчивости.
 
-    Общая для RHF и UHF: ключ один, и расхождение в формулировках означало бы,
-    что пользователь видит разное предупреждение для одного и того же базиса.
+    ``None`` — анализ запрошен, но не выполнен (SCF не сошёлся: гессиан в
+    несошедшейся точке ничего не говорит об устойчивости); это отдельный
+    вердикт, а не молчаливое «устойчиво».
     """
-    if basis_angular_scheme(basis.name) == "cartesian":
-        return None
-    return CalculationWarning(key="warning.basis_spherical_scheme", params={"basis": basis.name})
+    if result is None or not result.channels:
+        return (
+            QualityCheck(
+                name_key="wfn_stability",
+                verdict=QualityVerdict.NOT_CHECKED,
+                detail="анализ не выполнен: SCF не сошёлся или нет виртуальных орбиталей",
+            ),
+            (),
+        )
+    summary = ", ".join(
+        f"{channel.name}: {channel.lowest_eigenvalue:+.4f} э" for channel in result.channels
+    )
+    if result.stable:
+        return (
+            QualityCheck(
+                name_key="wfn_stability",
+                verdict=QualityVerdict.PASS,
+                detail=f"наименьшие собственные значения гессиана — {summary}",
+            ),
+            (),
+        )
+    unstable = ", ".join(
+        f"{channel.name} ({channel.lowest_eigenvalue:+.4f} э)"
+        for channel in result.unstable_channels
+    )
+    return (
+        QualityCheck(
+            name_key="wfn_stability",
+            verdict=QualityVerdict.WARNING,
+            detail=f"найдена неустойчивость — {summary}",
+        ),
+        (CalculationWarning(key="warning.scf_unstable", params={"channels": unstable}),),
+    )
 
 
-def _warnings(
-    rhf: RhfResult | RksResult, basis: BasisSet, molecule: Molecule
-) -> tuple[CalculationWarning, ...]:
+def _angular_scheme_check(basis: BasisSet) -> QualityCheck:
+    """Проверка качества: в какой угловой схеме выполнен расчёт.
+
+    Расчёт идёт в схеме, в которой базис опубликован, поэтому табличные
+    энергии воспроизводимы; расхождение схем было бы ``WARNING``.
+    """
+    published = basis_angular_scheme(basis.name)
+    used = "spherical" if basis.spherical else "cartesian"
+    if used == published:
+        label = "сферической" if basis.spherical else "декартовой"
+        return QualityCheck(
+            name_key="basis_angular_scheme",
+            verdict=QualityVerdict.PASS,
+            detail=f"расчёт в {label} схеме, как опубликован базис {basis.name}",
+        )
+    return QualityCheck(
+        name_key="basis_angular_scheme",
+        verdict=QualityVerdict.WARNING,
+        detail=(
+            f"базис {basis.name} опубликован в схеме «{published}», расчёт выполнен в «{used}»: "
+            "энергия отличается от табличной"
+        ),
+    )
+
+
+def _warnings(rhf: RhfResult | RksResult, molecule: Molecule) -> tuple[CalculationWarning, ...]:
     """Предупреждения, которые обязан увидеть пользователь."""
     warnings: list[CalculationWarning] = []
     if not rhf.converged:
@@ -2190,9 +2315,6 @@ def _warnings(
                 key="warning.scf_not_converged", params={"iterations": str(rhf.iterations)}
             )
         )
-    warning = _angular_scheme_warning(basis)
-    if warning:
-        warnings.append(warning)
     dipole_warning = _dipole_origin_warning(molecule)
     if dipole_warning:
         warnings.append(dipole_warning)

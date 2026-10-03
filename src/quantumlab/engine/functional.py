@@ -278,6 +278,10 @@ def evaluate_basis_with_gradients(
     gradients = (
         np.stack(gradient_columns, axis=1) if gradient_columns else np.zeros((n_points, 0, 3))
     )
+    if basis.spherical:
+        transform = basis.transformation_matrix()
+        values = values @ transform
+        gradients = np.einsum("pcb,cm->pmb", gradients, transform, optimize=True)
     return values, gradients
 
 
@@ -301,6 +305,9 @@ def evaluate_basis_hessian_for_center(
     """
     from quantumlab.engine.constants import angstrom_to_bohr
 
+    if basis.spherical:
+        msg = "Гессианы базисных функций определены в декартовой схеме: basis.cartesian()."
+        raise ValueError(msg)
     centers = np.array(
         [[angstrom_to_bohr(value) for value in atom.position] for atom in molecule.atoms]
     )

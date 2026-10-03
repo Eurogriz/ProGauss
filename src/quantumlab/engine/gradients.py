@@ -49,6 +49,7 @@ from quantumlab.engine.functional import (
     density_gradient_at_points,
     evaluate_basis_hessian_for_center,
     evaluate_basis_with_gradients,
+    kinetic_density_at_points,
 )
 from quantumlab.engine.quadrature import QuadratureGrid
 from quantumlab.engine.scf import (
@@ -126,6 +127,21 @@ def nuclear_repulsion_gradient(molecule: Molecule) -> Array:
     return gradient
 
 
+def _cartesian_form(basis: BasisSet, *matrices: Array) -> tuple[BasisSet, tuple[Array, ...]]:
+    """Переводит базис и «двойственные» матрицы (плотности, веса) в декартову схему.
+
+    Производные интегралы и AO-гессианы определены в декартовой схеме.
+    Сферическая функция — фиксированная линейная комбинация декартовых той же
+    оболочки (тот же центр), поэтому энергия и её производные по ядрам не
+    меняются, если вместо ``D`` подставить ``T D Tᵀ`` и считать в декартовых
+    функциях.
+    """
+    if not basis.spherical:
+        return basis, matrices
+    transform = basis.transformation_matrix()
+    return basis.cartesian(), tuple(np.asarray(transform @ m @ transform.T) for m in matrices)
+
+
 def _function_owner(basis: BasisSet) -> Array:
     """Индекс атома-владельца для каждой базисной функции."""
     return np.array(
@@ -164,6 +180,9 @@ def _orbital_gradient(
     * ``weight`` — энерговзвешенная плотность, входящая в член релаксации
       орбиталей ``Σ W·S'``.
     """
+    basis, converted = _cartesian_form(basis, density, weight, *exchange_densities)
+    density, weight = converted[0], converted[1]
+    exchange_densities = converted[2:]
     owner = _function_owner(basis)
     n_functions = basis.n_functions
 
@@ -380,6 +399,10 @@ def xc_gradient(
 
     ``∂ρ/∂R_Aa = −2 Σ_{μ∈A} Σ_ν D_μν (∂_aφ_μ) φ_ν``
 
+    Для meta-GGA добавляется член ``v_τ ∂τ/∂R`` с
+    ``∂τ/∂R_Aa = −Σ_{μ∈A} Σ_ν D_μν Σ_b (∂_a∂_bφ_μ)(∂_bφ_ν)`` — те же гессианы
+    базисных функций, что и у ``∂σ/∂R``.
+
     Знак минус потому, что ``φ_μ(r − R_A)`` сдвигается вместе с центром. Для
     GGA добавляется член с ``∂σ/∂R_Aa = 2∇ρ·∂(∇ρ)/∂R_Aa``, куда входят вторые
     производные базисных функций.
@@ -400,25 +423,22 @@ def xc_gradient(
     стандартное: в Molpro производные весов сетки в аналитическом градиенте
     вообще выключены по умолчанию (``GRIDGRAD=0``).
     """
-    if functional.requires_tau:
-        msg = (
-            f"Аналитический градиент для meta-GGA-функционала «{functional.name}» "
-            "не реализован: нужны производные кинетической плотности по ядрам. "
-            "Градиент не подменяется приближением (§54 ТЗ)."
-        )
-        raise NotImplementedError(msg)
+    basis, (density,) = _cartesian_form(basis, density)
     values, basis_gradients = evaluate_basis_with_gradients(basis, molecule, grid.points)
     rho = density_at_points(values, density)
     rho_gradient = density_gradient_at_points(values, basis_gradients, density)
-    evaluation = functional.evaluate(grid.points, rho, rho_gradient)
+    tau = kinetic_density_at_points(basis_gradients, density) if functional.requires_tau else None
+    evaluation = functional.evaluate(grid.points, rho, rho_gradient, tau=tau)
 
     v_rho = np.asarray(evaluation.vrho)
     v_sigma = np.asarray(evaluation.vsigma) if evaluation.vsigma is not None else None
+    v_tau = np.asarray(evaluation.vtau) if evaluation.vtau is not None else None
     weighted_v_rho = grid.weights * v_rho
 
     contracted = np.asarray(density @ values.T)
+    needs_hessian = v_sigma is not None or v_tau is not None
     gradient_contracted = (
-        np.einsum("nm,pnb->mpb", density, basis_gradients) if v_sigma is not None else None
+        np.einsum("nm,pnb->mpb", density, basis_gradients) if needs_hessian else None
     )
 
     owner = _function_owner(basis)
@@ -429,7 +449,7 @@ def xc_gradient(
             continue
         hessian = (
             evaluate_basis_hessian_for_center(basis, molecule, grid.points, atom)
-            if v_sigma is not None
+            if needs_hessian
             else None
         )
         for axis in range(3):
@@ -437,6 +457,13 @@ def xc_gradient(
             term = -2.0 * float(
                 np.sum(weighted_v_rho * np.sum(d_phi * contracted[columns].T, axis=1))
             )
+            if v_tau is not None and hessian is not None and gradient_contracted is not None:
+                # τ = ½ Σ D_μν ∇φ_μ·∇φ_ν; сдвиг центра A меняет ∇φ_μ, μ∈A:
+                # ∂τ/∂R_Aa = −Σ_{μ∈A,ν} D_μν Σ_b (∂_a∂_b φ_μ)(∂_b φ_ν).
+                d_tau = -np.einsum(
+                    "pjb,jpb->p", hessian[:, :, axis, :], gradient_contracted[columns]
+                )
+                term += float(np.sum(grid.weights * v_tau * d_tau))
             if v_sigma is not None and hessian is not None and gradient_contracted is not None:
                 # Ось ``axis`` срезается до einsum явно: индекс, отсутствующий
                 # в выходной части подписи, einsum считает суммируемым, и
@@ -486,6 +513,13 @@ def xc_gradient_spin(
     пространстве**; расхождение с поверхностью перестраиваемой сетки
     измерено и описано там же.
     """
+    if functional.requires_tau:
+        msg = (
+            f"Спин-поляризованный градиент meta-GGA «{functional.name}» не реализован: "
+            "нет UKS с кинетической плотностью. Градиент не подменяется приближением (§54 ТЗ)."
+        )
+        raise NotImplementedError(msg)
+    basis, (density_alpha, density_beta) = _cartesian_form(basis, density_alpha, density_beta)
     values, basis_gradients = evaluate_basis_with_gradients(basis, molecule, grid.points)
     rho_alpha = density_at_points(values, density_alpha)
     rho_beta = density_at_points(values, density_beta)

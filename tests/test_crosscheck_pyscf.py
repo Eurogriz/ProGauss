@@ -52,8 +52,9 @@ pytestmark = pytest.mark.scientific
 FIXTURES = Path(__file__).parent / "fixtures"
 TIGHT = ScfSettings(energy_tolerance=1e-11, density_tolerance=1e-9, max_iterations=200)
 
-#: Наши имена базисов и соответствующие им имена в PySCF. Все расчёты идут в
-#: декартовой схеме (``cart=True``), потому что наш движок декартов.
+#: Наши имена базисов и соответствующие им имена в PySCF. Движок считает в
+#: той схеме, в которой базис опубликован: 6-31G* — декартова (``cart=True``),
+#: cc-pVDZ и def2-SVP — сферическая (``cart=False``).
 CARTESIAN_PAIRS = [
     ("sto-3g", "STO-3G"),
     ("6-31g", "6-31G"),
@@ -71,6 +72,10 @@ def _water() -> Molecule:
     return Molecule.from_xyz((FIXTURES / "water.xyz").read_text(encoding="utf-8"), name="water")
 
 
+#: Базисы (в написании PySCF), опубликованные со сферическими d/f.
+_SPHERICAL_PYSCF_BASES = frozenset({"cc-pVDZ", "def2-SVP"})
+
+
 def _pyscf_molecule(molecule: Molecule, basis: str) -> Any:
     """Собирает ту же молекулу в PySCF. Атомы разделяются ';', не пробелом."""
     atom_string = "; ".join(
@@ -80,7 +85,7 @@ def _pyscf_molecule(molecule: Molecule, basis: str) -> Any:
     return pyscf.gto.M(
         atom=atom_string,
         basis=basis,
-        cart=True,
+        cart=basis not in _SPHERICAL_PYSCF_BASES,
         spin=molecule.multiplicity - 1,
         charge=molecule.charge,
         unit="Angstrom",
@@ -90,7 +95,7 @@ def _pyscf_molecule(molecule: Molecule, basis: str) -> Any:
 
 @pytest.mark.parametrize(("ours", "theirs"), CARTESIAN_PAIRS)
 def test_total_energy_matches_pyscf(ours: str, theirs: str) -> None:
-    """Полная RHF-энергия совпадает с PySCF в декартовой схеме."""
+    """Полная RHF-энергия совпадает с PySCF в той же угловой схеме."""
     molecule = _water()
     result = run_rhf(build_basis(ours, molecule), molecule, TIGHT)
     assert result.converged, f"наш SCF не сошёлся на {ours}"

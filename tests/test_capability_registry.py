@@ -154,7 +154,7 @@ def test_implemented_capabilities_match_the_verified_surface(
     """``implemented`` ровно там, где есть проверенный код.
 
     Список сверен с фактическим состоянием: XYZ-парсер, single_point,
-    reference-cpu и шесть базисов, опубликованных в декартовой схеме.
+    reference-cpu и все 16 базисов (каждый — в опубликованной угловой схеме).
     """
     implemented = sorted(
         item.id
@@ -165,9 +165,19 @@ def test_implemented_capabilities_match_the_verified_surface(
         "backend:reference-cpu",
         "basis:3-21g",
         "basis:6-311g",
+        "basis:6-311g(d,p)",
         "basis:6-31g",
         "basis:6-31g(d)",
         "basis:6-31g(d,p)",
+        "basis:aug-cc-pvdz",
+        "basis:aug-cc-pvtz",
+        "basis:cc-pvdz",
+        "basis:cc-pvqz",
+        "basis:cc-pvtz",
+        "basis:def2-qzvp",
+        "basis:def2-svp",
+        "basis:def2-tzvp",
+        "basis:def2-tzvpp",
         "basis:sto-3g",
         # Единственная доступная «дисперсионная поправка» — её отсутствие.
         # D3/D4 в реестре есть и помечены как нереализованные.
@@ -201,8 +211,8 @@ def test_basis_availability_follows_the_published_angular_scheme(
     """Статус базиса читается из данных, а не хранится вторым мнением.
 
     Реестр не должен расходиться с тем, что записал генератор из Basis Set
-    Exchange: сферическая публикация d/f означает, что наш декартов расчёт
-    даёт больший базис, и это ограничение обязано быть видимым.
+    Exchange. Движок считает в опубликованной схеме, поэтому все базисы —
+    ``implemented`` и без ограничений.
     """
     cartesian = {"sto-3g", "3-21g", "6-31g", "6-31g(d)", "6-31g(d,p)", "6-311g"}
     for name in _BASIS_NAMES:
@@ -210,14 +220,11 @@ def test_basis_availability_follows_the_published_angular_scheme(
         scheme = capability.metadata["angular_scheme_published"]
         if name in cartesian:
             assert scheme == "cartesian", name
-            assert capability.availability is Availability.IMPLEMENTED, name
-            assert not capability.limitations, name
         else:
             assert scheme == "spherical", name
-            assert capability.availability is Availability.PARTIAL, name
-            assert "сферической" in capability.limitations[0], name
-        # Обе схемы пригодны к расчёту — отличается только точность сравнения
-        # с табличными значениями.
+        assert capability.metadata["angular_scheme_used"] == scheme, name
+        assert capability.availability is Availability.IMPLEMENTED, name
+        assert not capability.limitations, name
         assert capability.is_usable, name
 
 

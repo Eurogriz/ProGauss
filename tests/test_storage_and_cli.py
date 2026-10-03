@@ -198,7 +198,7 @@ def test_cli_run_executes_single_point_and_saves_result(
     output = capsys.readouterr().out
     assert "Запускаю" in output
     assert "SCF сошёлся" in output
-    assert "-74.9630296542" in output
+    assert "-74.9630296640" in output
 
     store = LocalJobStore(tmp_path)
     jobs = store.list()
@@ -208,20 +208,20 @@ def test_cli_run_executes_single_point_and_saves_result(
     assert job.result_uri is not None and job.result_uri.endswith(".json")
 
     payload = json.loads(store.result_path(job.id).read_text(encoding="utf-8"))
-    assert payload["energy_hartree"] == pytest.approx(-74.9630296542, abs=1e-8)
+    assert payload["energy_hartree"] == pytest.approx(-74.9630296640, abs=1e-8)
     assert payload["converged"] is True
     assert payload["job_id"] == job.id
     assert payload["fingerprint"]["digest"]
     assert payload["environment"]["engine_backend"] == "numpy-dense-cpu"
 
 
-def test_cli_run_warns_instead_of_hiding_basis_scheme(
+def test_cli_run_honours_the_published_spherical_scheme_without_warning(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Базис со сферической публикацией d даёт расчёт с предупреждением.
+    """Базис со сферической публикацией d считается в сферической схеме.
 
-    Задание завершается как ``completed_with_warnings``: результат получен, но
-    скрывать расхождение схемы с опубликованной было бы обманом.
+    Движок выполняет опубликованную схему, а не подменяет её декартовой, поэтому
+    предупреждения нет и задание завершается как ``completed``.
     """
     code = main(
         [
@@ -241,9 +241,8 @@ def test_cli_run_warns_instead_of_hiding_basis_scheme(
     )
     assert code == 0
     output = capsys.readouterr().out
-    assert "Предупреждения" in output
-    assert "сферической" in output
-    assert LocalJobStore(tmp_path).list()[0].status is JobStatus.COMPLETED_WITH_WARNINGS
+    assert "декартов" not in output
+    assert LocalJobStore(tmp_path).list()[0].status is JobStatus.COMPLETED
 
 
 def test_cli_run_reports_unavailable_task_honestly(
@@ -620,7 +619,7 @@ def test_job_resume_continues_from_the_checkpoint(tmp_path: Path) -> None:
     assert after.status is JobStatus.COMPLETED
     result = json.loads(Path(store.result_path(job_id)).read_text(encoding="utf-8"))
     assert result["scf_iterations"] < baseline
-    assert result["energy_hartree"] == pytest.approx(-74.9630296542, abs=1e-9)
+    assert result["energy_hartree"] == pytest.approx(-74.9630296640, abs=1e-9)
 
 
 def test_job_resume_detects_a_tampered_checkpoint(tmp_path: Path) -> None:

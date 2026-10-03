@@ -282,7 +282,7 @@ def resolve_profile(
         # объяснения её отсутствия была бы дублем, а не информацией.
         decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
 
-    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities)
+    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities, theory)
     if stability_omitted:
         decisions.append(
             Decision(
@@ -391,6 +391,7 @@ def _numerics(
     task: Task,
     is_large: bool,
     capabilities: CapabilityRegistry,
+    theory: TheoryFamily,
 ) -> tuple[GridPreset, ScfSpec, bool]:
     """Сетка и пороги SCF.
 
@@ -426,7 +427,13 @@ def _numerics(
     # «подобранные параметры» неработоспособны. Поэтому сверяемся с реестром,
     # а пропуск объясняем отдельным решением (§8 ТЗ).
     wants_stability = profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH)
-    has_stability = capabilities.is_available("scf:stability_analysis")
+    # Анализ реализован для HF и только в одной точке: для DFT, оптимизации и
+    # частот запрос был бы отклонён движком, поэтому подборщик его не просит.
+    has_stability = (
+        capabilities.is_available("scf:stability_analysis")
+        and theory is TheoryFamily.HF
+        and task is Task.SINGLE_POINT
+    )
     scf = ScfSpec(
         max_iterations=80 if profile is PrecisionProfile.SCREENING else 128,
         energy_threshold=energy_threshold,

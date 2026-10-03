@@ -167,13 +167,13 @@ def test_every_engine_warning_key_is_translated_in_both_locales() -> None:
     """
     placeholders = {
         "warning.scf_not_converged": {"iterations": "12"},
-        "warning.basis_spherical_scheme": {"basis": "cc-pvdz"},
         "warning.dipole_origin_charged": {"charge": "+1"},
         "warning.grid_prune_unimplemented": {},
         "warning.grid_xc_integration": {"points": "5904", "preset": "fine"},
         "warning.frequencies_off_stationary": {"max_force": "6.1e-02", "threshold": "4.5e-04"},
         "warning.frequencies_imaginary": {"values": "-512.3"},
         "warning.optimization_not_converged": {"steps": "64", "max_force": "1.2e-03"},
+        "warning.scf_unstable": {"channels": "rhf->uhf"},
     }
     assert set(placeholders) == set(WARNING_KEYS), "список ключей разошёлся с тестом"
     for locale in ("ru", "en"):

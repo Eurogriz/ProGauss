@@ -39,6 +39,8 @@ from quantumlab.engine.scf import (
     ScfSettings,
     UhfResult,
     _diis_extrapolate,
+    _regression_floor,
+    _validated_spin_densities,
     build_integrals,
     canonical_orthogonalizer,
     coulomb_matrix,
@@ -280,11 +282,16 @@ def run_rks(
     integrals: PrecomputedIntegrals | None = None,
     grid: QuadratureGrid | None = None,
     grid_preset: GridPreset = GridPreset.FINE,
+    initial_density: np.ndarray | None = None,
 ) -> RksResult:
     """Выполняет RKS-расчёт в приближении LDA.
 
     Сетка и интегралы можно передать готовыми: тогда их стоимость относится к
     этапу вызывающей стороны, а не к ``scf``.
+
+    ``initial_density`` — полная плотность из контрольной точки; орбитали для
+    коммутатора DIIS первой итерации получаются одной диагонализацией полного
+    фокиана (кулон, обмен, XC) по этой плотности.
     """
     config = settings or ScfSettings()
     started = time.perf_counter()
@@ -331,10 +338,29 @@ def run_rks(
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
     alpha_exchange = functional.exact_exchange_fraction
-    energies, coefficients, coefficients_prime = diagonalize(
-        orthogonalizer.T @ core @ orthogonalizer
-    )
-    density = density_from_coefficients(coefficients, n_occupied)
+    if initial_density is not None:
+        density = np.asarray(initial_density, dtype=float)
+        if density.shape != prepared.overlap.shape:
+            msg = (
+                f"Начальная плотность имеет размер {density.shape}, а базис "
+                f"требует {prepared.overlap.shape}."
+            )
+            raise ValueError(msg)
+        strategies = ["checkpoint-restart"]
+        restart_xc, _ = xc_at(density)
+        restart_fock = core + coulomb_matrix(density, eri) + restart_xc
+        if alpha_exchange > 0.0:
+            restart_fock = restart_fock - 0.5 * alpha_exchange * np.einsum(
+                "ls,ulvs->uv", density, eri, optimize=True
+            )
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ restart_fock @ orthogonalizer
+        )
+    else:
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ core @ orthogonalizer
+        )
+        density = density_from_coefficients(coefficients, n_occupied)
 
     fock_history: list[np.ndarray] = []
     error_history: list[np.ndarray] = []
@@ -406,7 +432,7 @@ def run_rks(
         energies, coefficients, coefficients_prime = diagonalize(effective_fock_prime)
         new_density = density_from_coefficients(coefficients, n_occupied)
 
-        regressed = iteration > 1 and energy_change > 0.0
+        regressed = iteration > 1 and energy_change > _regression_floor(strategies)
         if iteration <= config.damping_rounds or regressed:
             new_density = (
                 config.damping_factor * density + (1.0 - config.damping_factor) * new_density
@@ -476,6 +502,7 @@ def run_uks(
     integrals: PrecomputedIntegrals | None = None,
     grid: QuadratureGrid | None = None,
     grid_preset: GridPreset = GridPreset.FINE,
+    initial_densities: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> UksResult:
     """Выполняет UKS-расчёт — DFT с разделёнными спиновыми каналами.
 
@@ -498,6 +525,8 @@ def run_uks(
 
     Точность: сетка и функционалы — те же, что в RKS (см. их ограничения);
     спин-ядра сверены с LibXC 7.0.0 по 60 случайным точкам до ≤1e−14.
+
+    ``initial_densities`` — пара ``(D^α, D^β)`` из контрольной точки (см. :func:`run_uhf`).
     """
     if functional.requires_tau:
         msg = (
@@ -537,19 +566,38 @@ def run_uks(
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
     alpha_exchange = functional.exact_exchange_fraction
-    alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
-        orthogonalizer.T @ core @ orthogonalizer
-    )
-    beta_energies, beta_coefficients, beta_prime = (
-        alpha_energies,
-        alpha_coefficients,
-        alpha_prime,
-    )
-    # Стартовая догадка — как в UHF: одинаковые α и β из ядра Гамильтона.
-    # Для замкнутой оболочки это RKS-стартовое решение, для открытой —
-    # Hund-совместимое (лишняя орбиталь занята в α).
-    density_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
-    density_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
+    if initial_densities is not None:
+        density_alpha, density_beta = _validated_spin_densities(
+            initial_densities, prepared.overlap.shape
+        )
+        strategies = ["checkpoint-restart"]
+        restart_xc_alpha, restart_xc_beta, _ = xc_at(density_alpha, density_beta)
+        restart_coulomb = coulomb_matrix(density_alpha + density_beta, eri)
+        restart_alpha = core + restart_coulomb + restart_xc_alpha
+        restart_beta = core + restart_coulomb + restart_xc_beta
+        if alpha_exchange > 0.0:
+            restart_alpha = restart_alpha - alpha_exchange * exchange_matrix(density_alpha, eri)
+            restart_beta = restart_beta - alpha_exchange * exchange_matrix(density_beta, eri)
+        alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
+            orthogonalizer.T @ restart_alpha @ orthogonalizer
+        )
+        beta_energies, beta_coefficients, beta_prime = diagonalize(
+            orthogonalizer.T @ restart_beta @ orthogonalizer
+        )
+    else:
+        alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
+            orthogonalizer.T @ core @ orthogonalizer
+        )
+        beta_energies, beta_coefficients, beta_prime = (
+            alpha_energies,
+            alpha_coefficients,
+            alpha_prime,
+        )
+        # Стартовая догадка — как в UHF: одинаковые α и β из ядра Гамильтона.
+        # Для замкнутой оболочки это RKS-стартовое решение, для открытой —
+        # Hund-совместимое (лишняя орбиталь занята в α).
+        density_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
+        density_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
 
     diis_alpha: list[np.ndarray] = []
     diis_beta: list[np.ndarray] = []
@@ -672,7 +720,7 @@ def run_uks(
         new_alpha = density_from_coefficients(alpha_coefficients, n_alpha, occupation=1.0)
         new_beta = density_from_coefficients(beta_coefficients, n_beta, occupation=1.0)
 
-        regressed = iteration > 1 and energy_change > 0.0
+        regressed = iteration > 1 and energy_change > _regression_floor(strategies)
         if iteration <= config.damping_rounds or (regressed and not level_shift_active):
             new_alpha = (
                 config.damping_factor * density_alpha + (1.0 - config.damping_factor) * new_alpha

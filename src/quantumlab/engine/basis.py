@@ -6,10 +6,13 @@ Exchange (``tools/generate_basis_data.py``). Каждое число имеет 
 
 Соглашения:
 
-* **декартовы гауссианы**: для ``l = 2`` это 6 функций (xx, yy, zz, xy, xz, yz).
-  Выбор осознанный: декартова схема не требует матриц перехода к сферическим
-  гармоникам и однозначна при сравнении с внешними пакетами (у них нужно
-  включать ``cart=True``);
+* **декартовы гауссианы** — внутреннее представление интегрального ядра: для
+  ``l = 2`` это 6 функций (xx, yy, zz, xy, xz, yz);
+* **сферическая схема** (5 d-, 7 f-, 9 g-функций…) — линейная комбинация
+  декартовых функций одной оболочки с коэффициентами вещественных сферических
+  гармоник (:func:`spherical_transformation`). Базис работает в той схеме, в
+  которой он опубликован (:func:`basis_angular_scheme`), если не задано иное;
+  интегралы считаются в декартовой схеме и сворачиваются матрицей перехода;
 * каждая сжатая оболочка нормируется на единицу — на энергию это не влияет
   (линейная перепараметризация базиса), но улучшает обусловленность матриц;
 * порядок компонент внутри оболочки фиксирован и задан функцией
@@ -21,12 +24,15 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from importlib import resources
 from typing import Any, cast
 
+import numpy as np
+
 from quantumlab.domain.molecule import Molecule
+from quantumlab.engine.basis_custom import custom_basis_names, load_custom_raw
 from quantumlab.engine.constants import angstrom_to_bohr
 
 # `as` — явный ре-экспорт: mypy --strict запрещает неявный (no_implicit_reexport).
@@ -64,6 +70,11 @@ class Shell:
         """Число декартовых компонент для данного ``l``."""
         l_value = self.angular_momentum
         return (l_value + 1) * (l_value + 2) // 2
+
+    @property
+    def n_spherical(self) -> int:
+        """Число сферических компонент ``2l + 1``."""
+        return 2 * self.angular_momentum + 1
 
     @property
     def component_scales(self) -> tuple[float, ...]:
@@ -137,43 +148,169 @@ def _component_scale(l_value: int, powers: tuple[int, int, int]) -> float:
     return math.sqrt(total / per_axis)
 
 
+def _binomial(n: int, k: int) -> int:
+    return math.comb(n, k) if 0 <= k <= n else 0
+
+
+@cache
+def spherical_transformation(l_value: int) -> np.ndarray:
+    r"""Матрица перехода ``T`` формы ``(n_cart, 2l+1)`` для одной оболочки.
+
+    Столбец ``m`` — коэффициенты вещественной сферической гармоники
+    ``S_{l,m}`` (``m = −l … l``) в базисе **нормированных** декартовых
+    функций оболочки (:func:`cartesian_powers`, :attr:`Shell.component_scales`),
+    нормированный на единицу. Многочлен ``S_{lm}`` строится по формуле
+    Хельгакера (Molecular Electronic-Structure Theory, ур. 6.4.47):
+
+    .. math::
+
+        S_{lm} \propto \sum_{t,u,v} (-1)^{t+v-v_m} 4^{-t}
+        \binom{l}{t}\binom{l-t}{|m|+t}\binom{t}{u}\binom{|m|}{2v}\,
+        x^{2t+|m|-2(u+v)} y^{2(u+v)} z^{l-2t-|m|}.
+
+    Для ``l ≤ 1`` схемы совпадают: возвращается единичная матрица (порядок
+    ``x, y, z`` не меняется). Столбцы ортонормированы относительно
+    перекрывания декартовых функций оболочки — это проверяется тестом.
+    """
+    powers = cartesian_powers(l_value)
+    n_cart = len(powers)
+    if l_value <= 1:
+        return np.eye(n_cart)
+    index = {p: i for i, p in enumerate(powers)}
+    coefficients = np.zeros((n_cart, 2 * l_value + 1))
+    for column, m_value in enumerate(range(-l_value, l_value + 1)):
+        absolute = abs(m_value)
+        two_v_start = 1 if m_value < 0 else 0
+        for t in range((l_value - absolute) // 2 + 1):
+            for u in range(t + 1):
+                for two_v in range(two_v_start, absolute + 1, 2):
+                    sign = -1.0 if (t + (two_v - two_v_start) // 2) % 2 else 1.0
+                    weight = (
+                        sign
+                        * 0.25**t
+                        * _binomial(l_value, t)
+                        * _binomial(l_value - t, absolute + t)
+                        * _binomial(t, u)
+                        * _binomial(absolute, two_v)
+                    )
+                    key = (
+                        2 * t + absolute - 2 * u - two_v,
+                        2 * u + two_v,
+                        l_value - 2 * t - absolute,
+                    )
+                    coefficients[index[key], column] += weight
+    # Нормированные декартовы функции f_c = s_c·g_c; многочлен в базисе g —
+    # c_c, значит в базисе f коэффициенты c_c / s_c.
+    scales = np.array([_component_scale(l_value, p) for p in powers])
+    transform = coefficients / scales[:, None]
+    # Перекрывание f: F_cc' = s_c s_c' ∏(a_i+a'_i−1)!! / (2l−1)!! (при чётных суммах).
+    gram = np.zeros((n_cart, n_cart))
+    total = _double_factorial(2 * l_value - 1)
+    for i, p in enumerate(powers):
+        for j, q in enumerate(powers):
+            if any((a + b) % 2 for a, b in zip(p, q, strict=True)):
+                continue
+            product = 1
+            for a, b in zip(p, q, strict=True):
+                product *= _double_factorial(a + b - 1)
+            gram[i, j] = scales[i] * scales[j] * product / total
+    norms = np.sqrt(np.einsum("cm,cd,dm->m", transform, gram, transform))
+    result: np.ndarray = transform / norms[None, :]
+    result.setflags(write=False)
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class BasisSet:
-    """Базисный набор, развёрнутый по атомам конкретной молекулы."""
+    """Базисный набор, развёрнутый по атомам конкретной молекулы.
+
+    Attributes:
+        spherical: ``True`` — функции ``d`` и выше в сферической схеме
+            (``2l+1`` компонент), ``False`` — в декартовой. Интегралы по
+            производным (градиентные) определены только в декартовой схеме:
+            для них используется :meth:`cartesian`.
+    """
 
     name: str
     display_name: str
     shells: tuple[Shell, ...]
+    spherical: bool = False
 
     @property
     def n_functions(self) -> int:
-        """Полное число базисных функций."""
+        """Полное число базисных функций в текущей схеме."""
+        if self.spherical:
+            return sum(shell.n_spherical for shell in self.shells)
+        return self.n_cartesian_functions
+
+    @property
+    def n_cartesian_functions(self) -> int:
+        """Число декартовых функций (внутреннее представление ядра)."""
         return sum(shell.n_cartesian for shell in self.shells)
 
+    def cartesian(self) -> BasisSet:
+        """Тот же базис в декартовой схеме (для производных интегралов)."""
+        return replace(self, spherical=False) if self.spherical else self
+
+    def transformation_matrix(self) -> np.ndarray:
+        """Блочно-диагональная ``(n_cart, n_functions)``: AO схемы → декартовы.
+
+        Для декартова базиса — единичная матрица. Столбец — разложение функции
+        текущей схемы по декартовым: ``φ_sph = φ_cart · T``. Плотность и другие
+        «двойственные» матрицы переводятся в декартовы как ``T M Tᵀ``.
+        """
+        n_cart = self.n_cartesian_functions
+        if not self.spherical:
+            return np.eye(n_cart)
+        matrix = np.zeros((n_cart, self.n_functions))
+        row = col = 0
+        for shell in self.shells:
+            block = spherical_transformation(shell.angular_momentum)
+            matrix[row : row + block.shape[0], col : col + block.shape[1]] = block
+            row += block.shape[0]
+            col += block.shape[1]
+        return matrix
+
     def shell_slices(self) -> Iterator[tuple[int, int, int]]:
-        """Итератор ``(номер оболочки, начало среза, конец среза)``."""
+        """Итератор ``(номер оболочки, начало среза, конец среза)`` в текущей схеме."""
         offset = 0
         for index, shell in enumerate(self.shells):
-            yield index, offset, offset + shell.n_cartesian
-            offset += shell.n_cartesian
+            size = shell.n_spherical if self.spherical else shell.n_cartesian
+            yield index, offset, offset + size
+            offset += size
 
 
 @cache
-def _load_raw(name: str) -> dict[str, Any]:
-    """Читает JSON базиса по имени."""
+def _load_packaged(name: str) -> dict[str, Any] | None:
+    """Читает встроенный JSON базиса; ``None``, если такого набора нет."""
     normalized = name.strip().lower()
     resource = resources.files("quantumlab.engine.basis_data")
     available = {
         path.name[:-5] for path in cast("Any", resource.iterdir()) if path.name.endswith(".json")
     }
     if normalized not in available:
-        raise BasisNotFoundError(name)
+        return None
     payload: Any = json.loads(resource.joinpath(f"{normalized}.json").read_text(encoding="utf-8"))
     return cast("dict[str, Any]", payload)
 
 
-def available_basis_sets() -> tuple[str, ...]:
-    """Имена базисов, для которых есть данные."""
+def _load_raw(name: str) -> dict[str, Any]:
+    """Данные базиса по имени: сначала встроенные, затем пользовательские.
+
+    Пользовательские не кэшируются: файл в каталоге пользователя может быть
+    заменён между расчётами, и устаревшая копия дала бы тихо другой базис.
+    """
+    packaged = _load_packaged(name)
+    if packaged is not None:
+        return packaged
+    custom = load_custom_raw(name)
+    if custom is None:
+        raise BasisNotFoundError(name)
+    return custom
+
+
+def builtin_basis_sets() -> tuple[str, ...]:
+    """Имена встроенных базисов (данные Basis Set Exchange)."""
     resource = resources.files("quantumlab.engine.basis_data")
     names = [
         path.name[:-5] for path in cast("Any", resource.iterdir()) if path.name.endswith(".json")
@@ -181,8 +318,16 @@ def available_basis_sets() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
-def build_basis(name: str, molecule: Molecule) -> BasisSet:
+def available_basis_sets() -> tuple[str, ...]:
+    """Имена базисов, для которых есть данные: встроенные и пользовательские."""
+    return tuple(sorted({*builtin_basis_sets(), *custom_basis_names()}))
+
+
+def build_basis(name: str, molecule: Molecule, *, spherical: bool | None = None) -> BasisSet:
     """Разворачивает базисный набор по атомам молекулы.
+
+    ``spherical=None`` — схема, в которой базис опубликован
+    (:func:`basis_angular_scheme`); ``True``/``False`` задают схему явно.
 
     Каждая сжатая оболочка нормируется: коэффициенты умножаются на нормы
     примитивов и на общий множитель, приводящий норму сжатой функции к 1.
@@ -217,7 +362,13 @@ def build_basis(name: str, molecule: Molecule) -> BasisSet:
                     )
                 )
 
-    return BasisSet(name=raw["name"], display_name=raw["display_name"], shells=tuple(shells))
+    use_spherical = basis_angular_scheme(name) == "spherical" if spherical is None else spherical
+    return BasisSet(
+        name=raw["name"],
+        display_name=raw["display_name"],
+        shells=tuple(shells),
+        spherical=use_spherical,
+    )
 
 
 def _contractions(shell_data: dict[str, Any]) -> list[tuple[int, tuple[float, ...]]]:
@@ -287,7 +438,6 @@ def _same_angular_overlap(alpha: float, beta: float, l_value: int) -> float:
     )
 
 
-@cache
 def basis_angular_scheme(name: str) -> str:
     """Угловая схема, в которой базис опубликован: ``cartesian`` или ``spherical``.
 

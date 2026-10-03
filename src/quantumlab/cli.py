@@ -18,6 +18,7 @@ CLI использует **тот же backend**, что GUI и REST API: дом
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -34,6 +35,8 @@ from quantumlab.domain.spec import (
     Task,
     TheoryFamily,
 )
+from quantumlab.engine.basis import builtin_basis_sets
+from quantumlab.engine.basis_custom import import_basis_file
 from quantumlab.engine.capabilities import CapabilityKind
 from quantumlab.engine.contracts import EngineRequest
 from quantumlab.engine.reference import ReferenceEngine
@@ -127,6 +130,20 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--name", default=None, help="имя задания")
     run_parser.add_argument("--project", default="default", help="идентификатор проекта")
     run_parser.add_argument("--owner", default="cli", help="пользователь")
+
+    basis_parser = subparsers.add_parser("basis", help="пользовательские базисные наборы")
+    basis_sub = basis_parser.add_subparsers(dest="basis_command", required=True)
+    import_parser = basis_sub.add_parser(
+        "import", help="импортировать базис из файла Gaussian94 (.gbs) или JSON"
+    )
+    import_parser.add_argument("path", type=Path, help="файл базиса")
+    import_parser.add_argument("--name", default=None, help="имя базиса (по умолчанию — имя файла)")
+    import_parser.add_argument(
+        "--scheme",
+        choices=("spherical", "cartesian"),
+        default="spherical",
+        help="угловая схема, в которой определён базис (для Gaussian94)",
+    )
 
     job_parser = subparsers.add_parser("job", help="управление заданиями")
     job_sub = job_parser.add_subparsers(dest="job_command", required=True)
@@ -258,6 +275,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _command_capabilities(args, registry, locale)
         if args.command == "molecule":
             return _command_molecule(args, locale)
+        if args.command == "basis":
+            return _command_basis(args, locale)
         if args.command == "plan":
             return _command_plan(args, registry, locale)
         if args.command == "run":
@@ -293,6 +312,28 @@ def _command_capabilities(
     for capability in capabilities:
         status = capability.availability.value
         print(f"  {capability.id:<{width}} {status:<16} {capability.describe(locale)}")
+    return 0
+
+
+def _command_basis(args: argparse.Namespace, locale: str) -> int:
+    """``basis import``: разбор файла и сохранение в каталоге пользователя."""
+    target = import_basis_file(
+        args.path,
+        name=args.name,
+        scheme=args.scheme,
+        builtin_names=frozenset(builtin_basis_sets()),
+    )
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    print(
+        t(
+            "cli.basis.imported",
+            locale,
+            name=target.stem,
+            path=target,
+            scheme=raw["angular_scheme_published"],
+        )
+    )
+    print(t("cli.basis.hint", locale, name=target.stem))
     return 0
 
 

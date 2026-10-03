@@ -289,7 +289,7 @@ def test_engine_runs_dft_and_reports_all_checks_passing(water: Molecule) -> None
     result = ReferenceEngine().run(
         EngineRequest(job_id="dft", spec=_dft_spec(), molecule=water, threads=1)
     )
-    assert result.energy_hartree == pytest.approx(-74.7320495103, abs=1e-8)
+    assert result.energy_hartree == pytest.approx(-74.7320495280, abs=1e-8)
     assert result.scf_iterations > 1
     assert result.dipole_debye == pytest.approx(1.728787, abs=1e-5)
     failures = [c for c in result.quality_checks if c.verdict is QualityVerdict.FAIL]

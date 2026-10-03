@@ -92,7 +92,9 @@ def test_basis_function_counts(water: Molecule) -> None:
     assert build_basis("sto-3g", water).n_functions == 7
     assert build_basis("6-31g", water).n_functions == 13
     assert build_basis("6-31g(d,p)", water).n_functions == 25
-    assert build_basis("cc-pvdz", water).n_functions == 25
+    # cc-pVDZ опубликован со сферическими d: 5 вместо 6 компонент.
+    assert build_basis("cc-pvdz", water).n_functions == 24
+    assert build_basis("cc-pvdz", water, spherical=False).n_functions == 25
 
 
 def test_contraction_rows_are_all_expanded(water: Molecule) -> None:
@@ -109,8 +111,8 @@ def test_contraction_rows_are_all_expanded(water: Molecule) -> None:
 
 
 def test_nuclear_repulsion_known_value(water: Molecule) -> None:
-    """Ядерное отталкивание воды: 9.1893235112 Eh."""
-    assert nuclear_repulsion(water) == pytest.approx(9.1893235112, abs=1e-9)
+    """Ядерное отталкивание воды: 9.1893228497 Eh."""
+    assert nuclear_repulsion(water) == pytest.approx(9.1893228497, abs=1e-9)
 
 
 # --------------------------------------------------------------------------- #

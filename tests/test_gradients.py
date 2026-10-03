@@ -315,7 +315,8 @@ def test_basis_hessian_matches_finite_differences(basis_name: str) -> None:
     энергии, поэтому проверка отдельная.
     """
     molecule = Molecule.from_xyz(WATER.read_text(encoding="utf-8"), name="water")
-    basis = build_basis(basis_name, molecule)
+    # Гессианы определены в декартовой схеме (в ней же строятся производные интегралов).
+    basis = build_basis(basis_name, molecule, spherical=False)
     points = np.random.default_rng(11).normal(size=(30, 3)) * 1.5
     step = 1e-5
     worst = 0.0

@@ -8,11 +8,15 @@ spec:
   method: { theory: hf, basis: cc-pvdz }
 expect:
   energy_hartree:
-    value: -76.0271119674
+    value: -76.0267710156
     tol: 1.0e-8
-    source: internal-reference (reference-cpu)
+    source: >-
+      internal-reference (reference-cpu), сферический базис (cc-pVDZ — 24 функции).
+      Независимо сверено с PySCF 2.14 (cart=False, геометрия в борах с нашей
+      константой CODATA-2018): расхождение 1e-11 Eh. Прежний эталон −76.0271119674
+      относился к декартовым d-функциям (25 функций) — это другая модель.
   dipole_debye:
-    value: 2.057853
+    value: 2.0575343
     tol: 1.0e-5
     source: internal-reference
 quality:

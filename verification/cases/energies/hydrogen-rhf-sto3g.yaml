@@ -7,7 +7,7 @@ spec:
   method: { theory: hf, basis: sto-3g }
 expect:
   energy_hartree:
-    value: -1.0796369464
+    value: -1.0796369287
     tol: 1.0e-8
     source: internal-reference (reference-cpu)
   dipole_debye:

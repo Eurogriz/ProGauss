@@ -327,14 +327,15 @@ def test_every_decision_is_localized_in_both_languages(water: Molecule) -> None:
 def test_research_profile_tightens_numerics_and_damps(water: Molecule) -> None:
     """Исследовательский профиль ужесточает численные параметры.
 
-    Проверка устойчивости сюда больше не входит безусловно: ядро её не
-    реализует, и включить её в спецификацию значило бы сделать профиль
-    незапускаемым. Ожидание читается из реестра, а не зашито: когда возможность
-    появится, тест сам начнёт требовать ``True``.
+    Анализ устойчивости реализован только для HF в одной точке. Профиль выбирает
+    DFT, поэтому ``stability_analysis`` выключен — иначе план отклонялся бы
+    движком, — а причина записана отдельным решением.
     """
     resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
-    available = default_registry().is_available("scf:stability_analysis")
-    assert resolution.spec.scf.stability_analysis is available
+    assert resolution.spec.method is not None
+    assert resolution.spec.method.theory is TheoryFamily.DFT
+    assert resolution.spec.scf.stability_analysis is False
+    assert any(decision.parameter == "stability_analysis" for decision in resolution.decisions)
     assert resolution.spec.scf.damping > 0.0
     assert resolution.spec.scf.energy_threshold <= 1e-10
 
@@ -369,20 +370,14 @@ def test_every_profile_produces_a_spec_the_engine_accepts(water: Molecule) -> No
 def test_unavailable_scf_option_is_reported_as_a_decision(water: Molecule) -> None:
     """Пропуск нереализованной опции объясняется, а не происходит молча.
 
-    Если профиль обещает проверку устойчивости, а ядро её не делает,
-    пользователь обязан это увидеть: иначе «высокая точность» означала бы
+    Если профиль обещает проверку устойчивости, а ядро её для выбранного метода не
+    делает, пользователь обязан это увидеть: иначе «высокая точность» означала бы
     нечто иное, чем написано (§8 ТЗ).
     """
-    from quantumlab.engine.registry import default_registry
-
-    registry = default_registry()
-    if registry.is_available("scf:stability_analysis"):
-        pytest.skip("проверка устойчивости реализована — пропускать нечего")
     resolution = resolve_profile(
         PrecisionProfile.HIGH_ACCURACY, task=Task.SINGLE_POINT, molecule=water
     )
     assert resolution.spec.scf.stability_analysis is False
-    assert any(decision.parameter == "stability_analysis" for decision in resolution.decisions)
     rendered = next(
         decision.render("ru")
         for decision in resolution.decisions

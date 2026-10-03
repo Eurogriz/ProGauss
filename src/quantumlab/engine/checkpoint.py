@@ -31,7 +31,13 @@ from quantumlab.domain.molecule import Molecule
 
 #: Версия схемы. Любое изменение состава полей обязано её поднять: старый
 #: читатель, встретив новое поле, не должен молча считать расчёт продолжимым.
-CHECKPOINT_SCHEMA_VERSION = "1"
+CHECKPOINT_SCHEMA_VERSION = "2"
+
+#: Схемы, которые читатель принимает. Версия 1 — только полная плотность
+#: (замкнутая оболочка); версия 2 добавляет необязательные спиновые плотности
+#: ``density_alpha``/``density_beta`` для UHF и UKS. Поля версии 1 не менялись,
+#: поэтому старые контрольные точки остаются пригодными для рестарта RHF/RKS.
+_READABLE_SCHEMA_VERSIONS = ("1", "2")
 
 #: Схема для ссылок на артефакты.
 CHECKPOINT_ARTIFACT_SCHEMA = f"quantumlab.checkpoint.v{CHECKPOINT_SCHEMA_VERSION}"
@@ -81,6 +87,15 @@ class ScfCheckpoint:
     total_energy: float
     iterations: int
     n_electrons: int
+    density_alpha: np.ndarray | None = None
+    density_beta: np.ndarray | None = None
+    n_alpha: int | None = None
+    n_beta: int | None = None
+
+    @property
+    def is_spin_resolved(self) -> bool:
+        """Есть ли отдельные плотности α и β (контрольная точка UHF/UKS)."""
+        return self.density_alpha is not None and self.density_beta is not None
 
     def dump(self) -> str:
         """Сериализует в JSON.
@@ -90,20 +105,22 @@ class ScfCheckpoint:
         потому что рестарт — это начальное приближение, а не продолжение с
         побитово той же матрицы.
         """
-        return json.dumps(
-            {
-                "schema_version": CHECKPOINT_SCHEMA_VERSION,
-                "kind": "scf",
-                "molecule_fingerprint": self.molecule_fingerprint,
-                "basis": self.basis,
-                "total_energy": self.total_energy,
-                "iterations": self.iterations,
-                "n_electrons": self.n_electrons,
-                "density": self.density.tolist(),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
+        payload: dict[str, object] = {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
+            "kind": "scf",
+            "molecule_fingerprint": self.molecule_fingerprint,
+            "basis": self.basis,
+            "total_energy": self.total_energy,
+            "iterations": self.iterations,
+            "n_electrons": self.n_electrons,
+            "density": self.density.tolist(),
+        }
+        if self.density_alpha is not None and self.density_beta is not None:
+            payload["density_alpha"] = self.density_alpha.tolist()
+            payload["density_beta"] = self.density_beta.tolist()
+            payload["n_alpha"] = self.n_alpha
+            payload["n_beta"] = self.n_beta
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
 def write_scf_checkpoint(
@@ -113,8 +130,23 @@ def write_scf_checkpoint(
     density: np.ndarray,
     total_energy: float,
     iterations: int,
+    spin_densities: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> str:
-    """Собирает контрольную точку из текущего состояния SCF."""
+    """Собирает контрольную точку из текущего состояния SCF.
+
+    ``spin_densities`` — пара ``(D^α, D^β)`` для открытой оболочки; в этом случае
+    ``density`` обязана быть их суммой (проверяется при чтении).
+    """
+    if spin_densities is None:
+        return ScfCheckpoint(
+            molecule_fingerprint=molecule_fingerprint(molecule),
+            basis=basis,
+            density=np.asarray(density, dtype=float),
+            total_energy=float(total_energy),
+            iterations=int(iterations),
+            n_electrons=molecule.n_electrons,
+        ).dump()
+    n_unpaired = molecule.multiplicity - 1
     return ScfCheckpoint(
         molecule_fingerprint=molecule_fingerprint(molecule),
         basis=basis,
@@ -122,6 +154,10 @@ def write_scf_checkpoint(
         total_energy=float(total_energy),
         iterations=int(iterations),
         n_electrons=molecule.n_electrons,
+        density_alpha=np.asarray(spin_densities[0], dtype=float),
+        density_beta=np.asarray(spin_densities[1], dtype=float),
+        n_alpha=(molecule.n_electrons + n_unpaired) // 2,
+        n_beta=(molecule.n_electrons - n_unpaired) // 2,
     ).dump()
 
 
@@ -146,10 +182,10 @@ def read_scf_checkpoint(payload: str, *, overlap: np.ndarray) -> ScfCheckpoint:
         raise CheckpointError(msg)
 
     version = data.get("schema_version")
-    if version != CHECKPOINT_SCHEMA_VERSION:
+    if version not in _READABLE_SCHEMA_VERSIONS:
         msg = (
-            f"Контрольная точка схемы {version!r}, ожидается "
-            f"{CHECKPOINT_SCHEMA_VERSION!r}. Продолжать расчёт по старой схеме "
+            f"Контрольная точка схемы {version!r}, ожидается одна из "
+            f"{_READABLE_SCHEMA_VERSIONS!r}. Продолжать расчёт по старой схеме "
             "нельзя: состав полей мог измениться."
         )
         raise CheckpointError(msg)
@@ -205,6 +241,7 @@ def read_scf_checkpoint(payload: str, *, overlap: np.ndarray) -> ScfCheckpoint:
         msg = "В контрольной точке повреждены энергия или число итераций"
         raise CheckpointError(msg)
 
+    spin = _read_spin_densities(data, overlap=overlap, total=density)
     return ScfCheckpoint(
         molecule_fingerprint=str(data.get("molecule_fingerprint")),
         basis=str(data.get("basis")),
@@ -212,7 +249,56 @@ def read_scf_checkpoint(payload: str, *, overlap: np.ndarray) -> ScfCheckpoint:
         total_energy=float(energy),
         iterations=int(iterations),
         n_electrons=stored_electrons,
+        density_alpha=spin[0] if spin is not None else None,
+        density_beta=spin[1] if spin is not None else None,
+        n_alpha=spin[2] if spin is not None else None,
+        n_beta=spin[3] if spin is not None else None,
     )
+
+
+def _read_spin_densities(
+    data: dict[str, object], *, overlap: np.ndarray, total: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, int, int] | None:
+    """Читает и проверяет спиновые плотности; ``None`` — их в файле нет.
+
+    Присутствие только одной из двух матриц — повреждение, а не «замкнутая
+    оболочка»: тихо вернуть ``None`` значило бы продолжить расчёт открытой
+    оболочки с чужой плотностью.
+    """
+    raw_alpha = data.get("density_alpha")
+    raw_beta = data.get("density_beta")
+    if raw_alpha is None and raw_beta is None:
+        return None
+    if raw_alpha is None or raw_beta is None:
+        msg = "В контрольной точке есть только одна из спиновых плотностей α/β"
+        raise CheckpointError(msg)
+    n_alpha = data.get("n_alpha")
+    n_beta = data.get("n_beta")
+    if not isinstance(n_alpha, int) or not isinstance(n_beta, int):
+        msg = "В контрольной точке отсутствуют или повреждены числа электронов α и β"
+        raise CheckpointError(msg)
+    matrices: list[np.ndarray] = []
+    for label, raw, count in (("α", raw_alpha, n_alpha), ("β", raw_beta, n_beta)):
+        try:
+            matrix = np.asarray(raw, dtype=float)
+        except (TypeError, ValueError) as error:
+            msg = f"Плотность {label} содержит нечисловые значения: {error}"
+            raise CheckpointError(msg) from error
+        if matrix.shape != overlap.shape:
+            msg = f"Размер плотности {label} {matrix.shape} не соответствует базису {overlap.shape}"
+            raise CheckpointError(msg)
+        if float(np.max(np.abs(matrix - matrix.T))) > _SYMMETRY_TOLERANCE:
+            msg = f"Плотность {label} несимметрична: файл повреждён"
+            raise CheckpointError(msg)
+        electrons = float(np.trace(matrix @ overlap))
+        if abs(electrons - count) > _ELECTRON_COUNT_TOLERANCE:
+            msg = f"Плотность {label}: tr(D·S) = {electrons:.6f}, ожидалось {count}"
+            raise CheckpointError(msg)
+        matrices.append(matrix)
+    if float(np.max(np.abs(matrices[0] + matrices[1] - total))) > 1e-8:
+        msg = "Полная плотность не равна сумме плотностей α и β: файл повреждён"
+        raise CheckpointError(msg)
+    return matrices[0], matrices[1], n_alpha, n_beta
 
 
 def assert_matches_job(checkpoint: ScfCheckpoint, *, molecule: Molecule, basis: str) -> None:

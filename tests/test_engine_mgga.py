@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from quantumlab.domain.molecule import Molecule
+from quantumlab.domain.molecule import Atom, Molecule
 from quantumlab.domain.spec import (
     CalculationSpec,
     GridPreset,
@@ -28,6 +28,7 @@ from quantumlab.domain.spec import (
 )
 from quantumlab.engine.basis import build_basis
 from quantumlab.engine.capabilities import Availability
+from quantumlab.engine.constants import angstrom_to_bohr
 from quantumlab.engine.contracts import EngineRequest, ExchangeCorrelationFunctional
 from quantumlab.engine.dft import run_rks, run_uks
 from quantumlab.engine.functional import (
@@ -46,7 +47,7 @@ from quantumlab.engine.gradients import rks_gradient
 from quantumlab.engine.quadrature import build_grid
 from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import default_registry
-from quantumlab.engine.scf import run_rhf
+from quantumlab.engine.scf import ScfSettings, run_rhf
 from quantumlab.errors import CombinationUnavailableError
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -55,6 +56,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 @pytest.fixture(scope="module")
 def water() -> Molecule:
     return Molecule.from_xyz((FIXTURES / "water.xyz").read_text(encoding="utf-8"), name="water")
+
+
+TIGHT = ScfSettings(energy_tolerance=1e-11, density_tolerance=1e-9, max_iterations=200)
 
 
 def _physical_points(size: int = 300, seed: int = 7) -> tuple[np.ndarray, ...]:
@@ -229,15 +233,73 @@ def test_engine_runs_tpssh_single_point(water: Molecule) -> None:
     assert result.converged
 
 
-@pytest.mark.parametrize("task", [Task.OPTIMIZATION, Task.FREQUENCIES])
-def test_engine_refuses_tpssh_with_gradient_tasks(water: Molecule, task: Task) -> None:
-    spec = CalculationSpec(
-        task=task,
-        method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="tpssh"),
-        optimization=OptimizationSpec(max_steps=2),
+def test_rks_tpssh_gradient_matches_pyscf(water: Molecule) -> None:
+    """Аналитический градиент TPSSh (с членом ``v_τ ∂τ/∂R``) против PySCF.
+
+    ``grid_response=False`` — та же модель, что у нас: сетка неподвижна в пространстве.
+    """
+    pyscf = pytest.importorskip("pyscf", reason="PySCF нужен только для независимой сверки")
+    pyscf_dft = pytest.importorskip("pyscf.dft", reason="PySCF DFT нужен для независимой сверки")
+    basis = build_basis("sto-3g", water)
+    functional = Tpssh()
+    grid = build_grid(water, GridPreset.ULTRAFINE)
+    result = run_rks(basis, water, functional, grid=grid)
+    ours = rks_gradient(basis, water, result, grid, functional).gradient
+
+    theirs = pyscf.gto.M(
+        atom=[(atom.symbol, atom.position) for atom in water.atoms],
+        basis="sto-3g",
+        unit="Angstrom",
+        verbose=0,
     )
-    with pytest.raises(CombinationUnavailableError):
-        ReferenceEngine().run(EngineRequest(job_id="mgga", spec=spec, molecule=water, threads=1))
+    their_scf = pyscf_dft.RKS(theirs)
+    their_scf.xc = "TPSSH"
+    their_scf.grids.atom_grid = (120, 974)
+    their_scf.conv_tol = 1e-12
+    their_scf.run()
+    method = their_scf.nuc_grad_method()
+    method.grid_response = False
+    reference = np.asarray(method.kernel())
+    assert float(np.max(np.abs(ours - reference))) < 5e-6
+
+
+def test_rks_tpssh_gradient_matches_finite_differences(water: Molecule) -> None:
+    """Градиент согласован с производной собственной энергии на той же неподвижной сетке."""
+    basis = build_basis("sto-3g", water)
+    functional = Tpssh()
+    grid = build_grid(water, GridPreset.FINE)
+    result = run_rks(basis, water, functional, TIGHT, grid=grid)
+    analytic = rks_gradient(basis, water, result, grid, functional).gradient
+
+    step = 1e-3  # Å
+    atom, axis = 1, 1  # H, ось y: вдоль связи, ненулевая компонента
+    energies = []
+    for sign in (+1, -1):
+        atoms = list(water.atoms)
+        position = list(atoms[atom].position)
+        position[axis] += sign * step
+        atoms[atom] = Atom(symbol=atoms[atom].symbol, position=tuple(position))  # type: ignore[arg-type]
+        moved = Molecule(name="moved", atoms=tuple(atoms))
+        # Сетка строится по исходной геометрии: энергия при неподвижной сетке —
+        # ровно та величина, производную которой считает аналитический градиент.
+        energies.append(
+            run_rks(build_basis("sto-3g", moved), moved, functional, TIGHT, grid=grid).total_energy
+        )
+    numeric = (energies[0] - energies[1]) / (2 * step * angstrom_to_bohr(1.0))
+    assert abs(analytic[atom, axis] - numeric) < 2e-5
+
+
+def test_engine_optimizes_tpssh_with_the_analytic_gradient(water: Molecule) -> None:
+    spec = CalculationSpec(
+        task=Task.OPTIMIZATION,
+        method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="tpssh"),
+        optimization=OptimizationSpec(max_steps=3, coordinates="cartesian"),
+    )
+    result = ReferenceEngine().run(
+        EngineRequest(job_id="mgga", spec=spec, molecule=water, threads=1)
+    )
+    assert result.energy_hartree < -75.0
+    assert result.final_molecule is not None
 
 
 def test_engine_refuses_tpssh_for_open_shell() -> None:
@@ -256,13 +318,9 @@ def test_solvers_refuse_meta_gga_where_it_is_not_implemented(water: Molecule) ->
     basis = build_basis("sto-3g", water)
     with pytest.raises(NotImplementedError, match="UKS"):
         run_uks(basis, water, Tpssh())
-    grid = build_grid(water, GridPreset.COARSE)
-    rks = run_rks(basis, water, Tpssh(), grid=grid)
-    with pytest.raises(NotImplementedError, match="градиент"):
-        rks_gradient(basis, water, rks, grid, Tpssh())
 
 
-def test_registry_reports_tpssh_as_partial_rks_single_point_only() -> None:
+def test_registry_reports_tpssh_as_partial_rks_only() -> None:
     registry = default_registry()
     assert registry.availability("functional:tpssh") is Availability.PARTIAL
     capability = registry.get("functional:tpssh")

@@ -19,6 +19,7 @@ from collections.abc import Sequence as Seq
 
 from quantumlab.domain.spec import DispersionCorrection, Task
 from quantumlab.engine.basis import basis_angular_scheme
+from quantumlab.engine.basis_custom import custom_basis_names
 from quantumlab.engine.capabilities import Availability, Capability, CapabilityKind
 from quantumlab.engine.functional import FUNCTIONALS, get_functional
 from quantumlab.errors import (
@@ -154,7 +155,7 @@ _METHODS: tuple[tuple[str, str], ...] = (
 #: здесь только справочные имена и классы, чтобы «заявлено» и «умеет» не
 #: разъезжались. Реализованы SVWN, PBE, BLYP, PBE0, B3LYP (сверены с LibXC и
 #: PySCF, в том числе со спиновой поляризацией) и meta-GGA гибрид TPSSh (только
-#: RKS, энергия в точке); M06, M06-2X и дальнодействующие гибриды — заявлены в
+#: RKS); M06, M06-2X и дальнодействующие гибриды — заявлены в
 #: ТЗ, кода нет.
 _FUNCTIONALS: tuple[tuple[str, str, str], ...] = (
     ("svwn", "SVWN (Слейтер + VWN-5)", "lda"),
@@ -257,14 +258,6 @@ _BACKENDS: tuple[tuple[str, Availability], ...] = (
     ("rocm", Availability.NOT_IMPLEMENTED),
 )
 
-#: Ограничение, общее для всех базисов с d/f-функциями: движок считает в
-#: декартовой схеме, тогда как эти наборы опубликованы в сферической.
-_CARTESIAN_LIMITATION = (
-    "Базис опубликован в сферической схеме (чистые угловые моменты), а расчёт "
-    "идёт в декартовой: 6 d-функций вместо 5, 10 f вместо 7. Это больший базис, "
-    "энергия ниже табличной примерно на 1e-4 Eh."
-)
-
 _SCHEDULERS: tuple[str, ...] = ("local", "slurm", "pbs", "lsf")
 
 
@@ -281,7 +274,7 @@ def _method_limitations(name: str) -> tuple[str, ...]:
     if name == "dft":
         return (
             "Реализованы SVWN (LDA), PBE и BLYP (GGA), PBE0 и B3LYP (гибриды), "
-            "TPSSh (meta-GGA гибрид, только RKS и энергия в точке); meta-GGA "
+            "TPSSh (meta-GGA гибрид, только замкнутая оболочка RKS); meta-GGA "
             "M06 и M06-2X и дальнодействующие гибриды (ωB97X, ωB97X-D) не "
             "реализованы.",
             "Дисперсионные поправки: D3 (BJ, zero) и D4 реализованы для "
@@ -319,9 +312,9 @@ def _functional_limitations(name: str) -> tuple[str, ...]:
             f"доля точного обмена — {functional.exact_exchange_fraction:g}."
         )
         limits.append(
-            "Только замкнутая оболочка (RKS) и энергия в одной точке: UKS, "
-            "аналитический градиент (оптимизация, частоты) для meta-GGA не реализованы "
-            "и отклоняются, а не подменяются приближением."
+            "Только замкнутая оболочка (RKS): спин-поляризованный UKS с τ не "
+            "реализован и отклоняется, а не подменяется приближением. Энергия, "
+            "аналитический градиент, оптимизация и частоты — доступны."
         )
         return tuple(limits)
     else:
@@ -345,9 +338,18 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
     ("level_shift", True, ""),
     ("ediis", False, "EDIIS не реализован; запрос отклоняется, а не выполняется без него."),
     ("soscf", False, "SOSCF (второй порядок) не реализован."),
-    ("stability_analysis", False, "Проверка устойчивости волновой функции не реализована."),
+    (
+        "stability_analysis",
+        True,
+        "Только HF (RHF и UHF) и только одноточечный расчёт: вещественная "
+        "внутренняя устойчивость и RHF→UHF; для DFT нужно XC-ядро второго порядка, "
+        "для ROHF и комплексных вращений — нет. Остальные запросы отклоняются.",
+    ),
     ("fractional_occupations", False, "Дробные занятия не реализованы."),
 )
+
+#: Параметры SCF, реализованные частично (ограничения — в примечании).
+_PARTIAL_SCF_OPTIONS: frozenset[str] = frozenset({"stability_analysis"})
 
 #: Возможности диспетчера заданий. Контрольная точка заявлена отдельно от
 #: повтора: повтор выполняется, а продолжать прерванный расчёт не с чего —
@@ -489,19 +491,42 @@ def default_registry() -> CapabilityRegistry:
         )
 
     for name in _BASIS_SETS:
-        # Все 16 наборов загружаются и работают. Статус зависит от угловой
-        # схемы, в которой набор опубликован: для сферических наш декартов
-        # расчёт даёт больший базис, и это ограничение нужно показывать.
-        cartesian = basis_angular_scheme(name) == "cartesian"
+        # Все 16 наборов загружаются и считаются в той угловой схеме, в которой
+        # опубликованы (сферической или декартовой), поэтому энергии
+        # воспроизводят табличные.
+        scheme = basis_angular_scheme(name)
         capabilities.append(
             Capability(
                 id=f"basis:{name}",
                 kind=CapabilityKind.BASIS,
                 name=name,
-                availability=Availability.IMPLEMENTED if cartesian else Availability.PARTIAL,
+                availability=Availability.IMPLEMENTED,
                 since_version=__version__,
-                limitations=() if cartesian else (_CARTESIAN_LIMITATION,),
-                metadata={"angular_scheme_published": "cartesian" if cartesian else "spherical"},
+                metadata={"angular_scheme_published": scheme, "angular_scheme_used": scheme},
+            )
+        )
+
+    # Пользовательские базисы (каталог пользователя, см. basis_custom): те же
+    # данные и тот же код, поэтому ``implemented``; происхождение — в метаданных.
+    for name in custom_basis_names():
+        if name in _BASIS_SETS:
+            continue
+        try:
+            scheme = basis_angular_scheme(name)
+        except (BasisNotFoundError, ValueError, KeyError):
+            continue
+        capabilities.append(
+            Capability(
+                id=f"basis:{name}",
+                kind=CapabilityKind.BASIS,
+                name=name,
+                availability=Availability.IMPLEMENTED,
+                since_version=__version__,
+                metadata={
+                    "angular_scheme_published": scheme,
+                    "angular_scheme_used": scheme,
+                    "origin": "custom",
+                },
             )
         )
 
@@ -639,10 +664,14 @@ def default_registry() -> CapabilityRegistry:
                 kind=CapabilityKind.SCF,
                 name=name,
                 availability=(
-                    Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
+                    Availability.NOT_IMPLEMENTED
+                    if not available
+                    else Availability.PARTIAL
+                    if name in _PARTIAL_SCF_OPTIONS
+                    else Availability.IMPLEMENTED
                 ),
                 since_version=__version__ if available else None,
-                limitations=() if available else (note,),
+                limitations=(note,) if (not available or name in _PARTIAL_SCF_OPTIONS) else (),
             )
         )
 

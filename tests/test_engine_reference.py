@@ -48,7 +48,7 @@ WATER = Path(__file__).parent / "fixtures" / "water.xyz"
 
 #: Энергия RHF воды в STO-3G, независимо подтверждённая сверкой с PySCF
 #: (расхождение 9.0e-08 Eh, см. tests/test_crosscheck_pyscf.py).
-WATER_STO3G_ENERGY = -74.9630296542
+WATER_STO3G_ENERGY = -74.9630296640
 
 #: Диполь воды в STO-3G, дебай: совпадает с PySCF до 1e-7 a.u.
 WATER_STO3G_DIPOLE = 1.7253
@@ -221,15 +221,12 @@ def test_energies_are_variationally_ordered_by_basis_size() -> None:
 # --------------------------------------------------------------------------- #
 # Честность отказов
 # --------------------------------------------------------------------------- #
-def test_spherical_basis_runs_but_warns_about_the_scheme() -> None:
-    """Базис со сферической публикацией d считается — но с явным предупреждением.
+def test_spherical_basis_is_computed_in_the_published_scheme() -> None:
+    """Базис, опубликованный со сферическими d, считается в сферической схеме.
 
-    Мы не блокируем расчёт и не делаем вид, что результат совпадает с
-    табличным: разница схемы отражена и в проверке качества, и в warnings.
-
-    Молекула взята наименьшая из возможных (H2): предупреждение зависит от
-    базиса, а не от системы, а стоимость ERI растёт как четвёртая степень
-    числа функций.
+    Проверка качества проходит без предупреждений, число функций — 5 на d.
+    Молекула наименьшая из возможных (H2): схема зависит от базиса, а не от
+    системы, а стоимость ERI растёт как четвёртая степень числа функций.
     """
     hydrogen = Molecule(
         name="h2",
@@ -241,14 +238,9 @@ def test_spherical_basis_runs_but_warns_about_the_scheme() -> None:
     result = _run("cc-pvdz", molecule=hydrogen)
     assert result.converged
     check = next(c for c in result.quality_checks if c.name_key == "basis_angular_scheme")
-    assert check.verdict is QualityVerdict.WARNING
+    assert check.verdict is QualityVerdict.PASS
     assert check.detail is not None and "сферической" in check.detail
-    assert len(result.warnings) == 1
-    # Проверка по ключу, а не по тексту: предупреждение локализуется, и
-    # привязывать тест к русскому варианту значило бы сломать его при
-    # переключении языка.
-    assert result.warnings[0].key == "warning.basis_spherical_scheme"
-    assert result.warnings[0].params["basis"] == "cc-pvdz"
+    assert not result.warnings
 
 
 def test_unsupported_task_is_rejected_before_any_computation() -> None:
@@ -672,8 +664,15 @@ def test_unimplemented_scf_strategies_are_rejected_not_silently_skipped() -> Non
     for strategies in (("ediis",), ("diis", "soscf"), ("ediis", "damping", "level_shift")):
         with pytest.raises(MethodNotAvailableError):
             engine.assert_supported(_option_spec(scf=ScfSpec(fallback_strategies=strategies)))
-    with pytest.raises(MethodNotAvailableError):
-        engine.assert_supported(_option_spec(scf=ScfSpec(stability_analysis=True)))
+    # Анализ устойчивости реализован для HF в одной точке; для DFT — отказ.
+    assert engine.assert_supported(_option_spec(scf=ScfSpec(stability_analysis=True)))
+    with pytest.raises(CombinationUnavailableError):
+        engine.assert_supported(
+            _option_spec(
+                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="pbe"),
+                scf=ScfSpec(stability_analysis=True),
+            )
+        )
     with pytest.raises(MethodNotAvailableError):
         engine.assert_supported(_option_spec(scf=ScfSpec(fractional_occupations=True)))
     # Реализованные стратегии проходят.

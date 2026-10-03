@@ -476,8 +476,36 @@ def _pair_block(
     return block
 
 
+def _require_cartesian(basis: BasisSet) -> None:
+    """Интегралы по производным определены только в декартовой схеме."""
+    if basis.spherical:
+        msg = (
+            "Производные интегралов считаются в декартовой схеме: передайте "
+            "basis.cartesian() и переведите плотности матрицей basis.transformation_matrix()."
+        )
+        raise ValueError(msg)
+
+
+def _to_spherical_2(matrix: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """``Tᵀ M T`` для одноэлектронной матрицы."""
+    return np.asarray(transform.T @ matrix @ transform)
+
+
+def _to_spherical_4(tensor: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    """Преобразование всех четырёх индексов ERI-тензора матрицей ``T``."""
+    result = np.tensordot(tensor, transform, axes=([0], [0]))  # νλσ μ'
+    result = np.tensordot(result, transform, axes=([0], [0]))  # λσ μ' ν'
+    result = np.tensordot(result, transform, axes=([0], [0]))  # σ μ' ν' λ'
+    result = np.tensordot(result, transform, axes=([0], [0]))  # μ' ν' λ' σ'
+    return np.asarray(result)
+
+
 def build_overlap(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     """Матрица перекрывания ``S``."""
+    if basis.spherical:
+        return _to_spherical_2(
+            build_overlap(basis.cartesian(), molecule), basis.transformation_matrix()
+        )
     centers = _shell_centers(basis, molecule)
     matrix = np.zeros((basis.n_functions, basis.n_functions))
     for i, shell_a in enumerate(basis.shells):
@@ -489,6 +517,10 @@ def build_overlap(basis: BasisSet, molecule: Molecule) -> np.ndarray:
 
 def build_kinetic(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     """Матрица кинетической энергии ``T``."""
+    if basis.spherical:
+        return _to_spherical_2(
+            build_kinetic(basis.cartesian(), molecule), basis.transformation_matrix()
+        )
     centers = _shell_centers(basis, molecule)
     matrix = np.zeros((basis.n_functions, basis.n_functions))
     for i, shell_a in enumerate(basis.shells):
@@ -500,6 +532,10 @@ def build_kinetic(basis: BasisSet, molecule: Molecule) -> np.ndarray:
 
 def build_nuclear_attraction(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     """Матрица притяжения электронов к ядрам ``V`` (отрицательная)."""
+    if basis.spherical:
+        return _to_spherical_2(
+            build_nuclear_attraction(basis.cartesian(), molecule), basis.transformation_matrix()
+        )
     centers = _shell_centers(basis, molecule)
     unique_nuclei: list[tuple[int, Point]] = [
         (
@@ -540,7 +576,13 @@ def build_electron_repulsion(basis: BasisSet, molecule: Molecule) -> np.ndarray:
     Квартеты одного класса (:class:`_ClassGeometry`) считаются пачками: это не
     приближение, а другой порядок обхода — значения совпадают с поквартиетной
     сборкой :func:`_quartet_block` с точностью до порядка суммирования.
+
+    В сферической схеме декартов тензор сворачивается матрицей перехода.
     """
+    if basis.spherical:
+        return _to_spherical_4(
+            build_electron_repulsion(basis.cartesian(), molecule), basis.transformation_matrix()
+        )
     shells = basis.shells
     centers = _shell_centers(basis, molecule)
     offsets = _shell_offsets(basis)
@@ -694,6 +736,7 @@ def build_overlap_derivative(basis: BasisSet, molecule: Molecule, axis: int) -> 
     поэтому она равна транспонированной матрице. То же верно для ``T`` и
     электронной части ``V``.
     """
+    _require_cartesian(basis)
     centers = _shell_centers(basis, molecule)
     kernel = bra_derivative_kernel(_overlap_primitive, axis)
     matrix = np.zeros((basis.n_functions, basis.n_functions))
@@ -707,6 +750,7 @@ def build_overlap_derivative(basis: BasisSet, molecule: Molecule, axis: int) -> 
 
 def build_kinetic_derivative(basis: BasisSet, molecule: Molecule, axis: int) -> np.ndarray:
     """``∂T_μν/∂A_x`` по центру бра-оболочки."""
+    _require_cartesian(basis)
     centers = _shell_centers(basis, molecule)
     kernel = bra_derivative_kernel(_kinetic_primitive, axis)
     matrix = np.zeros((basis.n_functions, basis.n_functions))
@@ -722,6 +766,7 @@ def build_nuclear_attraction_center_derivative(
     basis: BasisSet, molecule: Molecule, axis: int
 ) -> np.ndarray:
     """``∂V_μν/∂A_x`` по центру бра-оболочки (без вклада движения самих ядер)."""
+    _require_cartesian(basis)
     centers = _shell_centers(basis, molecule)
     unique_nuclei: list[tuple[int, Point]] = [
         (
@@ -756,6 +801,7 @@ def build_nuclear_attraction_position_derivative(
     Симметричная матрица (зависит только от оператора, а не от того, какая из
     двух функций дифференцируется), поэтому заполняются обе треугольные части.
     """
+    _require_cartesian(basis)
     centers = _shell_centers(basis, molecule)
     atom = molecule.atoms[atom_index]
     origin = atom.position
@@ -854,6 +900,7 @@ def build_electron_repulsion_derivative(
     Поэтому стоимость градиента — три сборки тензора (по одной на ось), а не
     двенадцать. Соотношения проверяются тестом, а не принимаются на веру.
     """
+    _require_cartesian(basis)
     centers = _shell_centers(basis, molecule)
     shells = basis.shells
     offsets = _shell_offsets(basis)
@@ -2049,6 +2096,14 @@ def build_dipole_integrals(
     диполь считается от тех же координат и полный диполь не зависит от выбора
     начала координат для нейтральной системы.
     """
+    if basis.spherical:
+        transform = basis.transformation_matrix()
+        cart = build_dipole_integrals(basis.cartesian(), molecule)
+        return (
+            _to_spherical_2(cart[0], transform),
+            _to_spherical_2(cart[1], transform),
+            _to_spherical_2(cart[2], transform),
+        )
     centers = _shell_centers(basis, molecule)
     size = basis.n_functions
     matrices: list[np.ndarray] = []

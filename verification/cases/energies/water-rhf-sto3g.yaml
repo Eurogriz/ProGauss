@@ -7,14 +7,13 @@ spec:
   method: { theory: hf, basis: sto-3g }
 expect:
   energy_hartree:
-    value: -74.9630296542
+    value: -74.9630296640
     tol: 1.0e-8
     source: >-
-      internal-reference (reference-cpu, RHF, порог SCF 1e-10); обновлено после исправления обрыва ряда Бойса (см. _series_terms).
-      Расхождение с PySCF 2.14 — 1.5e-08 э: оно определяется не интегралами, а
-      константой перевода Å в боры (у нас CODATA-1998 1.8897259885789, у PySCF
-      CODATA-2010 1.8897261246), что даёт 7.2e-08 отн. в расстояниях и 6.6e-07 э
-      в ядерном отталкивании
+      internal-reference (reference-cpu, RHF, порог SCF 1e-10). Расхождение с
+      PySCF 2.14 при одинаковой геометрии в борах — 2.4e-08 Eh (разница в
+      округлении показателей STO-3G в базах BSE и PySCF), константа перевода
+      Å→бор — CODATA-2018 (0.529177210903 Å), у PySCF CODATA-2010.
   homo_energy_hartree:
     value: -0.3912426982
     tol: 1.0e-7
