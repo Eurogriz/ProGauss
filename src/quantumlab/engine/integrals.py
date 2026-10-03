@@ -738,6 +738,11 @@ class DirectEri:
         return self._jk(density)[1]
 
     def _jk(self, density: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        if np.iscomplexobj(density):
+            # Накопитель рассчитан на вещественную симметричную плотность;
+            # молча отбросить мнимую часть значило бы вернуть неверный K.
+            msg = "Прямой SCF поддерживает только вещественную симметричную плотность."
+            raise TypeError(msg)
         key = np.ascontiguousarray(density).tobytes()
         if self._cache is not None and self._cache[0] == key:
             return self._cache[1], self._cache[2]

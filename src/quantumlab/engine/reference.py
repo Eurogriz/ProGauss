@@ -65,13 +65,18 @@ from quantumlab.engine.checkpoint import (
     read_scf_checkpoint,
     write_scf_checkpoint,
 )
-from quantumlab.engine.contracts import EngineRequest, ProgressReporter
+from quantumlab.engine.contracts import (
+    EngineRequest,
+    ExchangeCorrelationFunctional,
+    ProgressReporter,
+)
 from quantumlab.engine.dft import RksResult, UksResult, run_rks, run_uks
 from quantumlab.engine.dispersion import (
     DispersionContribution,
     dftd3_contribution,
     dftd4_contribution,
 )
+from quantumlab.engine.fock import SpinFockBuilder
 from quantumlab.engine.functional import (
     density_at_points,
     evaluate_basis,
@@ -104,7 +109,12 @@ from quantumlab.engine.scf import (
     spin_population,
 )
 from quantumlab.engine.scf import ScfResult as RhfResult
-from quantumlab.engine.stability import StabilityResult, rhf_stability, uhf_stability
+from quantumlab.engine.stability import (
+    StabilityResult,
+    rhf_stability,
+    rotation_stability,
+    uhf_stability,
+)
 from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
 from quantumlab.errors import (
     CombinationUnavailableError,
@@ -470,11 +480,34 @@ class ReferenceEngine:
         else:
             d3_checks = ()
 
+        stability_checks: tuple[QualityCheck, ...] = ()
+        stability_warnings: tuple[CalculationWarning, ...] = ()
+        if spec.scf.stability_analysis:
+            started = time.perf_counter()
+            stability = (
+                _stability_analysis(
+                    "RKS",
+                    basis,
+                    request.molecule,
+                    prepared,
+                    coefficients=(rks.coefficients, rks.coefficients),
+                    energies=(rks.orbital_energies, rks.orbital_energies),
+                    functional=functional,
+                    grid=grid,
+                )
+                if rks.converged
+                else None
+            )
+            check, stability_warnings = _stability_outcome(stability)
+            stability_checks = (check,)
+            timings.append(_timing("stability", started))
+
         started = time.perf_counter()
         properties = _properties(rks.as_scf_result(), request.molecule, dipole_integrals)
         checks = (
             _quality_checks_rks(rks, basis, request.molecule, prepared, grid, basis_values)
             + d3_checks
+            + stability_checks
         )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
@@ -491,7 +524,8 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_rks(rks, request.molecule, grid, pruning_requested=spec.grid.prune),
+            warnings=_warnings_rks(rks, request.molecule, grid, pruning_requested=spec.grid.prune)
+            + stability_warnings,
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -559,11 +593,34 @@ class ReferenceEngine:
         else:
             d3_checks = ()
 
+        stability_checks: tuple[QualityCheck, ...] = ()
+        stability_warnings: tuple[CalculationWarning, ...] = ()
+        if spec.scf.stability_analysis:
+            started = time.perf_counter()
+            stability = (
+                _stability_analysis(
+                    "UKS",
+                    basis,
+                    request.molecule,
+                    prepared,
+                    coefficients=(uks.alpha_coefficients, uks.beta_coefficients),
+                    energies=(uks.alpha_energies, uks.beta_energies),
+                    functional=functional,
+                    grid=grid,
+                )
+                if uks.converged
+                else None
+            )
+            check, stability_warnings = _stability_outcome(stability)
+            stability_checks = (check,)
+            timings.append(_timing("stability", started))
+
         started = time.perf_counter()
         properties = _properties_uhf(uks.as_uhf_result(), request.molecule, dipole_integrals)
         checks = (
             _quality_checks_uks(uks, basis, request.molecule, prepared, grid, basis_values)
             + d3_checks
+            + stability_checks
         )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
@@ -583,7 +640,8 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_uks(uks, request.molecule, grid, pruning_requested=spec.grid.prune),
+            warnings=_warnings_uks(uks, request.molecule, grid, pruning_requested=spec.grid.prune)
+            + stability_warnings,
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -636,11 +694,13 @@ class ReferenceEngine:
         if spec.scf.stability_analysis:
             started = time.perf_counter()
             stability = (
-                rhf_stability(
-                    rhf.coefficients,
-                    rhf.orbital_energies,
-                    _dense_eri(prepared),
-                    request.molecule.n_electrons // 2,
+                _stability_analysis(
+                    "RHF",
+                    basis,
+                    request.molecule,
+                    prepared,
+                    coefficients=(rhf.coefficients, rhf.coefficients),
+                    energies=(rhf.orbital_energies, rhf.orbital_energies),
                 )
                 if rhf.converged
                 else None
@@ -727,18 +787,14 @@ class ReferenceEngine:
         stability_warnings: tuple[CalculationWarning, ...] = ()
         if spec.scf.stability_analysis:
             started = time.perf_counter()
-            n_alpha, n_beta = spin_population(
-                request.molecule.n_electrons, request.molecule.multiplicity
-            )
             stability = (
-                uhf_stability(
-                    uhf.alpha_coefficients,
-                    uhf.beta_coefficients,
-                    uhf.alpha_energies,
-                    uhf.beta_energies,
-                    _dense_eri(prepared),
-                    n_alpha,
-                    n_beta,
+                _stability_analysis(
+                    "UHF",
+                    basis,
+                    request.molecule,
+                    prepared,
+                    coefficients=(uhf.alpha_coefficients, uhf.beta_coefficients),
+                    energies=(uhf.alpha_energies, uhf.beta_energies),
                 )
                 if uhf.converged
                 else None
@@ -817,9 +873,35 @@ class ReferenceEngine:
         else:
             d3_checks = ()
 
+        stability_checks: tuple[QualityCheck, ...] = ()
+        stability_warnings: tuple[CalculationWarning, ...] = ()
+        if spec.scf.stability_analysis:
+            started = time.perf_counter()
+            stability = (
+                _stability_analysis(
+                    "ROHF",
+                    basis,
+                    request.molecule,
+                    prepared,
+                    coefficients=(rohf.coefficients, rohf.coefficients),
+                    energies=(rohf.orbital_energies, rohf.orbital_energies),
+                    functional=None,
+                    grid=None,
+                )
+                if rohf.converged
+                else None
+            )
+            check, stability_warnings = _stability_outcome(stability)
+            stability_checks = (check,)
+            timings.append(_timing("stability", started))
+
         started = time.perf_counter()
         properties = _properties_uhf(rohf, request.molecule, dipole_integrals)
-        checks = _quality_checks_uhf(rohf, basis, request.molecule, prepared) + d3_checks
+        checks = (
+            _quality_checks_uhf(rohf, basis, request.molecule, prepared)
+            + d3_checks
+            + stability_checks
+        )
         timings.append(_timing("properties", started))
         _report(progress, 100.0, "properties")
 
@@ -838,7 +920,7 @@ class ReferenceEngine:
             properties=properties,
             checks=checks,
             timings=timings,
-            warnings=_warnings_uhf(rohf, request.molecule),
+            warnings=_warnings_uhf(rohf, request.molecule) + stability_warnings,
             final_molecule=None,
             dispersion_energy_hartree=d3.energy_hartree if d3 is not None else None,
         )
@@ -1224,29 +1306,21 @@ class ReferenceEngine:
             return
 
         if spec.scf.stability_analysis:
-            if method.theory is not TheoryFamily.HF:
+            if (
+                method.theory is TheoryFamily.DFT
+                and method.functional is not None
+                and get_functional(method.functional).requires_tau
+            ):
                 raise CombinationUnavailableError(
-                    f"scf:stability_analysis + {method.theory.value}",
-                    "Анализ устойчивости реализован только для HF: для DFT нужно "
-                    "обменно-корреляционное ядро второго порядка. Запрос не "
-                    "выполняется молча без анализа (§54 ТЗ).",
-                )
-            if method.spin is SpinTreatment.ROHF:
-                raise CombinationUnavailableError(
-                    "scf:stability_analysis + rohf",
-                    "Анализ устойчивости ROHF не реализован: доступны RHF и UHF.",
+                    f"scf:stability_analysis + {method.functional}",
+                    "Устойчивость meta-GGA требует спин-неограниченного потенциала с "
+                    "кинетической плотностью, которого в движке нет.",
                 )
             if spec.task is not Task.SINGLE_POINT:
                 raise CombinationUnavailableError(
                     f"scf:stability_analysis + {spec.task.value}",
                     "Анализ устойчивости выполняется только в одноточечном расчёте.",
                 )
-
-        if spec.scf.direct and spec.scf.stability_analysis:
-            raise CombinationUnavailableError(
-                "scf:direct + scf:stability_analysis",
-                "Анализу устойчивости нужен полный тензор ERI, а прямой SCF его не хранит.",
-            )
 
         if "ediis" in spec.scf.fallback_strategies and method.spin is SpinTreatment.ROHF:
             raise CombinationUnavailableError(
@@ -1400,12 +1474,58 @@ def _build_integrals(
     )
 
 
-def _dense_eri(prepared: PrecomputedIntegrals) -> np.ndarray:
-    """Полный тензор ERI; в прямом режиме его нет — анализ устойчивости им не обойтись."""
-    if isinstance(prepared.eri, DirectEri):
-        msg = "Для этого анализа нужен полный тензор ERI, а в прямом режиме он не хранится."
-        raise CombinationUnavailableError("scf:direct + stability_analysis", msg)
-    return prepared.eri
+def _stability_analysis(
+    label: str,
+    basis: BasisSet,
+    molecule: Molecule,
+    prepared: PrecomputedIntegrals,
+    *,
+    coefficients: tuple[np.ndarray, np.ndarray],
+    energies: tuple[Sequence[float], Sequence[float]],
+    functional: ExchangeCorrelationFunctional | None = None,
+    grid: QuadratureGrid | None = None,
+) -> StabilityResult:
+    """Анализ устойчивости сошедшегося решения тем способом, который для него есть.
+
+    * RHF и UHF с хранимым тензором — аналитические ``A ± B`` (быстро, точно);
+    * всё остальное (DFT, ROHF, прямой SCF, где тензора нет) — конечная
+      разность орбитального градиента с общим построителем фокиана.
+    """
+    n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
+    dense = not isinstance(prepared.eri, DirectEri)
+    if functional is None and dense:
+        if label == "RHF":
+            return rhf_stability(
+                coefficients[0],
+                np.asarray(energies[0], dtype=float),
+                np.asarray(prepared.eri),
+                molecule.n_electrons // 2,
+            )
+        if label == "UHF":
+            return uhf_stability(
+                coefficients[0],
+                coefficients[1],
+                np.asarray(energies[0], dtype=float),
+                np.asarray(energies[1], dtype=float),
+                np.asarray(prepared.eri),
+                n_alpha,
+                n_beta,
+            )
+    builder = SpinFockBuilder(basis, molecule, functional=functional, integrals=prepared, grid=grid)
+    kind = {"RHF": "restricted", "RKS": "restricted", "ROHF": "rohf"}.get(label, "unrestricted")
+    return rotation_stability(
+        builder,
+        coefficients[0],
+        coefficients[1],
+        n_alpha,
+        n_beta,
+        kind=kind,
+        prefix=label,
+        # Прямой накопитель J/K определён для вещественной симметричной
+        # плотности; мнимым вращениям нужна эрмитова, поэтому в прямом режиме
+        # считаются только вещественные каналы.
+        complex_rotations=dense,
+    )
 
 
 def _solve_energy_and_gradient(

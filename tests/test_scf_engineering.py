@@ -194,9 +194,9 @@ def test_direct_rhf_uhf_rks_reproduce_the_stored_energies() -> None:
     assert direct_rks.total_energy == pytest.approx(stored_rks.total_energy, abs=1e-9)
 
 
-def test_direct_engine_run_matches_and_rejects_stability() -> None:
+def test_direct_engine_run_matches_the_stored_run() -> None:
     water = _water()
-    method = MethodSpec(theory=TheoryFamily.HF, basis="6-31g")
+    method = MethodSpec(theory=TheoryFamily.HF, basis="sto-3g")
     plain = ReferenceEngine().run(
         EngineRequest(
             job_id="plain",
@@ -209,16 +209,25 @@ def test_direct_engine_run_matches_and_rejects_stability() -> None:
         EngineRequest(
             job_id="direct",
             molecule=water,
-            spec=CalculationSpec(task=Task.SINGLE_POINT, method=method, scf=ScfSpec(direct=True)),
+            spec=CalculationSpec(
+                task=Task.SINGLE_POINT,
+                method=method,
+                scf=ScfSpec(direct=True, stability_analysis=True),
+            ),
             threads=2,
         )
     )
     assert direct.energy_hartree == pytest.approx(plain.energy_hartree, abs=1e-9)
-    with pytest.raises(CombinationUnavailableError):
-        ReferenceEngine().assert_supported(
-            CalculationSpec(
-                task=Task.SINGLE_POINT,
-                method=method,
-                scf=ScfSpec(direct=True, stability_analysis=True),
-            )
-        )
+    # В прямом режиме тензора нет — устойчивость считается конечной разностью.
+    check = next(c for c in direct.quality_checks if c.name_key == "wfn_stability")
+    assert "rhf->uhf" in (check.detail or "")
+    # Мнимые вращения в прямом режиме не считаются (эрмитова плотность).
+    assert "complex" not in (check.detail or "")
+
+
+def test_direct_eri_refuses_a_complex_density() -> None:
+    water = _water()
+    basis = build_basis("sto-3g", water)
+    direct = DirectEri(basis, water)
+    with pytest.raises(TypeError):
+        direct.exchange(np.eye(basis.n_functions, dtype=complex))
