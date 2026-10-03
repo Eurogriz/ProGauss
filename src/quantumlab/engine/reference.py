@@ -52,6 +52,7 @@ from quantumlab.domain.spec import (
     CalculationSpec,
     DispersionCorrection,
     OptimizationSpec,
+    ResourceSpec,
     ScfSpec,
     SpinTreatment,
     Task,
@@ -62,7 +63,11 @@ from quantumlab.engine.basis import BasisSet, basis_angular_scheme, build_basis
 from quantumlab.engine.checkpoint import (
     CheckpointError,
     assert_matches_job,
+    assert_optimization_matches_job,
+    read_optimization_checkpoint,
     read_scf_checkpoint,
+    spec_hash,
+    write_optimization_checkpoint,
     write_scf_checkpoint,
 )
 from quantumlab.engine.contracts import (
@@ -90,7 +95,7 @@ from quantumlab.engine.gradients import (
     uks_gradient,
 )
 from quantumlab.engine.integrals import DirectEri
-from quantumlab.engine.optimizer import OptimizationSettings, optimize_geometry
+from quantumlab.engine.optimizer import OptimizationSettings, OptimizerState, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import (
@@ -290,7 +295,9 @@ class ReferenceEngine:
         basis_name = self.assert_supported(spec)
         self._assert_meta_gga_open_shell(spec, request.molecule)
         if spec.task is Task.OPTIMIZATION:
-            return self._run_optimization(request, basis_name, progress=progress)
+            return self._run_optimization(
+                request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+            )
         if spec.task is Task.FREQUENCIES:
             return self._run_frequencies(request, basis_name, progress=progress)
         return self._run_single_point(
@@ -344,7 +351,7 @@ class ReferenceEngine:
         sink: CheckpointSink | None,
         request: EngineRequest,
         basis_name: str,
-        state: RhfResult | RksResult | UhfResult | UksResult,
+        state: RhfResult | RksResult | UhfResult | UksResult | RohfResult,
     ) -> None:
         """Передаёт контрольную точку приёмнику, если он есть.
 
@@ -355,12 +362,12 @@ class ReferenceEngine:
             return
         spin = (
             (state.density_alpha, state.density_beta)
-            if isinstance(state, UhfResult | UksResult)
+            if isinstance(state, UhfResult | UksResult | RohfResult)
             else None
         )
         density = (
             state.density_alpha + state.density_beta
-            if isinstance(state, UhfResult | UksResult)
+            if isinstance(state, UhfResult | UksResult | RohfResult)
             else state.density
         )
         sink(
@@ -387,9 +394,7 @@ class ReferenceEngine:
     ) -> CalculationResult:
         """Одноточечный расчёт в фиксированной геометрии.
 
-        Контрольные точки поддерживаются для RHF, UHF, RKS и UKS. Для ROHF
-        ``checkpoint_sink`` не вызывается: рестарт недоступен, и ``job resume``
-        честно откажет, а не начнёт расчёт заново, выдавая его за продолжение.
+        Контрольные точки поддерживаются для RHF, UHF, ROHF, RKS и UKS.
         """
         method = request.spec.method
         if method is not None and method.theory is TheoryFamily.DFT:
@@ -405,7 +410,9 @@ class ReferenceEngine:
                 request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
             )
         if method is not None and method.spin is SpinTreatment.ROHF:
-            return self._run_single_point_rohf(request, basis_name, progress=progress)
+            return self._run_single_point_rohf(
+                request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
+            )
         return self._run_single_point_rhf(
             request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
         )
@@ -834,7 +841,12 @@ class ReferenceEngine:
         )
 
     def _run_single_point_rohf(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """ROHF в фиксированной геометрии.
 
@@ -861,9 +873,23 @@ class ReferenceEngine:
         _report(progress, 45.0, "integrals")
 
         started = time.perf_counter()
-        rohf = run_rohf(basis, request.molecule, _scf_settings(spec), integrals=prepared)
+        try:
+            rohf = run_rohf(
+                basis,
+                request.molecule,
+                _scf_settings(spec),
+                integrals=prepared,
+                initial_densities=self._restore_spin_densities(request, basis_name, prepared),
+            )
+        except ValueError as error:
+            # ``run_rohf`` отклоняет плотности без общего занятого пространства.
+            if request.checkpoint is None:
+                raise
+            raise JobCheckpointInvalidError(str(error)) from error
         timings.append(_timing("scf", started))
         _report(progress, 85.0, "scf", iterations=rohf.iterations, converged=rohf.converged)
+
+        self._write_checkpoint(checkpoint_sink, request, basis_name, rohf)
 
         started = time.perf_counter()
         d3 = _dispersion_contribution(spec, request.molecule)
@@ -995,8 +1021,28 @@ class ReferenceEngine:
             }
         )
 
+    def _restore_optimization(
+        self, request: EngineRequest, basis_name: str, digest: str
+    ) -> OptimizerState | None:
+        """Состояние оптимизатора из контрольной точки; ``None`` — её нет."""
+        if request.checkpoint is None:
+            return None
+        try:
+            state = read_optimization_checkpoint(request.checkpoint, molecule=request.molecule)
+            assert_optimization_matches_job(
+                state, molecule=request.molecule, basis=basis_name, spec_digest=digest
+            )
+        except CheckpointError as error:
+            raise JobCheckpointInvalidError(str(error)) from error
+        return state.state
+
     def _run_optimization(
-        self, request: EngineRequest, basis_name: str, *, progress: ProgressReporter | None
+        self,
+        request: EngineRequest,
+        basis_name: str,
+        *,
+        progress: ProgressReporter | None,
+        checkpoint_sink: CheckpointSink | None = None,
     ) -> CalculationResult:
         """Оптимизация геометрии: градиент → квазиньютоновские шаги → свойства.
 
@@ -1037,8 +1083,25 @@ class ReferenceEngine:
 
         done: list[int] = []
         started = time.perf_counter()
+        digest = spec_hash(spec.model_copy(update={"resources": ResourceSpec()}).canonical_json())
+
+        def record(state: OptimizerState) -> None:
+            if checkpoint_sink is not None:
+                checkpoint_sink(
+                    write_optimization_checkpoint(
+                        molecule=request.molecule,
+                        basis=basis_name,
+                        spec_digest=digest,
+                        state=state,
+                    )
+                )
+
         optimization = optimize_geometry(
-            request.molecule, energy_and_gradient, _optimization_settings(spec)
+            request.molecule,
+            energy_and_gradient,
+            _optimization_settings(spec),
+            resume=self._restore_optimization(request, basis_name, digest),
+            on_state=record,
         )
         timings.append(_timing("optimization", started))
         _report(progress, 90.0, "optimization", steps=optimization.steps)

@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from quantumlab.domain.molecule import Molecule
+from quantumlab.engine.optimizer import OptimizationStep, OptimizerState
 
 #: Версия схемы. Любое изменение состава полей обязано её поднять: старый
 #: читатель, встретив новое поле, не должен молча считать расчёт продолжимым.
@@ -343,3 +344,217 @@ def sha256_from_uri(uri: str) -> str | None:
     if index < 0:
         return None
     return uri[index + len(marker) :]
+
+
+# --------------------------------------------------------------------------- #
+# Контрольная точка оптимизации геометрии
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True, slots=True)
+class OptimizationCheckpoint:
+    """Состояние оптимизации геометрии, достаточное для продолжения.
+
+    В отличие от SCF-точки здесь важна не плотность, а то, чего не восстановить
+    пересчётом: **приближение гессиана** (оно накоплено из всех прошлых шагов —
+    потеряв его, оптимизация начала бы с единичной матрицы и повторила бы
+    половину пути), шаг и градиент для следующего BFGS-обновления и журнал.
+
+    Плотность SCF сознательно не хранится: следующая энергия считается в новой
+    геометрии, а плотность из старой не проходит проверку ``tr(D·S) = N``.
+    """
+
+    initial_fingerprint: str
+    basis: str
+    spec_hash: str
+    state: OptimizerState
+
+
+def spec_hash(canonical_json: str) -> str:
+    """Отпечаток спецификации расчёта (метод, базис, сетка, оптимизация).
+
+    Градиент и гессиан относятся к конкретной поверхности потенциальной энергии:
+    продолжить с ними под другим функционалом или базисом значило бы получить
+    траекторию по смеси двух поверхностей.
+    """
+    return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+
+
+def write_optimization_checkpoint(
+    *, molecule: Molecule, basis: str, spec_digest: str, state: OptimizerState
+) -> str:
+    """Сериализует состояние оптимизатора. ``molecule`` — исходная структура задания."""
+
+    def vector(values: np.ndarray | None) -> list[float] | None:
+        return None if values is None else np.asarray(values, dtype=float).tolist()
+
+    payload: dict[str, object] = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
+        "kind": "optimization",
+        "initial_fingerprint": molecule_fingerprint(molecule),
+        "basis": basis,
+        "spec_hash": spec_digest,
+        "step_index": state.step_index,
+        "coordinates": vector(state.coordinates),
+        "energy_hartree": float(state.energy_hartree),
+        "gradient": vector(state.gradient),
+        "hessian": np.asarray(state.hessian, dtype=float).tolist(),
+        "previous_step": vector(state.previous_step),
+        "previous_gradient": vector(state.previous_gradient),
+        "displacement": vector(state.displacement),
+        "history": [
+            {
+                "index": step.index,
+                "energy_hartree": step.energy_hartree,
+                "max_force": step.max_force,
+                "rms_force": step.rms_force,
+                "max_displacement": step.max_displacement,
+                "rms_displacement": step.rms_displacement,
+            }
+            for step in state.history
+        ],
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def read_optimization_checkpoint(payload: str, *, molecule: Molecule) -> OptimizationCheckpoint:
+    """Читает контрольную точку оптимизации и проверяет согласованность размеров.
+
+    ``molecule`` — исходная структура задания: по ней проверяются число атомов
+    и размер гессиана. Выбрасывает :class:`CheckpointError` при любом
+    расхождении или повреждении.
+    """
+    try:
+        data: object = json.loads(payload)
+    except json.JSONDecodeError as error:
+        msg = f"Контрольная точка не является корректным JSON: {error}"
+        raise CheckpointError(msg) from error
+    if not isinstance(data, dict):
+        msg = "Контрольная точка должна быть объектом JSON"
+        raise CheckpointError(msg)
+    if data.get("schema_version") not in _READABLE_SCHEMA_VERSIONS:
+        msg = f"Неизвестная схема контрольной точки: {data.get('schema_version')!r}"
+        raise CheckpointError(msg)
+    if data.get("kind") != "optimization":
+        msg = f"Ожидалась контрольная точка оптимизации, получена {data.get('kind')!r}"
+        raise CheckpointError(msg)
+
+    n_cartesian = 3 * molecule.n_atoms
+
+    def array(name: str, *, optional: bool = False) -> np.ndarray | None:
+        raw = data.get(name)
+        if raw is None and optional:
+            return None
+        try:
+            values = np.asarray(raw, dtype=float)
+        except (TypeError, ValueError) as error:
+            msg = f"Поле {name!r} контрольной точки повреждено: {error}"
+            raise CheckpointError(msg) from error
+        if not np.all(np.isfinite(values)):
+            msg = f"Поле {name!r} содержит нечисловые значения"
+            raise CheckpointError(msg)
+        return values
+
+    coordinates = array("coordinates")
+    gradient = array("gradient")
+    hessian = array("hessian")
+    displacement = array("displacement")
+    previous_step = array("previous_step", optional=True)
+    previous_gradient = array("previous_gradient", optional=True)
+    assert coordinates is not None
+    assert gradient is not None
+    assert hessian is not None
+    assert displacement is not None
+    for name, values in (
+        ("coordinates", coordinates),
+        ("gradient", gradient),
+        ("displacement", displacement),
+    ):
+        if values.shape != (n_cartesian,):
+            msg = f"Размер поля {name!r} {values.shape} не соответствует {molecule.n_atoms} атомам"
+            raise CheckpointError(msg)
+    if hessian.ndim != 2 or hessian.shape[0] != hessian.shape[1] or hessian.shape[0] > n_cartesian:
+        msg = f"Некорректная форма гессиана {hessian.shape}"
+        raise CheckpointError(msg)
+    if float(np.max(np.abs(hessian - hessian.T))) > 1e-8:
+        msg = "Гессиан в контрольной точке несимметричен: файл повреждён"
+        raise CheckpointError(msg)
+    if previous_gradient is not None and previous_gradient.shape != (n_cartesian,):
+        msg = "Размер предыдущего градиента не соответствует задаче"
+        raise CheckpointError(msg)
+    if previous_step is not None and previous_step.shape != (hessian.shape[0],):
+        msg = "Размер предыдущего шага не соответствует гессиану"
+        raise CheckpointError(msg)
+
+    step_index = data.get("step_index")
+    energy = data.get("energy_hartree")
+    raw_history = data.get("history")
+    if (
+        not isinstance(step_index, int)
+        or not isinstance(energy, int | float)
+        or not isinstance(raw_history, list)
+    ):
+        msg = "В контрольной точке повреждены номер шага, энергия или журнал"
+        raise CheckpointError(msg)
+    try:
+        history = tuple(
+            OptimizationStep(
+                index=int(item["index"]),
+                energy_hartree=float(item["energy_hartree"]),
+                max_force=float(item["max_force"]),
+                rms_force=float(item["rms_force"]),
+                max_displacement=_optional_float(item["max_displacement"]),
+                rms_displacement=_optional_float(item["rms_displacement"]),
+            )
+            for item in raw_history
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        msg = f"Журнал итераций в контрольной точке повреждён: {error}"
+        raise CheckpointError(msg) from error
+    if len(history) != step_index + 1:
+        msg = (
+            f"Журнал содержит {len(history)} записей, а шаг — {step_index}: "
+            "контрольная точка не согласована"
+        )
+        raise CheckpointError(msg)
+
+    return OptimizationCheckpoint(
+        initial_fingerprint=str(data.get("initial_fingerprint")),
+        basis=str(data.get("basis")),
+        spec_hash=str(data.get("spec_hash")),
+        state=OptimizerState(
+            step_index=step_index,
+            coordinates=coordinates,
+            energy_hartree=float(energy),
+            gradient=gradient,
+            hessian=hessian,
+            previous_step=previous_step,
+            previous_gradient=previous_gradient,
+            displacement=displacement,
+            history=history,
+        ),
+    )
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value is None else float(value)  # type: ignore[arg-type]
+
+
+def assert_optimization_matches_job(
+    checkpoint: OptimizationCheckpoint, *, molecule: Molecule, basis: str, spec_digest: str
+) -> None:
+    """Проверяет, что точка принадлежит именно этой оптимизации.
+
+    Сверяется **исходная** структура задания, а не текущая: текущая — это
+    результат работы, и по ней продолжение не отличило бы своё задание от чужого.
+    """
+    if checkpoint.initial_fingerprint != molecule_fingerprint(molecule):
+        msg = "Контрольная точка оптимизации относится к другой исходной структуре"
+        raise CheckpointError(msg)
+    if checkpoint.basis != basis:
+        msg = f"Контрольная точка построена в базисе {checkpoint.basis!r}, запрошен {basis!r}"
+        raise CheckpointError(msg)
+    if checkpoint.spec_hash != spec_digest:
+        msg = (
+            "Спецификация расчёта изменилась с момента записи контрольной точки: "
+            "градиент и гессиан относятся к другой поверхности"
+        )
+        raise CheckpointError(msg)

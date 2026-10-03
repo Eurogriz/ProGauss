@@ -1034,6 +1034,7 @@ def run_rohf(
     settings: ScfSettings | None = None,
     *,
     integrals: PrecomputedIntegrals | None = None,
+    initial_densities: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> RohfResult:
     """Выполняет ROHF-расчёт.
 
@@ -1044,6 +1045,15 @@ def run_rohf(
 
     Диагонализуется эффективный фокиан Рутаана, а не ``Fα``: собственные значения
     ``Fα`` не соответствуют орбитальным энергиям открытой оболочки.
+
+    ``initial_densities`` — пара ``(Dα, Dβ)`` из контрольной точки. Состояние ROHF
+    — **не** пара независимых плотностей, а один набор орбиталей с двумя
+    занятиями, поэтому плотности не подставляются как есть: по ним строятся оба
+    фокиана, из них — эффективный фокиан Рутаана, и его диагонализация даёт
+    орбитали. Для сошедшегося ROHF это воспроизводит решение за одну итерацию.
+    Плотности обязаны быть вложенными (``Dβ·S·Dα = Dβ``): у UHF-решения с
+    разными орбиталями α и β такого общего пространства нет, и рестарт ROHF из
+    него отклоняется, а не приукрашивается.
     """
     config = settings or ScfSettings()
     started = time.perf_counter()
@@ -1061,9 +1071,31 @@ def run_rohf(
         energies, coefficients_prime = np.linalg.eigh(symmetric)
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
-    energies, coefficients, coefficients_prime = diagonalize(
-        orthogonalizer.T @ core @ orthogonalizer
-    )
+    if initial_densities is not None:
+        start_alpha, start_beta = _validated_spin_densities(initial_densities, overlap.shape)
+        nesting = float(np.max(np.abs(start_beta @ overlap @ start_alpha - start_beta)))
+        if nesting > 1e-6:
+            msg = (
+                "Контрольная точка не согласована с ROHF: β-занятое пространство не "
+                f"вложено в α-занятое (невязка {nesting:.2e}). Такие плотности даёт UHF."
+            )
+            raise ValueError(msg)
+        strategies = ["checkpoint-restart"]
+        restart_coulomb = coulomb_matrix(start_alpha + start_beta, eri)
+        restart_effective = roothaan_effective_fock(
+            core + restart_coulomb - exchange_matrix(start_alpha, eri),
+            core + restart_coulomb - exchange_matrix(start_beta, eri),
+            start_alpha,
+            start_beta,
+            overlap,
+        )
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ restart_effective @ orthogonalizer
+        )
+    else:
+        energies, coefficients, coefficients_prime = diagonalize(
+            orthogonalizer.T @ core @ orthogonalizer
+        )
     density_alpha = density_from_coefficients(coefficients, n_alpha, occupation=1.0)
     density_beta = density_from_coefficients(coefficients, n_beta, occupation=1.0)
 

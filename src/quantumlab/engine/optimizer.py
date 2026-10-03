@@ -85,6 +85,43 @@ class OptimizationStep:
 
 
 @dataclass(frozen=True)
+class OptimizerState:
+    """Состояние оптимизатора, достаточное, чтобы продолжить без потери истории.
+
+    Снимок делается в точке цикла **до** BFGS-обновления и выбора шага, поэтому
+    продолженный расчёт повторяет те же операции в том же порядке и даёт ту же
+    траекторию, что и непрерывный (проверяется тестом бит-в-бит по геометрии).
+
+    Attributes:
+        step_index: номер итерации, для которой уже записана строка истории.
+        coordinates: координаты всех атомов, бор, плоский вектор.
+        energy_hartree: энергия в этой точке.
+        gradient: градиент в этой точке, хартри/бор, плоский вектор.
+        hessian: текущее приближение гессиана в подпространстве подвижных
+            степеней свободы.
+        previous_step: шаг, приведший в эту точку (в подпространстве подвижных
+            степеней свободы), либо ``None`` на нулевой итерации.
+        previous_gradient: градиент до этого шага, либо ``None``.
+        displacement: полный вектор последнего смещения (для критерия шага).
+        history: журнал итераций, включая текущую.
+    """
+
+    step_index: int
+    coordinates: Array
+    energy_hartree: float
+    gradient: Array
+    hessian: Array
+    previous_step: Array | None
+    previous_gradient: Array | None
+    displacement: Array
+    history: tuple[OptimizationStep, ...]
+
+
+#: Приёмник состояний оптимизатора (запись контрольной точки).
+StateSink = Callable[[OptimizerState], None]
+
+
+@dataclass(frozen=True)
 class OptimizationResult:
     """Итог оптимизации геометрии."""
 
@@ -158,6 +195,9 @@ def optimize_geometry(
     molecule: Molecule,
     energy_and_gradient: EnergyAndGradient,
     settings: OptimizationSettings | None = None,
+    *,
+    resume: OptimizerState | None = None,
+    on_state: StateSink | None = None,
 ) -> OptimizationResult:
     """Оптимизирует геометрию, возвращая структуру и сведения о сходимости.
 
@@ -165,6 +205,12 @@ def optimize_geometry(
     оптимизация — это результат, который пользователь обязан увидеть вместе с
     причиной, а не аварийное завершение. Признак ``converged`` и ключ
     ``reason_key`` позволяют интерфейсу объяснить, что именно не сошлось.
+
+    ``on_state`` вызывается на каждой итерации (после записи в журнал и проверки
+    сходимости) со снимком :class:`OptimizerState`; ``resume`` продолжает по
+    такому снимку, не пересчитывая энергию и градиент в точке остановки.
+    ``molecule`` — всегда исходная структура задания: из неё берутся символы
+    атомов, заряд и кратность.
     """
     options = settings or OptimizationSettings()
     frozen = tuple(options.frozen_atoms)
@@ -186,10 +232,28 @@ def optimize_geometry(
     # значит обновить гессиан бессмысленной парой и потерять сходимость.
     previous_step: Array | None = None
     displacement = np.zeros(3 * molecule.n_atoms)
+    first_index = 0
 
-    energy, gradient = energy_and_gradient(structure)
+    if resume is not None:
+        if resume.coordinates.shape != coordinates.shape or resume.hessian.shape != hessian.shape:
+            msg = "Состояние оптимизатора не соответствует размеру задачи"
+            raise ValueError(msg)
+        coordinates = resume.coordinates.copy()
+        structure = _unflatten(molecule, coordinates)
+        hessian = resume.hessian.copy()
+        previous_step = None if resume.previous_step is None else resume.previous_step.copy()
+        previous_gradient = (
+            None if resume.previous_gradient is None else resume.previous_gradient.copy()
+        )
+        displacement = resume.displacement.copy()
+        history = list(resume.history)
+        first_index = resume.step_index
+        energy = resume.energy_hartree
+        gradient = resume.gradient.reshape(molecule.n_atoms, 3).copy()
+    else:
+        energy, gradient = energy_and_gradient(structure)
 
-    for index in range(options.max_steps + 1):
+    for index in range(first_index, options.max_steps + 1):
         flat_gradient = gradient.reshape(-1)
         max_force, rms_force = _norms(flat_gradient)
         if index == 0:
@@ -197,16 +261,34 @@ def optimize_geometry(
             rms_step: float | None = None
         else:
             max_step, rms_step = _norms(displacement)
-        history.append(
-            OptimizationStep(
-                index=index,
-                energy_hartree=energy,
-                max_force=max_force,
-                rms_force=rms_force,
-                max_displacement=max_step,
-                rms_displacement=rms_step,
+        # При продолжении строка текущей итерации уже есть в журнале.
+        if resume is None or index != first_index:
+            history.append(
+                OptimizationStep(
+                    index=index,
+                    energy_hartree=energy,
+                    max_force=max_force,
+                    rms_force=rms_force,
+                    max_displacement=max_step,
+                    rms_displacement=rms_step,
+                )
             )
-        )
+        if on_state is not None:
+            on_state(
+                OptimizerState(
+                    step_index=index,
+                    coordinates=coordinates.copy(),
+                    energy_hartree=energy,
+                    gradient=gradient.reshape(-1).copy(),
+                    hessian=hessian.copy(),
+                    previous_step=None if previous_step is None else previous_step.copy(),
+                    previous_gradient=(
+                        None if previous_gradient is None else previous_gradient.copy()
+                    ),
+                    displacement=displacement.copy(),
+                    history=tuple(history),
+                )
+            )
 
         force_converged = max_force < options.max_force and rms_force < options.rms_force
         step_converged = (
@@ -240,12 +322,18 @@ def optimize_geometry(
         step = np.zeros_like(coordinates)
         step[free] = step_free
 
+        # Градиент ДО шага запоминается раньше, чем ``_accept_step`` вернёт новый:
+        # прежняя версия сохраняла уже новый градиент, из-за чего изменение
+        # градиента между итерациями всегда было нулевым, кривизна — нулевой, и
+        # BFGS-обновление молча пропускалось. Оптимизатор вырождался в спуск с
+        # единичным гессианом.
+        gradient_before_step = flat_gradient.copy()
         energy, gradient, coordinates, step, structure = _accept_step(
             energy, gradient, coordinates, step, molecule, energy_and_gradient
         )
         displacement = step
         previous_step = step[free]
-        previous_gradient = gradient.reshape(-1).copy()
+        previous_gradient = gradient_before_step
 
     return OptimizationResult(
         molecule=structure,
