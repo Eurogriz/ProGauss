@@ -95,9 +95,10 @@ def test_unimplemented_methods_are_reported_honestly(registry: CapabilityRegistr
     assert registry.is_available("functional:svwn")
     assert registry.is_available("functional:pbe")
     assert registry.is_available("functional:pbe0")
-    # BLYP, B3LYP и TPSSh реализованы; примером нереализованного служит M06-2X.
-    assert registry.is_available("functional:b3lyp")
-    assert not registry.is_available("functional:m062x")
+    # Все заявленные функционалы реализованы; незаявленный (SCAN) недоступен.
+    for name in ("b3lyp", "tpssh", "m06", "m062x", "wb97x", "wb97x-d"):
+        assert registry.is_available(f"functional:{name}"), name
+    assert not registry.is_available("functional:scan")
     assert not registry.is_available("method:ccsd_t")
     # ROHF реализован, но только в одной точке: градиентов нет, поэтому
     # partial, а не implemented.
@@ -129,7 +130,7 @@ def test_assert_available_distinguishes_error_types(registry: CapabilityRegistry
     with pytest.raises(BasisNotFoundError):
         registry.assert_available("basis:unobtainium-qzvp")
     with pytest.raises(FunctionalNotFoundError):
-        registry.assert_available("functional:m062x")
+        registry.assert_available("functional:scan")
     # single_point, optimization и frequencies реализованы, поэтому примером
     # недоступной задачи служит IRC: для неё нужен гессиан и путь по дну долины.
     with pytest.raises(MethodNotAvailableError):

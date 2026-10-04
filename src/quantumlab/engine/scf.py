@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, nuclear_repulsion
+from quantumlab.engine.contracts import range_separation
 from quantumlab.engine.integrals import (
     DirectEri,
     build_core_hamiltonian,
@@ -344,6 +346,10 @@ class PrecomputedIntegrals:
     overlap: np.ndarray
     core: np.ndarray
     eri: np.ndarray | DirectEri
+    #: Интегралы оператора ``erf(ωr)/r`` для гибридов с разделением (ωB97X);
+    #: ``None``, если функционал без разделения.
+    eri_lr: np.ndarray | DirectEri | None = None
+    omega: float = 0.0
 
 
 def build_integrals(
@@ -353,27 +359,92 @@ def build_integrals(
     direct: bool = False,
     threads: int = 1,
     screening: float = 0.0,
+    omega: float = 0.0,
 ) -> PrecomputedIntegrals:
     """Собирает все интегралы, нужные RHF.
 
     ``direct`` — не хранить тензор ERI, а собирать ``J``/``K`` на лету
     (:class:`~quantumlab.engine.integrals.DirectEri`); ``screening`` — порог
-    Шварца, ``threads`` — потоки сборки.
+    Шварца, ``threads`` — потоки сборки. ``omega > 0`` добавляет интегралы
+    ``erf(ωr)/r`` для дальнодействующего точного обмена.
     """
     two_electron: np.ndarray | DirectEri
+    long_range: np.ndarray | DirectEri | None = None
     if direct:
-        two_electron = DirectEri(
-            basis, molecule, threshold=screening if screening > 0.0 else 1e-12, threads=threads
-        )
+        threshold = screening if screening > 0.0 else 1e-12
+        two_electron = DirectEri(basis, molecule, threshold=threshold, threads=threads)
+        if omega > 0.0:
+            long_range = DirectEri(
+                basis, molecule, threshold=threshold, threads=threads, omega=omega
+            )
     else:
         two_electron = build_electron_repulsion(
             basis, molecule, threads=threads, screening=screening
         )
+        if omega > 0.0:
+            long_range = build_electron_repulsion(
+                basis, molecule, threads=threads, screening=screening, omega=omega
+            )
     return PrecomputedIntegrals(
         overlap=build_overlap(basis, molecule),
         core=build_core_hamiltonian(basis, molecule),
         eri=two_electron,
+        eri_lr=long_range,
+        omega=omega,
     )
+
+
+class ExactExchange:
+    """Оператор точного обмена функционала: ``c·K[1/r] + c_lr·K[erf(ωr)/r]``.
+
+    Для гибрида без разделения ``c_lr = 0`` и оператор — это ``α·K``. Для
+    ωB97X — ``0.157706·K + 0.842294·K_erf``: на малых расстояниях точного
+    обмена 0.157706, на больших — 1. Вызов возвращает уже взвешенную матрицу,
+    поэтому фокиан и энергия не знают, обычный перед ними гибрид или нет.
+    """
+
+    def __init__(
+        self,
+        full: float,
+        long_range: float,
+        omega: float,
+        prepared: PrecomputedIntegrals,
+    ) -> None:
+        """Доли ``c``, ``c_lr`` и ``ω``; интегралы ``erf`` обязаны быть подготовлены."""
+        self.full = float(full)
+        self.long_range = float(long_range)
+        self._eri = prepared.eri
+        self._eri_lr = prepared.eri_lr
+        if self.long_range != 0.0 and (
+            prepared.eri_lr is None or not math.isclose(prepared.omega, omega)
+        ):
+            msg = (
+                f"Функционалу нужны интегралы erf(ωr)/r при ω = {omega}, а подготовлены "
+                f"для ω = {prepared.omega}."
+            )
+            raise ValueError(msg)
+
+    @classmethod
+    def for_functional(cls, functional: object, prepared: PrecomputedIntegrals) -> ExactExchange:
+        """Оператор по долям функционала (``exact_exchange_fraction`` и разделение)."""
+        omega, long_range = range_separation(functional)
+        full = float(getattr(functional, "exact_exchange_fraction", 0.0))
+        return cls(full, long_range, omega, prepared)
+
+    @property
+    def active(self) -> bool:
+        """Есть ли вообще точный обмен."""
+        return self.full != 0.0 or self.long_range != 0.0
+
+    def __call__(self, density: np.ndarray) -> np.ndarray:
+        """Взвешенная матрица обмена по плотности ``density``."""
+        result = np.zeros_like(density, dtype=np.result_type(density, float))
+        if self.full != 0.0:
+            result = result + self.full * exchange_matrix(density, self._eri)
+        if self.long_range != 0.0:
+            assert self._eri_lr is not None
+            result = result + self.long_range * exchange_matrix(density, self._eri_lr)
+        return result
 
 
 def run_rhf(

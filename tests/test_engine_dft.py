@@ -214,7 +214,7 @@ def test_get_functional_rejects_unimplemented() -> None:
     assert get_functional("svwn").name == "svwn"
     assert get_functional("pbe").name == "pbe"
     with pytest.raises(FunctionalNotFoundError):
-        get_functional("m062x")
+        get_functional("scan")
 
 
 def test_functional_registry_and_capabilities_agree() -> None:
@@ -222,9 +222,9 @@ def test_functional_registry_and_capabilities_agree() -> None:
     registry = default_registry()
     for name in FUNCTIONALS:
         assert registry.availability(f"functional:{name}").is_usable, name
-    # Заявленное в ТЗ, но не реализованное — по-прежнему честно недоступно.
-    assert not registry.availability("functional:m062x").is_usable
-    assert not registry.availability("functional:wb97x-d").is_usable
+    # Всё заявленное реализовано; незаявленное честно недоступно.
+    assert registry.availability("functional:wb97x-d").is_usable
+    assert not registry.availability("functional:scan").is_usable
 
 
 # --------------------------------------------------------------------------- #
@@ -340,11 +340,11 @@ def test_engine_runs_dft_geometry_optimization(water: Molecule) -> None:
 
 
 def test_engine_refuses_unimplemented_functional(water: Molecule) -> None:
-    """M06-2X заявлен в ТЗ, но не реализован — честный отказ вместо числа."""
+    """SCAN в ядре нет — честный отказ вместо числа."""
     with pytest.raises(FunctionalNotFoundError):
         ReferenceEngine().run(
             EngineRequest(
-                job_id="dft", spec=_dft_spec(functional="m062x"), molecule=water, threads=1
+                job_id="dft", spec=_dft_spec(functional="scan"), molecule=water, threads=1
             )
         )
 

@@ -21,7 +21,15 @@ import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, cartesian_powers
-from quantumlab.engine.contracts import Array, XcEvaluation, XcEvaluationSpin
+from quantumlab.engine.contracts import (
+    Array,
+    ExchangeCorrelationFunctional,
+    MetaGgaSpinFunctional,
+    XcEvaluation,
+    XcEvaluationSpin,
+)
+from quantumlab.engine.functional_ad import M06, AdKernel, M062x, Wb97x, Wb97xD
+from quantumlab.engine.xc_meta import tpss_xc
 from quantumlab.engine.xc_spin_cores import (
     _lyp_spin_core,
     _pbe_spin_core,
@@ -2481,9 +2489,8 @@ class Tpssh:
     (0.90·TPSS-x + PBC-c), а доля ``α = 0.10`` идёт через
     :attr:`exact_exchange_fraction` в фокиан (−½αK) и в энергию (−¼α·D:K).
 
-    Реализовано для замкнутой оболочки (RKS) и энергии в одной точке. UKS и
-    аналитический градиент — не реализованы; система отказывается от них явной
-    ошибкой, а не приближением (см. :meth:`evaluate_spin` и реестр).
+    RKS считается ядрами ``TpssExchange``/``TpssCorrelation``; UKS — теми же
+    формулами от спиновых переменных (``xc_meta``, прямое дифференцирование).
     """
 
     name: str = "tpssh"
@@ -2536,19 +2543,62 @@ class Tpssh:
         density_spin: Array,
         density_gradient_spin: Array | None = None,
     ) -> XcEvaluationSpin:
-        """Спиновая версия не реализована — см. ограничения TPSSh."""
+        """meta-GGA без ``τ`` не считается: используйте :meth:`evaluate_spin_tau`."""
         del points, density_spin, density_gradient_spin
-        msg = (
-            "UKS (спин-поляризованный расчёт) для meta-GGA-функционалов "
-            "не реализован: TPSSh доступен только для замкнутой оболочки (RKS)."
-        )
-        raise NotImplementedError(msg)
+        msg = "TPSSh — meta-GGA: для UKS нужна кинетическая плотность (evaluate_spin_tau)."
+        raise ValueError(msg)
+
+    def evaluate_spin_tau(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array,
+        tau_spin: Array,
+    ) -> XcEvaluationSpin:
+        """UKS-версия: TPSS-обмен и PBC-корреляция от ``(ρ_α, ρ_β, σ, τ_α, τ_β)``.
+
+        Формулы — те же, что у RKS-ядер выше, но записаны от семи спиновых
+        переменных (:mod:`xc_meta`); при ``ρ_α = ρ_β`` совпадают с RKS до 1e-15.
+        """
+        del points
+        return _TPSSH_SPIN_KERNEL.spin(density_spin, density_gradient_spin, tau_spin)
+
+
+_TPSSH_SPIN_KERNEL = AdKernel(lambda inputs: tpss_xc(inputs, 0.90), uses_tau=True)
+
+
+def evaluate_spin_xc(
+    functional: ExchangeCorrelationFunctional,
+    points: Array,
+    density_spin: Array,
+    density_gradient_spin: Array,
+    tau_spin: Array | None,
+) -> XcEvaluationSpin:
+    """Спиновое вычисление XC с учётом ``τ``: единая точка входа для SCF и градиента."""
+    if functional.requires_tau:
+        if tau_spin is None:
+            msg = f"Для «{functional.name}» нужна кинетическая плотность по каналам."
+            raise ValueError(msg)
+        meta = functional
+        assert isinstance(meta, MetaGgaSpinFunctional)
+        return meta.evaluate_spin_tau(points, density_spin, density_gradient_spin, tau_spin)
+    return functional.evaluate_spin(points, density_spin, density_gradient_spin)
 
 
 #: Функционалы, которые ядро действительно умеет считать. Реестр обращается к
 #: этому словарю, поэтому «заявлено» и «реализовано» не могут разойтись.
 FUNCTIONALS: dict[
-    str, type[Svwn] | type[Pbe] | type[Pbe0] | type[Blyp] | type[B3lyp] | type[Tpssh]
+    str,
+    type[Svwn]
+    | type[Pbe]
+    | type[Pbe0]
+    | type[Blyp]
+    | type[B3lyp]
+    | type[Tpssh]
+    | type[M06]
+    | type[M062x]
+    | type[Wb97x]
+    | type[Wb97xD],
 ] = {
     "svwn": Svwn,
     "lda": Svwn,
@@ -2557,10 +2607,16 @@ FUNCTIONALS: dict[
     "pbe0": Pbe0,
     "b3lyp": B3lyp,
     "tpssh": Tpssh,
+    "m06": M06,
+    "m062x": M062x,
+    "wb97x": Wb97x,
+    "wb97x-d": Wb97xD,
 }
 
 
-def get_functional(name: str) -> Svwn | Pbe | Pbe0 | Blyp | B3lyp | Tpssh:
+def get_functional(
+    name: str,
+) -> Svwn | Pbe | Pbe0 | Blyp | B3lyp | Tpssh | M06 | M062x | Wb97x | Wb97xD:
     """Возвращает реализованный функционал по имени.
 
     Бросает ``FunctionalNotFoundError`` — ту же ошибку, что и реестр

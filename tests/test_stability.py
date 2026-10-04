@@ -172,14 +172,12 @@ def test_engine_stability_for_open_shell_uses_uhf() -> None:
 
 
 def test_stability_is_not_requested_silently_for_unsupported_combinations() -> None:
-    """Отказ остаётся там, где анализа нет: meta-GGA и не-одноточечные задачи."""
+    """Отказ остаётся там, где анализа нет: не-одноточечные задачи."""
     engine = ReferenceEngine()
-    for spec in (
-        _engine_spec(theory=TheoryFamily.DFT, functional="tpssh"),
-        _engine_spec(task=Task.OPTIMIZATION),
-    ):
-        with pytest.raises(CombinationUnavailableError):
-            engine.assert_supported(spec)
+    with pytest.raises(CombinationUnavailableError):
+        engine.assert_supported(_engine_spec(task=Task.OPTIMIZATION))
     # DFT и ROHF теперь проходят проверку допуска.
     assert engine.assert_supported(_engine_spec(theory=TheoryFamily.DFT, functional="pbe"))
     assert engine.assert_supported(_engine_spec(spin=SpinTreatment.ROHF))
+    for functional in ("tpssh", "m06", "wb97x-d"):
+        assert engine.assert_supported(_engine_spec(theory=TheoryFamily.DFT, functional=functional))

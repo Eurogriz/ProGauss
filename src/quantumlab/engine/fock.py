@@ -24,15 +24,17 @@ import numpy as np
 
 from quantumlab.domain.molecule import Molecule
 from quantumlab.engine.basis import BasisSet, nuclear_repulsion
-from quantumlab.engine.contracts import ExchangeCorrelationFunctional
+from quantumlab.engine.contracts import ExchangeCorrelationFunctional, range_separation
 from quantumlab.engine.dft import xc_matrix_and_energy_spin
 from quantumlab.engine.functional import (
     density_at_points,
     density_gradient_at_points,
     evaluate_basis_with_gradients,
+    kinetic_density_at_points,
 )
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.scf import (
+    ExactExchange,
     PrecomputedIntegrals,
     build_integrals,
     coulomb_matrix,
@@ -44,9 +46,8 @@ class SpinFockBuilder:
     """Спин-неограниченный оператор Фока и энергия для HF или DFT.
 
     ``functional is None`` — чистый Хартри–Фок (доля обмена 1). Иначе —
-    Кон–Шэм со своей долей точного обмена и спин-поляризованным XC. Потенциал
-    meta-GGA в спин-неограниченной форме пока не реализован, и построитель
-    отказывает в нём явно.
+    Кон–Шэм со своей долей точного обмена и спин-поляризованным XC; для
+    meta-GGA в XC входит кинетическая плотность каждого канала.
     """
 
     def __init__(
@@ -59,19 +60,18 @@ class SpinFockBuilder:
         grid: QuadratureGrid | None = None,
     ) -> None:
         """Готовит интегралы и (для DFT) базис на сетке; плотности подаются позже."""
-        if functional is not None and functional.requires_tau:
-            msg = (
-                f"Спин-неограниченный фокиан для meta-GGA «{functional.name}» не реализован: "
-                "для него нужна спин-разделённая кинетическая плотность."
-            )
-            raise NotImplementedError(msg)
-        prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+        omega = range_separation(functional)[0] if functional is not None else 0.0
+        prepared = (
+            integrals if integrals is not None else build_integrals(basis, molecule, omega=omega)
+        )
         self.core = prepared.core
         self.overlap = prepared.overlap
         self.eri = prepared.eri
+        self.exchange = (
+            ExactExchange.for_functional(functional, prepared) if functional is not None else None
+        )
         self.nuclear_repulsion = nuclear_repulsion(molecule)
         self.functional = functional
-        self.exact_exchange = 1.0 if functional is None else functional.exact_exchange_fraction
         self._grid: QuadratureGrid | None = None
         self._values: np.ndarray | None = None
         self._gradients: np.ndarray | None = None
@@ -91,19 +91,23 @@ class SpinFockBuilder:
         """
         total = density_alpha + density_beta
         coulomb = coulomb_matrix(total, self.eri)
-        exchange_alpha = exchange_matrix(density_alpha, self.eri)
-        exchange_beta = exchange_matrix(density_beta, self.eri)
-        fraction = self.exact_exchange
+        if self.exchange is None:
+            # Чистый Хартри–Фок: весь обмен точный, без разделения.
+            exchange_alpha = exchange_matrix(density_alpha, self.eri)
+            exchange_beta = exchange_matrix(density_beta, self.eri)
+        else:
+            # Уже взвешенный оператор c·K + c_lr·K_erf (для чистого GGA — нули).
+            exchange_alpha = self.exchange(density_alpha)
+            exchange_beta = self.exchange(density_beta)
 
         energy = float(
             np.real(np.sum(total * self.core) + 0.5 * np.sum(total * coulomb))
             - 0.5
-            * fraction
             * np.real(np.sum(density_alpha * exchange_alpha) + np.sum(density_beta * exchange_beta))
             + self.nuclear_repulsion
         )
-        fock_alpha = self.core + coulomb - fraction * exchange_alpha
-        fock_beta = self.core + coulomb - fraction * exchange_beta
+        fock_alpha = self.core + coulomb - exchange_alpha
+        fock_beta = self.core + coulomb - exchange_beta
 
         if self.functional is not None:
             assert self._grid is not None
@@ -111,6 +115,10 @@ class SpinFockBuilder:
             assert self._gradients is not None
             real_alpha = np.real(density_alpha)
             real_beta = np.real(density_beta)
+            tau_alpha = tau_beta = None
+            if self.functional.requires_tau:
+                tau_alpha = kinetic_density_at_points(self._gradients, real_alpha)
+                tau_beta = kinetic_density_at_points(self._gradients, real_beta)
             v_alpha, v_beta, xc_energy = xc_matrix_and_energy_spin(
                 self._grid,
                 self._values,
@@ -120,6 +128,8 @@ class SpinFockBuilder:
                 density_gradient_at_points(self._values, self._gradients, real_alpha),
                 density_gradient_at_points(self._values, self._gradients, real_beta),
                 self.functional,
+                tau_alpha,
+                tau_beta,
             )
             fock_alpha = fock_alpha + v_alpha
             fock_beta = fock_beta + v_beta

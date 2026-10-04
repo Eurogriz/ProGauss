@@ -24,15 +24,17 @@ import numpy as np
 from quantumlab.domain.molecule import Molecule
 from quantumlab.domain.spec import GridPreset
 from quantumlab.engine.basis import BasisSet, nuclear_repulsion
-from quantumlab.engine.contracts import ExchangeCorrelationFunctional
+from quantumlab.engine.contracts import ExchangeCorrelationFunctional, range_separation
 from quantumlab.engine.functional import (
     density_at_points,
     density_gradient_at_points,
     evaluate_basis_with_gradients,
+    evaluate_spin_xc,
     kinetic_density_at_points,
 )
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.scf import (
+    ExactExchange,
     PrecomputedIntegrals,
     ScfHistory,
     ScfResult,
@@ -46,7 +48,6 @@ from quantumlab.engine.scf import (
     canonical_orthogonalizer,
     coulomb_matrix,
     density_from_coefficients,
-    exchange_matrix,
     spin_contamination,
     spin_population,
 )
@@ -71,6 +72,10 @@ class RksResult:
     #: результат с α = 0, и как с α = 0.25. Проверки качества восстанавливают по
     #: ней обменный член −¼α·D:K.
     exact_exchange_fraction: float = 0.0
+    #: Разделение гибрида: доля дальнодействующего (``erf``) обмена и ``ω``.
+    #: Нужны так же, как ``α``: без них обменный член по результату не восстановить.
+    long_range_exchange_fraction: float = 0.0
+    range_separation_omega: float = 0.0
     #: Обменно-корреляционный потенциал на сошедшейся плотности. Хранится в
     #: результате, чтобы проверки качества могли восстановить настоящий фокиан
     #: RKS, не пересобирая сетку и не считая XC второй раз.
@@ -128,6 +133,9 @@ class UksResult:
     grid_points: int
     #: Доля точного обмена α (0.25 для PBE0, 0.20 для B3LYP, 0 для чистых).
     exact_exchange_fraction: float = 0.0
+    #: Разделение гибрида: доля дальнодействующего (``erf``) обмена и ``ω``.
+    long_range_exchange_fraction: float = 0.0
+    range_separation_omega: float = 0.0
     #: V_xc^α и V_xc^β на сошедшейся плотности (см. docstring класса).
     v_xc_alpha: np.ndarray | None = None
     v_xc_beta: np.ndarray | None = None
@@ -219,6 +227,8 @@ def xc_matrix_and_energy_spin(
     grad_alpha: np.ndarray,
     grad_beta: np.ndarray,
     functional: ExchangeCorrelationFunctional,
+    tau_alpha: np.ndarray | None = None,
+    tau_beta: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     """Спиновые обменно-корреляционные матрицы и энергия.
 
@@ -237,12 +247,19 @@ def xc_matrix_and_energy_spin(
     функционала — проверка UKS==RKS на замкнутой оболочке опирается именно на
     это тождество.
 
+    Для meta-GGA (``τ_σ = ½ Σ D^σ_μν ∇φ_μ·∇φ_ν``) к каждому каналу добавляется
+
+    ``V_xc^σ[μν] += ½ Σ_g w_g v_τ^σ ∇φ_μ·∇φ_ν``
+
     Энергия — ``Σ_g w_g ρ_общ ε_xc``, как в RKS: нелинейный функционал, и след
     ``D·V_xc`` здесь неверен.
     """
     density = np.stack([rho_alpha, rho_beta], axis=0)
     grad_density = np.stack([grad_alpha, grad_beta], axis=0)
-    xc = functional.evaluate_spin(grid.points, density, grad_density)
+    tau_density = (
+        None if tau_alpha is None or tau_beta is None else np.stack([tau_alpha, tau_beta], axis=0)
+    )
+    xc = evaluate_spin_xc(functional, grid.points, density, grad_density, tau_density)
     rho_total = rho_alpha + rho_beta
     energy = float(np.sum(grid.weights * rho_total * xc.energy_density))
     # LDA-функционал не зависит от градиентов: vsigma None ⇒ v_σ ≡ 0.
@@ -271,6 +288,10 @@ def xc_matrix_and_energy_spin(
 
     matrix_alpha = channel(xc.vrho[0], v_sigma[0, 0], v_sigma[0, 1], grad_alpha, grad_beta)
     matrix_beta = channel(xc.vrho[1], v_sigma[1, 1], v_sigma[0, 1], grad_beta, grad_alpha)
+    if xc.vtau is not None:
+        for matrix, v_tau in ((matrix_alpha, xc.vtau[0]), (matrix_beta, xc.vtau[1])):
+            scaled_tau = 0.5 * grid.weights * v_tau
+            matrix += np.einsum("p,pgd,phd->gh", scaled_tau, gradients, gradients, optimize=True)
     return matrix_alpha, matrix_beta, energy
 
 
@@ -307,7 +328,11 @@ def run_rks(
         raise ValueError(msg)
     n_occupied = electrons // 2
 
-    prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+    prepared = (
+        integrals
+        if integrals is not None
+        else build_integrals(basis, molecule, omega=range_separation(functional)[0])
+    )
     quadrature = grid if grid is not None else build_grid(molecule, grid_preset)
     core = prepared.core
     eri = prepared.eri
@@ -339,6 +364,7 @@ def run_rks(
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
     alpha_exchange = functional.exact_exchange_fraction
+    exact_exchange = ExactExchange.for_functional(functional, prepared)
     if initial_density is not None:
         density = np.asarray(initial_density, dtype=float)
         if density.shape != prepared.overlap.shape:
@@ -350,8 +376,8 @@ def run_rks(
         strategies = ["checkpoint-restart"]
         restart_xc, _ = xc_at(density)
         restart_fock = core + coulomb_matrix(density, eri) + restart_xc
-        if alpha_exchange > 0.0:
-            restart_fock = restart_fock - 0.5 * alpha_exchange * exchange_matrix(density, eri)
+        if exact_exchange.active:
+            restart_fock = restart_fock - 0.5 * exact_exchange(density)
         energies, coefficients, coefficients_prime = diagonalize(
             orthogonalizer.T @ restart_fock @ orthogonalizer
         )
@@ -376,14 +402,14 @@ def run_rks(
         coulomb = coulomb_matrix(density, eri)
         fock = core + coulomb + v_xc
         exact_exchange_energy = 0.0
-        if alpha_exchange > 0.0:
-            exchange = exchange_matrix(density, eri)
-            # E_x^exact = −¼α·D:K, значит ∂E/∂D = −½α·K: в фокиане коэффициент ½
-            # при α — тот же, что у RHF-обмена, а не «просто α». Перепутать
-            # легко, потому что в энергию входит ¼α, а не ½α, и оба числа
-            # выглядят правдоподобно.
-            fock = fock - 0.5 * alpha_exchange * exchange
-            exact_exchange_energy = -0.25 * alpha_exchange * float(np.sum(density * exchange))
+        if exact_exchange.active:
+            exchange = exact_exchange(density)
+            # E_x^exact = −¼·D:K_eff, значит ∂E/∂D = −½·K_eff, где K_eff = c·K +
+            # c_lr·K_erf уже содержит доли обмена. Коэффициент ½ — тот же, что у
+            # RHF-обмена: в энергию входит ¼, а не ½, и оба числа выглядят
+            # правдоподобно.
+            fock = fock - 0.5 * exchange
+            exact_exchange_energy = -0.25 * float(np.sum(density * exchange))
 
         # E = Σ D(H + ½J) + E_xc. Обменно-корреляционный потенциал входит в
         # фокиан, но в энергию — только E_xc: функционал нелинеен по плотности,
@@ -483,18 +509,20 @@ def run_rks(
     v_xc, xc_energy = xc_at(density)
     coulomb = coulomb_matrix(density, eri)
     total = float(np.sum(density * (core + 0.5 * coulomb))) + xc_energy + v_nuc
-    if alpha_exchange > 0.0:
+    if exact_exchange.active:
         # Энергия пересобирается на сошедшейся плотности, поэтому обменный
         # член нужно добавить и здесь — иначе он есть в истории итераций, но
         # теряется в возвращаемом результате.
-        exchange = exchange_matrix(density, eri)
-        total -= 0.25 * alpha_exchange * float(np.sum(density * exchange))
+        exchange = exact_exchange(density)
+        total -= 0.25 * float(np.sum(density * exchange))
     return RksResult(
         total_energy=total,
         electronic_energy=total - v_nuc,
         nuclear_repulsion=v_nuc,
         xc_energy=xc_energy,
         exact_exchange_fraction=alpha_exchange,
+        long_range_exchange_fraction=exact_exchange.long_range,
+        range_separation_omega=range_separation(functional)[0],
         orbital_energies=tuple(float(value) for value in energies),
         coefficients=coefficients,
         density=density,
@@ -543,20 +571,17 @@ def run_uks(
 
     ``initial_densities`` — пара ``(D^α, D^β)`` из контрольной точки (см. :func:`run_uhf`).
     """
-    if functional.requires_tau:
-        msg = (
-            f"UKS для meta-GGA-функционала «{functional.name}» не реализован: "
-            "спин-разделённая кинетическая плотность пока не поддержана. "
-            "Для открытой оболочки используйте GGA или гибрид (PBE, BLYP, PBE0, B3LYP)."
-        )
-        raise NotImplementedError(msg)
     config = settings or ScfSettings()
     started = time.perf_counter()
     strategies: list[str] = ["core-hamiltonian-guess"]
 
     n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
 
-    prepared = integrals if integrals is not None else build_integrals(basis, molecule)
+    prepared = (
+        integrals
+        if integrals is not None
+        else build_integrals(basis, molecule, omega=range_separation(functional)[0])
+    )
     quadrature = grid if grid is not None else build_grid(molecule, grid_preset)
     core = prepared.core
     eri = prepared.eri
@@ -571,8 +596,12 @@ def run_uks(
         rho_b = density_at_points(values, d_beta)
         grad_a = density_gradient_at_points(values, gradients, d_alpha)
         grad_b = density_gradient_at_points(values, gradients, d_beta)
+        tau_a = tau_b = None
+        if functional.requires_tau:
+            tau_a = kinetic_density_at_points(gradients, d_alpha)
+            tau_b = kinetic_density_at_points(gradients, d_beta)
         return xc_matrix_and_energy_spin(
-            quadrature, values, gradients, rho_a, rho_b, grad_a, grad_b, functional
+            quadrature, values, gradients, rho_a, rho_b, grad_a, grad_b, functional, tau_a, tau_b
         )
 
     def diagonalize(fock_prime: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -581,6 +610,7 @@ def run_uks(
         return energies, orthogonalizer @ coefficients_prime, coefficients_prime
 
     alpha_exchange = functional.exact_exchange_fraction
+    exact_exchange = ExactExchange.for_functional(functional, prepared)
     if initial_densities is not None:
         density_alpha, density_beta = _validated_spin_densities(
             initial_densities, prepared.overlap.shape
@@ -590,9 +620,9 @@ def run_uks(
         restart_coulomb = coulomb_matrix(density_alpha + density_beta, eri)
         restart_alpha = core + restart_coulomb + restart_xc_alpha
         restart_beta = core + restart_coulomb + restart_xc_beta
-        if alpha_exchange > 0.0:
-            restart_alpha = restart_alpha - alpha_exchange * exchange_matrix(density_alpha, eri)
-            restart_beta = restart_beta - alpha_exchange * exchange_matrix(density_beta, eri)
+        if exact_exchange.active:
+            restart_alpha = restart_alpha - exact_exchange(density_alpha)
+            restart_beta = restart_beta - exact_exchange(density_beta)
         alpha_energies, alpha_coefficients, alpha_prime = diagonalize(
             orthogonalizer.T @ restart_alpha @ orthogonalizer
         )
@@ -634,24 +664,21 @@ def run_uks(
         fock_alpha = core + coulomb + v_xc_alpha
         fock_beta = core + coulomb + v_xc_beta
         exact_exchange_energy = 0.0
-        if alpha_exchange > 0.0:
-            exchange_alpha = exchange_matrix(density_alpha, eri)
-            exchange_beta = exchange_matrix(density_beta, eri)
-            # E_x^exact = −½α Σ_σ D_σ:K_σ ⇒ ∂E/∂D_σ = −α K_σ. Коэффициент 1 при
-            # K_σ (а не ½, как в RHF): спин-орбиталь занята **один** раз, и
-            # точный обмен UKS — это доля α от UHF-обмена −½Σ_σD_σ:K_σ. Ловушка:
-            # скопировать ½/¼ из RKS — значит потерять фактор 2, невидимый по
-            # сходимости, но сдвигающий энергию гибрида вдвое. В замкнутом
-            # пределе (D_σ = D/2) −½αΣ_σD_σK_σ сворачивается ровно в −¼αD:K RKS.
-            fock_alpha = fock_alpha - alpha_exchange * exchange_alpha
-            fock_beta = fock_beta - alpha_exchange * exchange_beta
-            exact_exchange_energy = (
-                -0.5
-                * alpha_exchange
-                * (
-                    float(np.sum(density_alpha * exchange_alpha))
-                    + float(np.sum(density_beta * exchange_beta))
-                )
+        if exact_exchange.active:
+            exchange_alpha = exact_exchange(density_alpha)
+            exchange_beta = exact_exchange(density_beta)
+            # E_x^exact = −½ Σ_σ D_σ:K^eff_σ ⇒ ∂E/∂D_σ = −K^eff_σ (K^eff = c·K +
+            # c_lr·K_erf). Коэффициент 1 при K_σ (а не ½, как в RHF): спин-орбиталь
+            # занята **один** раз, и точный обмен UKS — это доля от UHF-обмена
+            # −½Σ_σD_σ:K_σ. Ловушка: скопировать ½/¼ из RKS — значит потерять
+            # фактор 2, невидимый по сходимости, но сдвигающий энергию гибрида
+            # вдвое. В замкнутом пределе (D_σ = D/2) −½ΣD_σK_σ сворачивается
+            # ровно в −¼D:K RKS.
+            fock_alpha = fock_alpha - exchange_alpha
+            fock_beta = fock_beta - exchange_beta
+            exact_exchange_energy = -0.5 * (
+                float(np.sum(density_alpha * exchange_alpha))
+                + float(np.sum(density_beta * exchange_beta))
             )
 
         # E = Σ D_tot H + ½ Σ D_tot J + E_xc − ½α Σ D_σ:K_σ + V_ядер.
@@ -798,18 +825,14 @@ def run_uks(
     fock_alpha = core + coulomb + v_xc_alpha
     fock_beta = core + coulomb + v_xc_beta
     exact_exchange_energy = 0.0
-    if alpha_exchange > 0.0:
-        exchange_alpha = exchange_matrix(density_alpha, eri)
-        exchange_beta = exchange_matrix(density_beta, eri)
-        fock_alpha = fock_alpha - alpha_exchange * exchange_alpha
-        fock_beta = fock_beta - alpha_exchange * exchange_beta
-        exact_exchange_energy = (
-            -0.5
-            * alpha_exchange
-            * (
-                float(np.sum(density_alpha * exchange_alpha))
-                + float(np.sum(density_beta * exchange_beta))
-            )
+    if exact_exchange.active:
+        exchange_alpha = exact_exchange(density_alpha)
+        exchange_beta = exact_exchange(density_beta)
+        fock_alpha = fock_alpha - exchange_alpha
+        fock_beta = fock_beta - exchange_beta
+        exact_exchange_energy = -0.5 * (
+            float(np.sum(density_alpha * exchange_alpha))
+            + float(np.sum(density_beta * exchange_beta))
         )
     total = (
         float(np.sum(density_total * core) + 0.5 * np.sum(density_total * coulomb))
@@ -823,6 +846,8 @@ def run_uks(
         nuclear_repulsion=v_nuc,
         xc_energy=xc_energy,
         exact_exchange_fraction=alpha_exchange,
+        long_range_exchange_fraction=exact_exchange.long_range,
+        range_separation_omega=range_separation(functional)[0],
         alpha_energies=tuple(float(value) for value in alpha_energies),
         beta_energies=tuple(float(value) for value in beta_energies),
         alpha_coefficients=alpha_coefficients,

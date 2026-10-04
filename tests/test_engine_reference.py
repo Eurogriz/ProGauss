@@ -280,7 +280,7 @@ def test_unimplemented_theory_is_rejected() -> None:
         _run(
             spec=CalculationSpec(
                 task=Task.SINGLE_POINT,
-                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="m062x"),
+                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="scan"),
             )
         )
 
@@ -664,19 +664,13 @@ def test_unimplemented_scf_strategies_are_rejected_not_silently_skipped() -> Non
     for strategies in (("diis", "soscf"), ("soscf", "damping", "level_shift")):
         with pytest.raises(MethodNotAvailableError):
             engine.assert_supported(_option_spec(scf=ScfSpec(fallback_strategies=strategies)))
-    # Анализ устойчивости реализован для HF и DFT (LDA/GGA/гибриды) в одной
-    # точке; для meta-GGA ядро ответа ``f_xc`` по τ в гессиане нет — отказ.
+    # Анализ устойчивости реализован для HF и DFT (LDA/GGA/гибриды, meta-GGA и
+    # ωB97X) в одной точке.
     assert engine.assert_supported(_option_spec(scf=ScfSpec(stability_analysis=True)))
-    assert engine.assert_supported(
-        _option_spec(
-            method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="pbe"),
-            scf=ScfSpec(stability_analysis=True),
-        )
-    )
-    with pytest.raises(CombinationUnavailableError):
-        engine.assert_supported(
+    for functional in ("pbe", "tpssh", "m062x", "wb97x"):
+        assert engine.assert_supported(
             _option_spec(
-                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="tpssh"),
+                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional=functional),
                 scf=ScfSpec(stability_analysis=True),
             )
         )

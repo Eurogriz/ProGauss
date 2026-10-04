@@ -573,8 +573,12 @@ def build_electron_repulsion(
     *,
     threads: int = 1,
     screening: float = 0.0,
+    omega: float = 0.0,
 ) -> np.ndarray:
     """Тензор двухэлектронных интегралов ``(μν|λσ)`` формы ``(n, n, n, n)``.
+
+    ``omega > 0`` — интегралы оператора ``erf(ωr)/r`` (дальнодействующая часть
+    кулоновского ядра в гибридах с разделением, ωB97X); ``0`` — обычное ``1/r``.
 
     Вычисляются только уникальные квартеты оболочек (условие
     ``(ij) ≥ (kl)`` в лексикографическом порядке пар), остальные восемь
@@ -595,7 +599,7 @@ def build_electron_repulsion(
     if basis.spherical:
         return _to_spherical_4(
             build_electron_repulsion(
-                basis.cartesian(), molecule, threads=threads, screening=screening
+                basis.cartesian(), molecule, threads=threads, screening=screening, omega=omega
             ),
             basis.transformation_matrix(),
         )
@@ -608,7 +612,7 @@ def build_electron_repulsion(
 
     def work(task: _EriTask) -> None:
         geometry, chunk, budget = task
-        arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget)
+        arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget, omega=omega)
         blocks = _batch_eri_blocks(arrays, geometry)
         _place_quartet_batch(tensor, offsets, chunk, geometry, blocks)
 
@@ -706,8 +710,14 @@ class DirectEri:
         *,
         threshold: float = 1e-12,
         threads: int = 1,
+        omega: float = 0.0,
     ) -> None:
-        """Готовит оценки Шварца и список задач; интегралы пока не считаются."""
+        """Готовит оценки Шварца и список задач; интегралы пока не считаются.
+
+        ``omega > 0`` — оператор ``erf(ωr)/r``; оценки Шварца остаются кулоновскими
+        и поэтому — верхняя граница (ослабленное ядро не больше исходного).
+        """
+        self.omega = omega
         self.cartesian = basis.cartesian()
         self.transform = basis.transformation_matrix() if basis.spherical else None
         self.molecule = molecule
@@ -753,7 +763,9 @@ class DirectEri:
 
         def work(task: _EriTask) -> None:
             geometry, chunk, budget = task
-            arrays = _batch_arrays(self.shells, self.centers, chunk, angular_budget=budget)
+            arrays = _batch_arrays(
+                self.shells, self.centers, chunk, angular_budget=budget, omega=self.omega
+            )
             blocks = _batch_eri_blocks(arrays, geometry)
             coulomb = np.zeros((size, size))
             exchange = np.zeros((size, size))
@@ -1125,7 +1137,7 @@ def _eri_derivative_primitive(
 
 
 def build_electron_repulsion_derivative(
-    basis: BasisSet, molecule: Molecule, axis: int
+    basis: BasisSet, molecule: Molecule, axis: int, *, omega: float = 0.0
 ) -> np.ndarray:
     r"""``∂(μν|λσ)/∂A_x``, где ``A`` — центр оболочки функции ``μ``.
 
@@ -1157,7 +1169,7 @@ def build_electron_repulsion_derivative(
         step = _batch_step(geometry, budget)
         for start in range(0, len(quartets), step):
             chunk = quartets[start : start + step]
-            arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget)
+            arrays = _batch_arrays(shells, centers, chunk, angular_budget=budget, omega=omega)
             blocks = _batch_eri_derivative_blocks(axis, arrays, geometry)
             _place_quartet_derivative_batch(tensor, offsets, chunk, geometry, blocks)
     return tensor
@@ -1985,6 +1997,7 @@ def _batch_arrays(
     quartets: Sequence[Quartet],
     *,
     angular_budget: int,
+    omega: float = 0.0,
 ) -> _BatchArrays:
     """Раскладывает пачку квартетов по примитивным квартетам сразу.
 
@@ -1998,6 +2011,11 @@ def _batch_arrays(
         quartets: квартеты пачки; все одного класса.
         angular_budget: максимальная сумма ``t+u+v`` в таблице ``R`` — сумма
             угловых моментов для энергии и на единицу больше для производной.
+        omega: константа ``ω`` оператора ``erf(ωr)/r``; ``0`` — обычное
+            кулоновское ``1/r``. Ослабление не меняет рекурсию: приведённая
+            экспонента ``α`` заменяется на ``α' = αω²/(α+ω²)``, а весь
+            интеграл умножается на ``√(ω²/(α+ω²))`` (из верхнего предела
+            ``ω`` в интегральном представлении ``erf``).
     """
     n = len(quartets)
     exponents = [
@@ -2024,6 +2042,11 @@ def _batch_arrays(
     s = c + d
     total = p + s
     alpha = p * s / total
+    attenuation = 1.0
+    if omega > 0.0:
+        scale = omega * omega / (omega * omega + alpha)
+        alpha = alpha * scale
+        attenuation = np.sqrt(scale)
     pqx = (a * position_a[0] + b * position_b[0]) / p - (c * position_c[0] + d * position_d[0]) / s
     pqy = (a * position_a[1] + b * position_b[1]) / p - (c * position_c[1] + d * position_d[1]) / s
     pqz = (a * position_a[2] + b * position_b[2]) / p - (c * position_c[2] + d * position_d[2]) / s
@@ -2035,7 +2058,7 @@ def _batch_arrays(
         c=c,
         d=d,
         contraction=(contraction[0], contraction[1], contraction[2], contraction[3]),
-        prefactor=2.0 * PI_5_2 / (p * s * np.sqrt(total)),
+        prefactor=2.0 * PI_5_2 / (p * s * np.sqrt(total)) * attenuation,
         coulomb=_coulomb_table(angular_budget, alpha, pqx, pqy, pqz, x),
         q=(
             (position_a[0] - position_b[0]).reshape(n, 1, 1, 1, 1),

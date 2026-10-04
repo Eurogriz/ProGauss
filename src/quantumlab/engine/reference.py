@@ -77,6 +77,7 @@ from quantumlab.engine.contracts import (
     EngineRequest,
     ExchangeCorrelationFunctional,
     ProgressReporter,
+    range_separation,
 )
 from quantumlab.engine.dft import RksResult, UksResult, run_rks, run_uks
 from quantumlab.engine.dispersion import (
@@ -84,6 +85,7 @@ from quantumlab.engine.dispersion import (
     dftd3_contribution,
     dftd4_contribution,
 )
+from quantumlab.engine.dispersion_d2 import dftd2_chg_contribution
 from quantumlab.engine.fock import SpinFockBuilder
 from quantumlab.engine.functional import (
     density_at_points,
@@ -103,6 +105,7 @@ from quantumlab.engine.optimizer import OptimizationSettings, OptimizerState, op
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.engine.scf import (
+    ExactExchange,
     PrecomputedIntegrals,
     RohfResult,
     ScfSettings,
@@ -298,7 +301,6 @@ class ReferenceEngine:
         """
         spec = request.spec
         basis_name = self.assert_supported(spec)
-        self._assert_meta_gga_open_shell(spec, request.molecule)
         if spec.task is Task.OPTIMIZATION:
             return self._run_optimization(
                 request, basis_name, progress=progress, checkpoint_sink=checkpoint_sink
@@ -1377,22 +1379,11 @@ class ReferenceEngine:
         if method is None:
             return
 
-        if spec.scf.stability_analysis:
-            if (
-                method.theory is TheoryFamily.DFT
-                and method.functional is not None
-                and get_functional(method.functional).requires_tau
-            ):
-                raise CombinationUnavailableError(
-                    f"scf:stability_analysis + {method.functional}",
-                    "Устойчивость meta-GGA требует спин-неограниченного потенциала с "
-                    "кинетической плотностью, которого в движке нет.",
-                )
-            if spec.task is not Task.SINGLE_POINT:
-                raise CombinationUnavailableError(
-                    f"scf:stability_analysis + {spec.task.value}",
-                    "Анализ устойчивости выполняется только в одноточечном расчёте.",
-                )
+        if spec.scf.stability_analysis and spec.task is not Task.SINGLE_POINT:
+            raise CombinationUnavailableError(
+                f"scf:stability_analysis + {spec.task.value}",
+                "Анализ устойчивости выполняется только в одноточечном расчёте.",
+            )
 
         if "ediis" in spec.scf.fallback_strategies and method.spin is SpinTreatment.ROHF:
             raise CombinationUnavailableError(
@@ -1412,28 +1403,6 @@ class ReferenceEngine:
                 "открытооболочечный DFT считается как спиново-поляризованный "
                 "UKS. Для открытой оболочки используйте "
                 "spin:uhf.",
-            )
-
-    def _assert_meta_gga_open_shell(self, spec: CalculationSpec, molecule: Molecule) -> None:
-        """Отклоняет meta-GGA для открытой оболочки: UKS с ``τ`` не реализован.
-
-        Нужна молекула, а не только спецификация: открытая оболочка
-        определяется числом электронов и мультиплетностью системы.
-        """
-        method = spec.method
-        if (
-            method is None
-            or method.theory is not TheoryFamily.DFT
-            or method.functional is None
-            or not get_functional(method.functional).requires_tau
-        ):
-            return
-        if molecule.n_electrons % 2 != 0 or molecule.multiplicity != 1:
-            raise CombinationUnavailableError(
-                f"DFT/{method.functional} + open-shell",
-                "Для meta-GGA-функционала реализована только замкнутая оболочка "
-                "(RKS): спин-поляризованный UKS с кинетической плотностью не "
-                "реализован. Используйте GGA или гибрид (PBE, BLYP, PBE0, B3LYP).",
             )
 
     def assert_supported(self, spec: CalculationSpec) -> str:
@@ -1471,11 +1440,26 @@ class ReferenceEngine:
         # без этой проверки план с D3-BJ выполнялся бы как расчёт без поправки,
         # то есть выдавал бы другое число под тем же описанием (§54 ТЗ).
         self._registry.assert_available(f"dispersion:{method.dispersion.value}")
+        if (
+            method.theory is TheoryFamily.DFT
+            and method.functional in _INTRINSIC_DISPERSION
+            and method.dispersion is not DispersionCorrection.NONE
+        ):
+            raise CombinationUnavailableError(
+                f"DFT/{method.functional} + {method.dispersion.value}",
+                "ωB97X-D уже содержит дисперсионную поправку D2 (затухание "
+                "Чая—Хед-Гордона): вторая поправка удвоила бы дисперсию. "
+                "Оставьте dispersion=none.",
+            )
         if method.spin is not SpinTreatment.RHF:
             self._registry.assert_available(f"spin:{method.spin.value}")
         self._assert_spin_combination_is_honoured(spec)
         self._registry.assert_available(f"basis:{method.basis}")
         return method.basis
+
+
+#: Функционалы, у которых дисперсионная поправка входит в определение (ωB97X-D).
+_INTRINSIC_DISPERSION: frozenset[str] = frozenset({"wb97x-d"})
 
 
 def _dispersion_contribution(
@@ -1489,7 +1473,12 @@ def _dispersion_contribution(
     здесь ValueError возможен только для дефектной спецификации.
     """
     method = spec.method
-    if method is None or method.dispersion is DispersionCorrection.NONE:
+    if method is None:
+        return None
+    if method.theory is TheoryFamily.DFT and method.functional in _INTRINSIC_DISPERSION:
+        # ωB97X-D: поправка D2-CHG — часть определения функционала, а не опция.
+        return dftd2_chg_contribution(molecule)
+    if method.dispersion is DispersionCorrection.NONE:
         return None
     functional = None if method.theory is TheoryFamily.HF else method.functional
     if method.dispersion is DispersionCorrection.D4:
@@ -1537,12 +1526,17 @@ def _build_integrals(
     spec: CalculationSpec, basis: BasisSet, molecule: Molecule, threads: int
 ) -> PrecomputedIntegrals:
     """Интегралы с настройками движка: потоки, скрининг Шварца, прямой режим."""
+    omega = 0.0
+    method = spec.method
+    if method is not None and method.theory is TheoryFamily.DFT and method.functional is not None:
+        omega, _ = range_separation(get_functional(method.functional))
     return build_integrals(
         basis,
         molecule,
         direct=spec.scf.direct,
         threads=threads,
         screening=INTEGRAL_SCREENING,
+        omega=omega,
     )
 
 
@@ -2169,10 +2163,14 @@ def _quality_checks_rks(
     # Гибрид добавляет долю точного обмена и в фокиан, и в разложение энергии.
     # Без обоих членов проверка выдала бы FAIL на корректном гибриде — или, что
     # хуже, PASS на гибриде, где точный обмен потерялся.
-    alpha = rks.exact_exchange_fraction
-    exchange_integral = (
-        float(np.sum(density * exchange_matrix(density, prepared.eri))) if alpha > 0.0 else 0.0
+    exact_exchange = ExactExchange(
+        rks.exact_exchange_fraction,
+        rks.long_range_exchange_fraction,
+        rks.range_separation_omega,
+        prepared,
     )
+    exchange_term = exact_exchange(density)
+    exchange_integral = float(np.sum(density * exchange_term)) if exact_exchange.active else 0.0
 
     rho = density_at_points(basis_values, density)
     grid_electrons = float(np.sum(grid.weights * rho))
@@ -2182,8 +2180,8 @@ def _quality_checks_rks(
         msg = "RKS-результат без обменно-корреляционного потенциала: проверки невозможны."
         raise ValueError(msg)
     fock = prepared.core + coulomb_matrix(density, prepared.eri) + v_xc
-    if alpha > 0.0:
-        fock = fock - 0.5 * alpha * exchange_matrix(density, prepared.eri)
+    if exact_exchange.active:
+        fock = fock - 0.5 * exchange_term
     commutator_error = float(np.max(np.abs(fock @ density @ overlap - overlap @ density @ fock)))
 
     decomposition_error = abs(
@@ -2191,7 +2189,7 @@ def _quality_checks_rks(
         + attraction
         + 0.5 * coulomb
         + rks.xc_energy
-        - 0.25 * alpha * exchange_integral
+        - 0.25 * exchange_integral
         + rks.nuclear_repulsion
         - rks.total_energy
     )
@@ -2289,14 +2287,21 @@ def _quality_checks_uks(
     eri = prepared.eri
     expected = molecule.n_electrons
     density_total = uks.density_alpha + uks.density_beta
-    alpha = uks.exact_exchange_fraction
+    exact_exchange_operator = ExactExchange(
+        uks.exact_exchange_fraction,
+        uks.long_range_exchange_fraction,
+        uks.range_separation_omega,
+        prepared,
+    )
+    exchange_matrix_alpha = exact_exchange_operator(uks.density_alpha)
+    exchange_matrix_beta = exact_exchange_operator(uks.density_beta)
 
     kinetic = float(np.sum(density_total * integrals.build_kinetic(basis, molecule)))
     attraction = float(np.sum(density_total * integrals.build_nuclear_attraction(basis, molecule)))
     coulomb = float(np.sum(density_total * coulomb_matrix(density_total, eri)))
-    exchange_alpha = float(np.sum(uks.density_alpha * exchange_matrix(uks.density_alpha, eri)))
-    exchange_beta = float(np.sum(uks.density_beta * exchange_matrix(uks.density_beta, eri)))
-    exact_exchange = 0.5 * alpha * (exchange_alpha + exchange_beta)
+    exchange_alpha = float(np.sum(uks.density_alpha * exchange_matrix_alpha))
+    exchange_beta = float(np.sum(uks.density_beta * exchange_matrix_beta))
+    exact_exchange = 0.5 * (exchange_alpha + exchange_beta)
 
     decomposition_error = abs(
         kinetic
@@ -2310,16 +2315,10 @@ def _quality_checks_uks(
 
     coulomb_matrix_total = coulomb_matrix(density_total, eri)
     fock_alpha = (
-        prepared.core
-        + coulomb_matrix_total
-        - alpha * exchange_matrix(uks.density_alpha, eri)
-        + _require_vxc(uks.v_xc_alpha)
+        prepared.core + coulomb_matrix_total - exchange_matrix_alpha + _require_vxc(uks.v_xc_alpha)
     )
     fock_beta = (
-        prepared.core
-        + coulomb_matrix_total
-        - alpha * exchange_matrix(uks.density_beta, eri)
-        + _require_vxc(uks.v_xc_beta)
+        prepared.core + coulomb_matrix_total - exchange_matrix_beta + _require_vxc(uks.v_xc_beta)
     )
     commutator_error = 0.0
     for fock, density in ((fock_alpha, uks.density_alpha), (fock_beta, uks.density_beta)):

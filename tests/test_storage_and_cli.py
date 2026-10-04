@@ -325,7 +325,7 @@ def test_cli_run_rejects_unimplemented_functional(
             "--method",
             "dft",
             "--functional",
-            "m062x",
+            "scan",
             "--basis",
             "sto-3g",
         ]

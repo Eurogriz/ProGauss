@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -345,9 +346,9 @@ def test_eri_build_is_not_repeated_by_quality_checks(
     calls: list[int] = []
     original = build_electron_repulsion
 
-    def counting(target: BasisSet, structure: Molecule) -> np.ndarray:
+    def counting(target: BasisSet, structure: Molecule, **options: Any) -> np.ndarray:
         calls.append(1)
-        return original(target, structure)
+        return original(target, structure, **options)
 
     # Цель задаётся строкой: ``scf`` не реэкспортирует функцию, и обращение
     # по атрибуту mypy отвергает как неявный экспорт.

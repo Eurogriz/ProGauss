@@ -6,8 +6,9 @@
   ``(v_ρ, v_σ, v_τ)`` — ошибка формулы или цепного правила;
 * **энергия RKS** сверяется с ``pyscf.dft.RKS`` — ошибка решателя (член
   ``v_τ`` в фокиане, доля точного обмена 0.10, кинетическая плотность);
-* **отказы**: UKS, аналитический градиент, оптимизация и частоты для
-  meta-GGA не реализованы и должны отклоняться явно, а не приближаться (§54 ТЗ).
+* **границы**: спин-поляризованные ядра отдельных компонент TPSS (``evaluate_spin``)
+  по-прежнему отклоняются; спин-поляризованный TPSSh, M06 и M06-2X проверяются
+  в ``test_engine_uks_mgga_rsh.py``.
 """
 
 from __future__ import annotations
@@ -48,7 +49,6 @@ from quantumlab.engine.quadrature import build_grid
 from quantumlab.engine.reference import ReferenceEngine
 from quantumlab.engine.registry import default_registry
 from quantumlab.engine.scf import ScfSettings, run_rhf
-from quantumlab.errors import CombinationUnavailableError
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -113,14 +113,21 @@ def test_meta_gga_requires_tau_and_gradient(functional: ExchangeCorrelationFunct
         functional.evaluate(points, rho, None, tau=rho)
 
 
-@pytest.mark.parametrize("functional", [TpssExchange(), TpssCorrelation(), Tpssh()])
+@pytest.mark.parametrize("functional", [TpssExchange(), TpssCorrelation()])
 def test_meta_gga_spin_variant_is_refused(functional: ExchangeCorrelationFunctional) -> None:
+    """Компоненты TPSS по отдельности в спиновой форме не считаются: только целый ``Tpssh``."""
     with pytest.raises(NotImplementedError, match="meta-GGA"):
         functional.evaluate_spin(np.zeros((1, 3)), np.ones((2, 1)))
     with pytest.raises(ValueError, match="evaluate_spin"):
         functional.evaluate(
             np.zeros((1, 3)), np.ones(1), np.zeros((1, 3)), spin_polarized=True, tau=np.ones(1)
         )
+
+
+def test_tpssh_spin_form_requires_tau() -> None:
+    """Спиновый TPSSh без ``τ`` не молчит и не подставляет ноль."""
+    with pytest.raises(ValueError, match="evaluate_spin_tau"):
+        Tpssh().evaluate_spin(np.zeros((1, 3)), np.ones((2, 1)))
 
 
 @pytest.mark.parametrize(
@@ -302,28 +309,35 @@ def test_engine_optimizes_tpssh_with_the_analytic_gradient(water: Molecule) -> N
     assert result.final_molecule is not None
 
 
-def test_engine_refuses_tpssh_for_open_shell() -> None:
-    radical = Molecule.from_xyz(
-        (FIXTURES / "ch-radical.xyz").read_text(encoding="utf-8"), name="ch", multiplicity=2
+def test_engine_runs_tpssh_for_open_shell() -> None:
+    """Открытая оболочка с meta-GGA считается спин-поляризованным UKS, а не отклоняется."""
+    triplet = Molecule.from_xyz(
+        (FIXTURES / "water.xyz").read_text(encoding="utf-8"), name="water", multiplicity=3
     )
     spec = CalculationSpec(
         task=Task.SINGLE_POINT,
         method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="tpssh"),
     )
-    with pytest.raises(CombinationUnavailableError):
-        ReferenceEngine().run(EngineRequest(job_id="mgga", spec=spec, molecule=radical, threads=1))
+    result = ReferenceEngine().run(
+        EngineRequest(job_id="mgga", spec=spec, molecule=triplet, threads=1)
+    )
+    assert result.converged
+    assert result.energy_hartree < -74.0
 
 
-def test_solvers_refuse_meta_gga_where_it_is_not_implemented(water: Molecule) -> None:
+def test_solvers_run_meta_gga_in_uks(water: Molecule) -> None:
+    """``run_uks`` принимает meta-GGA; замкнутый предел совпадает с RKS."""
     basis = build_basis("sto-3g", water)
-    with pytest.raises(NotImplementedError, match="UKS"):
-        run_uks(basis, water, Tpssh())
+    grid = build_grid(water, GridPreset.COARSE)
+    functional = Tpssh()
+    rks = run_rks(basis, water, functional, TIGHT, grid=grid)
+    uks = run_uks(basis, water, functional, TIGHT, grid=grid)
+    assert uks.total_energy == pytest.approx(rks.total_energy, abs=1e-8)
 
 
-def test_registry_reports_tpssh_as_partial_rks_only() -> None:
+def test_registry_reports_meta_gga_functionals_as_partial_with_limitations() -> None:
     registry = default_registry()
-    assert registry.availability("functional:tpssh") is Availability.PARTIAL
-    capability = registry.get("functional:tpssh")
-    text = " ".join(capability.limitations)
-    assert "RKS" in text and "meta-GGA" in text
-    assert not registry.is_available("functional:m06")
+    for name in ("tpssh", "m06", "m062x"):
+        assert registry.availability(f"functional:{name}") is Availability.PARTIAL
+        text = " ".join(registry.get(f"functional:{name}").limitations)
+        assert "meta-GGA" in text and "UKS" in text

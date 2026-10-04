@@ -32,7 +32,6 @@ from quantumlab.domain.spec import (
     Task,
     TheoryFamily,
 )
-from quantumlab.engine.functional import get_functional
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.i18n import DEFAULT_LOCALE, t
 
@@ -284,9 +283,7 @@ def resolve_profile(
         # объяснения её отсутствия была бы дублем, а не информацией.
         decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
 
-    grid_preset, scf, stability_omitted = _numerics(
-        profile, task, is_large, capabilities, theory, functional
-    )
+    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities)
     if stability_omitted:
         decisions.append(
             Decision(
@@ -394,8 +391,6 @@ def _numerics(
     task: Task,
     is_large: bool,
     capabilities: CapabilityRegistry,
-    theory: TheoryFamily,
-    functional: str | None,
 ) -> tuple[GridPreset, ScfSpec, bool]:
     """Сетка и пороги SCF.
 
@@ -431,16 +426,11 @@ def _numerics(
     # «подобранные параметры» неработоспособны. Поэтому сверяемся с реестром,
     # а пропуск объясняем отдельным решением (§8 ТЗ).
     wants_stability = profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH)
-    # Анализ реализован для HF и DFT (LDA/GGA/гибриды) и только в одной точке:
-    # для meta-GGA, оптимизации и частот запрос был бы отклонён движком,
-    # поэтому подборщик его не просит.
+    # Анализ реализован для HF и DFT (включая meta-GGA) и только в одной точке:
+    # для оптимизации и частот запрос был бы отклонён движком, поэтому
+    # подборщик его не просит.
     has_stability = (
-        capabilities.is_available("scf:stability_analysis")
-        and task is Task.SINGLE_POINT
-        and (
-            theory is TheoryFamily.HF
-            or (functional is not None and not get_functional(functional).requires_tau)
-        )
+        capabilities.is_available("scf:stability_analysis") and task is Task.SINGLE_POINT
     )
     scf = ScfSpec(
         max_iterations=80 if profile is PrecisionProfile.SCREENING else 128,

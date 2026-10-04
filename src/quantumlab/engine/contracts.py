@@ -244,13 +244,28 @@ class XcEvaluationSpin:
         vsigma: ``(2, 2, n_points)`` — ``∂E_V/∂s_στ``, где
             ``s_στ = ∇ρ^σ·∇ρ^τ``; ``None`` для LDA. Диагональ — производные по
             собственным градиентам каналов, внедиагональ — по смешанным.
-        vtau: ``∂E_V/∂τ`` — не используется пока (meta-GGA вне текущего среза).
+        vtau: ``(2, n_points)`` — ``∂E_V/∂τ_σ`` для meta-GGA (по каналам); ``None`` для LDA/GGA.
     """
 
     energy_density: Array
     vrho: Array
     vsigma: Array | None = None
     vtau: Array | None = None
+
+
+@runtime_checkable
+class MetaGgaSpinFunctional(Protocol):
+    """meta-GGA, умеющий считать UKS: ``evaluate_spin`` дополнен ``τ`` по каналам."""
+
+    def evaluate_spin_tau(
+        self,
+        points: Array,
+        density_spin: Array,
+        density_gradient_spin: Array,
+        tau_spin: Array,
+    ) -> XcEvaluationSpin:
+        """Как :meth:`ExchangeCorrelationFunctional.evaluate_spin`, плюс ``τ`` ``(2, n_points)``."""
+        ...
 
 
 @runtime_checkable
@@ -487,3 +502,20 @@ class QuantumEngine(Protocol):
     ) -> CalculationResult:
         """Выполняет расчёт и возвращает результат с проверками качества."""
         ...
+
+
+def range_separation(functional: object) -> tuple[float, float]:
+    """``(ω, доля дальнодействующего точного обмена)``; ``(0, 0)`` — без разделения.
+
+    Точный обмен гибрида с разделением (CAM)::
+
+        E_x^{HF} = c·K[1/r] + c_lr·K[erf(ωr)/r],
+
+    где ``c = exact_exchange_fraction``, ``c_lr = long_range_exchange_fraction``.
+    У ωB97X ``c = 0.157706``, ``c_lr = 0.842294``: на малых расстояниях
+    точного обмена ``c``, на больших — 1. Функционалы без разделения этих
+    атрибутов не имеют — для них возвращается ноль.
+    """
+    omega = float(getattr(functional, "range_separation_omega", 0.0))
+    fraction = float(getattr(functional, "long_range_exchange_fraction", 0.0))
+    return (omega, fraction) if omega > 0.0 and fraction != 0.0 else (0.0, 0.0)

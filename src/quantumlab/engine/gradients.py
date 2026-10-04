@@ -42,13 +42,14 @@ from quantumlab.domain.molecule import Molecule
 from quantumlab.engine import integrals
 from quantumlab.engine.basis import BasisSet
 from quantumlab.engine.constants import angstrom_to_bohr
-from quantumlab.engine.contracts import ExchangeCorrelationFunctional
+from quantumlab.engine.contracts import ExchangeCorrelationFunctional, range_separation
 from quantumlab.engine.dft import RksResult, UksResult
 from quantumlab.engine.functional import (
     density_at_points,
     density_gradient_at_points,
     evaluate_basis_hessian_for_center,
     evaluate_basis_with_gradients,
+    evaluate_spin_xc,
     kinetic_density_at_points,
 )
 from quantumlab.engine.quadrature import QuadratureGrid
@@ -157,6 +158,8 @@ def _orbital_gradient(
     exchange_densities: tuple[Array, ...],
     weight: Array,
     exchange_coefficient: float,
+    long_range_coefficient: float = 0.0,
+    omega: float = 0.0,
 ) -> Array:
     """Аналитический градиент электронной части, хартри/бор.
 
@@ -179,6 +182,9 @@ def _orbital_gradient(
       обмен целиком содержится в ``E_xc`` и входит через отдельное слагаемое.
     * ``weight`` — энерговзвешенная плотность, входящая в член релаксации
       орбиталей ``Σ W·S'``.
+    * ``long_range_coefficient``, ``omega`` — то же, что ``exchange_coefficient``,
+      для обмена с ядром ``erf(ωr)/r`` (гибриды с разделением, ωB97X): тот же
+      контракт производных ERI, но интегралы с ослабленным оператором.
     """
     basis, converted = _cartesian_form(basis, density, weight, *exchange_densities)
     density, weight = converted[0], converted[1]
@@ -206,6 +212,17 @@ def _orbital_gradient(
             eri_bra.transpose(2, 3, 0, 1),
             eri_bra.transpose(2, 3, 1, 0),
         )
+        lr_slots: tuple[Array, ...] = ()
+        if long_range_coefficient != 0.0:
+            eri_bra_lr = integrals.build_electron_repulsion_derivative(
+                basis, molecule, axis, omega=omega
+            )
+            lr_slots = (
+                eri_bra_lr,
+                eri_bra_lr.transpose(1, 0, 2, 3),
+                eri_bra_lr.transpose(2, 3, 0, 1),
+                eri_bra_lr.transpose(2, 3, 1, 0),
+            )
 
         for atom_index, mask in enumerate(masks):
             bra = mask[:, None]
@@ -229,10 +246,31 @@ def _orbital_gradient(
                         "uv,ls,ulvs", exchange_density, exchange_density, derivative, optimize=True
                     )
                 )
+            exchange_lr = 0.0
+            if lr_slots:
+                derivative_lr = np.zeros((n_functions,) * 4)
+                for slot, tensor in enumerate(lr_slots):
+                    shape = [1, 1, 1, 1]
+                    shape[slot] = n_functions
+                    derivative_lr += mask.reshape(shape) * tensor
+                for exchange_density in exchange_densities:
+                    exchange_lr += float(
+                        np.einsum(
+                            "uv,ls,ulvs",
+                            exchange_density,
+                            exchange_density,
+                            derivative_lr,
+                            optimize=True,
+                        )
+                    )
             orbital_relaxation = float(np.sum(weight * overlap))
 
             gradient[atom_index, axis] += (
-                one_electron + 0.5 * coulomb - exchange_coefficient * exchange - orbital_relaxation
+                one_electron
+                + 0.5 * coulomb
+                - exchange_coefficient * exchange
+                - long_range_coefficient * exchange_lr
+                - orbital_relaxation
             )
 
         # Движение самих ядер в операторе притяжения — отдельно для каждого атома:
@@ -513,23 +551,31 @@ def xc_gradient_spin(
     пространстве**; расхождение с поверхностью перестраиваемой сетки
     измерено и описано там же.
     """
-    if functional.requires_tau:
-        msg = (
-            f"Спин-поляризованный градиент meta-GGA «{functional.name}» не реализован: "
-            "нет UKS с кинетической плотностью. Градиент не подменяется приближением (§54 ТЗ)."
-        )
-        raise NotImplementedError(msg)
     basis, (density_alpha, density_beta) = _cartesian_form(basis, density_alpha, density_beta)
     values, basis_gradients = evaluate_basis_with_gradients(basis, molecule, grid.points)
     rho_alpha = density_at_points(values, density_alpha)
     rho_beta = density_at_points(values, density_beta)
     grad_alpha = density_gradient_at_points(values, basis_gradients, density_alpha)
     grad_beta = density_gradient_at_points(values, basis_gradients, density_beta)
-    evaluation = functional.evaluate_spin(
+    tau_spin = (
+        np.stack(
+            [
+                kinetic_density_at_points(basis_gradients, density_alpha),
+                kinetic_density_at_points(basis_gradients, density_beta),
+            ],
+            axis=0,
+        )
+        if functional.requires_tau
+        else None
+    )
+    evaluation = evaluate_spin_xc(
+        functional,
         grid.points,
         np.stack([rho_alpha, rho_beta], axis=0),
         np.stack([grad_alpha, grad_beta], axis=0),
+        tau_spin,
     )
+    v_tau_spin = np.asarray(evaluation.vtau) if evaluation.vtau is not None else None
 
     v_rho = np.asarray(evaluation.vrho)  # (2, n_points)
     has_sigma = evaluation.vsigma is not None
@@ -549,18 +595,27 @@ def xc_gradient_spin(
 
     owner = _function_owner(basis)
     gradient = np.zeros((len(molecule.atoms), 3))
+    needs_hessian = has_sigma or v_tau_spin is not None
     for atom in range(len(molecule.atoms)):
         columns = np.flatnonzero(owner == atom)
         if columns.size == 0:
             continue
         hessian = (
             evaluate_basis_hessian_for_center(basis, molecule, grid.points, atom)
-            if has_sigma
+            if needs_hessian
             else None
         )
         for axis in range(3):
             d_phi = basis_gradients[:, columns, axis]  # (n_points, n_A)
             term = 0.0
+            if v_tau_spin is not None and hessian is not None:
+                # τ_σ = ½ Σ D^σ_μν ∇φ_μ·∇φ_ν:
+                # ∂τ_σ/∂R_Aa = −Σ_{μ∈A,ν} D^σ_μν Σ_b (∂_a∂_bφ_μ)(∂_bφ_ν).
+                for channel, sigma in enumerate(("a", "b")):
+                    d_tau = -np.einsum(
+                        "pjb,jpb->p", hessian[:, :, axis, :], grad_contracted[sigma][columns]
+                    )
+                    term += float(np.sum(grid.weights * v_tau_spin[channel] * d_tau))
             # v_ρ по каналам: −2 Σ_g w v_ρ^σ Σ_{μ∈A}Σ_ν D^σ_μν (∂_a φ_μ) φ_ν.
             for channel, sigma in enumerate(("a", "b")):
                 inner_rho = np.sum(d_phi * contracted[sigma][columns].T, axis=1)
@@ -605,6 +660,7 @@ def rks_gradient(
     вклад, вычисленный на той же сетке, что и сама энергия.
     """
     alpha = float(rks.exact_exchange_fraction)
+    omega, long_range = range_separation(functional)
     n_occupied = molecule.n_electrons // 2
     gradient = _orbital_gradient(
         basis,
@@ -613,6 +669,8 @@ def rks_gradient(
         exchange_densities=(rks.density,),
         weight=energy_weighted_density(rks, n_occupied),
         exchange_coefficient=0.25 * alpha,
+        long_range_coefficient=0.25 * long_range,
+        omega=omega,
     )
     gradient = gradient + xc_gradient(basis, molecule, grid, rks.density, functional)
     return RhfGradient(energy_hartree=rks.total_energy, gradient=gradient)
@@ -648,6 +706,7 @@ def uks_gradient(
     сошедшегося расчёта по той же причине, что и ``rhf_gradient``.
     """
     alpha = float(uks.exact_exchange_fraction)
+    omega, long_range = range_separation(functional)
     n_alpha, n_beta = spin_population(molecule.n_electrons, molecule.multiplicity)
     alpha_occupied = uks.alpha_coefficients[:, :n_alpha]
     beta_occupied = uks.beta_coefficients[:, :n_beta]
@@ -662,6 +721,8 @@ def uks_gradient(
         exchange_densities=(uks.density_alpha, uks.density_beta),
         weight=weight,
         exchange_coefficient=0.5 * alpha,
+        long_range_coefficient=0.5 * long_range,
+        omega=omega,
     )
     gradient = gradient + xc_gradient_spin(
         basis, molecule, grid, uks.density_alpha, uks.density_beta, functional

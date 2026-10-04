@@ -131,15 +131,26 @@ def test_substitution_prefers_dft_over_hartree_fock(water: Molecule) -> None:
     PBE0 без дисперсии точнее HF всегда, а не только там, где дисперсия не
     важна, поэтому откат на HF допустим лишь тогда, когда реализованных
     функционалов не осталось вовсе. «Исследовательский» профиль просит
-    ωB97X-D, которого в ядре нет, — и обязан получить ближайший гибрид.
+    ωB97X-D; когда его в реестре нет (искусственный реестр без него), профиль
+    обязан получить ближайший гибрид, а не HF.
     """
-    registry = default_registry()
-    resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
+    from quantumlab.engine.registry import CapabilityRegistry
+
+    requested = _PROFILE_FUNCTIONAL[PrecisionProfile.RESEARCH]
+    registry = CapabilityRegistry(
+        capability
+        for capability in default_registry().list_capabilities()
+        if capability.id != f"functional:{requested}"
+    )
+    assert not registry.is_available(f"functional:{requested}")
+    resolution = resolve_profile(
+        PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water, registry=registry
+    )
     method = resolution.spec.method
     assert method is not None
-    assert not registry.is_available(f"functional:{_PROFILE_FUNCTIONAL[PrecisionProfile.RESEARCH]}")
     assert method.theory is TheoryFamily.DFT
     assert method.functional is not None
+    assert method.functional != requested
     assert registry.is_available(f"functional:{method.functional}")
     substituted = next(
         decision
@@ -148,6 +159,18 @@ def test_substitution_prefers_dft_over_hartree_fock(water: Molecule) -> None:
     )
     assert substituted.value == method.functional
     assert "не реализован" in substituted.render("ru")
+
+
+def test_research_profile_uses_the_requested_range_separated_hybrid(water: Molecule) -> None:
+    """ωB97X-D реализован: исследовательский профиль получает его, без подмены."""
+    resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
+    method = resolution.spec.method
+    assert method is not None
+    assert method.functional == _PROFILE_FUNCTIONAL[PrecisionProfile.RESEARCH] == "wb97x-d"
+    assert not any(
+        decision.parameter == "functional" and decision.reason_key.endswith("substituted")
+        for decision in resolution.decisions
+    )
 
 
 def test_hf_fallback_still_happens_without_any_functional(water: Molecule) -> None:

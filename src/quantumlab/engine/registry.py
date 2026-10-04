@@ -21,6 +21,7 @@ from quantumlab.domain.spec import DispersionCorrection, Task
 from quantumlab.engine.basis import basis_angular_scheme
 from quantumlab.engine.basis_custom import custom_basis_names
 from quantumlab.engine.capabilities import Availability, Capability, CapabilityKind
+from quantumlab.engine.contracts import range_separation
 from quantumlab.engine.functional import FUNCTIONALS, get_functional
 from quantumlab.errors import (
     BasisNotFoundError,
@@ -154,9 +155,9 @@ _METHODS: tuple[tuple[str, str], ...] = (
 #: Статус «реализован/заявлено» реестр читает из ``FUNCTIONALS`` (см. ниже):
 #: здесь только справочные имена и классы, чтобы «заявлено» и «умеет» не
 #: разъезжались. Реализованы SVWN, PBE, BLYP, PBE0, B3LYP (сверены с LibXC и
-#: PySCF, в том числе со спиновой поляризацией) и meta-GGA гибрид TPSSh (только
-#: RKS); M06, M06-2X и дальнодействующие гибриды — заявлены в
-#: ТЗ, кода нет.
+#: PySCF, в том числе со спиновой поляризацией), meta-GGA TPSSh, M06 и M06-2X
+#: (RKS и UKS, формулы и производные сверены с LibXC и PySCF) и гибриды с
+#: разделением ωB97X и ωB97X-D (дальнодействующий обмен на ``erf(ωr)/r``).
 _FUNCTIONALS: tuple[tuple[str, str, str], ...] = (
     ("svwn", "SVWN (Слейтер + VWN-5)", "lda"),
     ("lda", "LDA (синоним SVWN)", "lda"),
@@ -292,9 +293,9 @@ def _method_limitations(name: str) -> tuple[str, ...]:
     if name == "dft":
         return (
             "Реализованы SVWN (LDA), PBE и BLYP (GGA), PBE0 и B3LYP (гибриды), "
-            "TPSSh (meta-GGA гибрид, только замкнутая оболочка RKS); meta-GGA "
-            "M06 и M06-2X и дальнодействующие гибриды (ωB97X, ωB97X-D) не "
-            "реализованы.",
+            "TPSSh, M06 и M06-2X (meta-GGA гибриды, RKS и UKS), ωB97X и "
+            "ωB97X-D (гибриды с разделением диапазона; в ωB97X-D входит "
+            "дисперсия D2 с затуханием Чая—Хед-Гордона).",
             "Дисперсионные поправки: D3 (BJ, zero) и D4 реализованы для "
             "функционалов с обученными параметрами.",
             "Замкнутая оболочка — RKS, открытая — спиново-поляризованный UKS "
@@ -330,16 +331,28 @@ def _functional_limitations(name: str) -> tuple[str, ...]:
             f"доля точного обмена — {functional.exact_exchange_fraction:g}."
         )
         limits.append(
-            "Только замкнутая оболочка (RKS): спин-поляризованный UKS с τ не "
-            "реализован и отклоняется, а не подменяется приближением. Энергия, "
-            "аналитический градиент, оптимизация и частоты — доступны."
+            "RKS и спин-поляризованный UKS (кинетическая плотность по каналам); "
+            "энергия, аналитический градиент, оптимизация, частоты и анализ "
+            "устойчивости. Производные берутся автоматическим дифференцированием "
+            "формулы, а не выписаны вручную."
         )
         return tuple(limits)
-    else:
+    elif functional.functional_class == "range_separated_hybrid":
+        omega, long_range = range_separation(functional)
         limits.append(
-            f"Гибрид: {functional.exact_exchange_fraction:g} точного обмена; "
-            "дальнодействующая коррекция (ωB97X и подобные) не реализована."
+            f"Гибрид с разделением диапазона: ω = {omega:g}, точный обмен "
+            f"{functional.exact_exchange_fraction:g} на малых и 1 на больших "
+            f"расстояниях (дальнодействующая доля {long_range:g}); нужен второй "
+            "тензор ERI с оператором erf(ωr)/r, поэтому память и время сборки "
+            "интегралов вдвое больше."
         )
+        if name == "wb97x-d":
+            limits.append(
+                "Дисперсия D2 с затуханием Чая—Хед-Гордона входит в функционал и "
+                "добавляется автоматически; вторая дисперсионная поправка отклоняется."
+            )
+    else:
+        limits.append(f"Гибрид: {functional.exact_exchange_fraction:g} точного обмена.")
     limits.append(
         "Замкнутая оболочка — RKS, открытая — спиново-поляризованный UKS "
         "(spin:uhf); для DFT нет ограниченной открытой оболочки (spin:rohf)."
@@ -373,7 +386,8 @@ _SCF_OPTIONS: tuple[tuple[str, bool, str], ...] = (
         "Одноточечный расчёт: RHF/RKS (внутренняя, RHF→UHF, мнимые вращения), "
         "UHF/UKS (внутренняя, мнимые вращения), ROHF (вещественные и мнимые "
         "вращения). DFT и ROHF — конечная разность орбитального градиента, HF — "
-        "аналитические A±B. Не реализованы: meta-GGA, спин-неограниченные "
+        "аналитические A±B; для meta-GGA и гибридов с разделением тот же путь через "
+        "спин-неограниченный фокиан. Не реализованы: спин-неограниченные "
         "(GHF) вращения, анализ в оптимизации и частотах; в прямом SCF мнимые "
         "каналы не считаются.",
     ),
@@ -465,7 +479,8 @@ def default_registry() -> CapabilityRegistry:
                 "Гессиан численный: центральные разности аналитического градиента, "
                 "а не аналитические вторые производные.",
                 "Доступны только методы с аналитическим градиентом: RHF, UHF, "
-                "ROHF, RKS и UKS (SVWN, PBE, BLYP, PBE0, B3LYP).",
+                "ROHF, RKS и UKS (все реализованные функционалы, включая "
+                "meta-GGA и гибриды с разделением диапазона).",
                 "Стоимость — 6N расчётов градиента, поэтому задача заметно дороже одноточечной.",
             )
         capabilities.append(
