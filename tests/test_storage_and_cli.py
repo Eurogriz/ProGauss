@@ -392,8 +392,7 @@ def test_cli_plan_shows_the_coordinate_system_in_expert_mode(
 ) -> None:
     """Экспертный режим показывает систему координат — молчаливого выбора нет.
 
-    Дефолт спецификации — избыточные внутренние координаты, которых в ядре
-    нет; CLI подставляет декартовы и обязан это показать (§8 ТЗ).
+    CLI выбирает избыточные внутренние координаты и обязан это показать (§8 ТЗ).
     """
     code = main(
         [
@@ -412,7 +411,7 @@ def test_cli_plan_shows_the_coordinate_system_in_expert_mode(
         ]
     )
     assert code == 0
-    assert "Система координат оптимизации: cartesian" in capsys.readouterr().out
+    assert "Система координат оптимизации: redundant_internal" in capsys.readouterr().out
 
 
 def test_cli_job_lifecycle(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

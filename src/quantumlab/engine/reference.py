@@ -27,6 +27,7 @@ zero-затухание) с аналитическим вкладом в гра�
 
 from __future__ import annotations
 
+import math
 import os
 import platform
 import socket
@@ -50,6 +51,7 @@ from quantumlab.domain.result import (
 )
 from quantumlab.domain.spec import (
     CalculationSpec,
+    CoordinateConstraint,
     DispersionCorrection,
     OptimizationSpec,
     ResourceSpec,
@@ -70,6 +72,7 @@ from quantumlab.engine.checkpoint import (
     write_optimization_checkpoint,
     write_scf_checkpoint,
 )
+from quantumlab.engine.constants import angstrom_to_bohr
 from quantumlab.engine.contracts import (
     EngineRequest,
     ExchangeCorrelationFunctional,
@@ -95,6 +98,7 @@ from quantumlab.engine.gradients import (
     uks_gradient,
 )
 from quantumlab.engine.integrals import DirectEri
+from quantumlab.engine.optimizer import Constraint as EngineConstraint
 from quantumlab.engine.optimizer import OptimizationSettings, OptimizerState, optimize_geometry
 from quantumlab.engine.quadrature import QuadratureGrid, build_grid
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
@@ -124,6 +128,7 @@ from quantumlab.engine.vibrations import numerical_hessian, vibrational_analysis
 from quantumlab.errors import (
     CombinationUnavailableError,
     JobCheckpointInvalidError,
+    MethodNotAvailableError,
     ScfNotConvergedError,
 )
 from quantumlab.version import __version__
@@ -1339,6 +1344,10 @@ class ReferenceEngine:
         self._registry.assert_available(f"optimizer:hessian_update:{optimization.hessian_update}")
         if optimization.constraints:
             self._registry.assert_available("optimizer:constraints")
+            if optimization.coordinates != "redundant_internal":
+                # Ограничение координаты проецируется только во внутренних
+                # координатах; в декартовых оно было бы молча проигнорировано.
+                raise MethodNotAvailableError("optimizer:constraints:cartesian")
 
     def _assert_spin_combination_is_honoured(self, spec: CalculationSpec) -> None:
         """Отклоняет сочетания, где спин реализован, а их комбинация с задачей — нет.
@@ -1719,10 +1728,29 @@ def _scf_settings(spec: CalculationSpec) -> ScfSettings:
     )
 
 
+def _constraint_value(constraint: CoordinateConstraint) -> float | None:
+    """Целевое значение ограничения в единицах движка (бор, радианы).
+
+    В спецификации длина — в ангстремах, углы — в градусах. ``frozen`` без
+    значения означает «удерживать исходное» (``None``).
+    """
+    if constraint.value is None:
+        return None
+    if len(constraint.atoms) == 2:
+        return angstrom_to_bohr(constraint.value)
+    return math.radians(constraint.value)
+
+
 def _optimization_settings(spec: CalculationSpec) -> OptimizationSettings:
     """Переносит параметры оптимизации из спецификации в настройки решателя."""
     options = spec.optimization
+    constraints = tuple(
+        EngineConstraint(atoms=item.atoms, value=_constraint_value(item))
+        for item in options.constraints
+    )
     return OptimizationSettings(
+        coordinates=options.coordinates,
+        constraints=constraints,
         max_steps=options.max_steps,
         max_force=options.max_force,
         rms_force=options.rms_force,

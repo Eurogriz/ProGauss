@@ -15,11 +15,9 @@
 * **Где деградирует.** BFGS плохо ведёт себя вдали от минимума и на
   седловых точках; плотный ``H`` не масштабируется на тысячи атомов
   (нужны L-BFGS или внутренние координаты).
-* **Ограничение этого среза.** Только декартовы координаты. Избыточные
-  внутренние координаты (``redundant_internal``) сходятся за меньшее число
-  шагов, но требуют построения матрицы Вильсона и её псевдообращения —
-  отдельная задача. Запрос на них отклоняется явно, а не подменяется
-  декартовыми молча.
+* **Внутренние координаты.** Избыточные внутренние координаты и ограничения
+  реализованы отдельно (:mod:`quantumlab.engine.redundant_optimizer`);
+  этот модуль остаётся декартовым методом и диспетчером.
 
 Надёжность
 ----------
@@ -60,8 +58,28 @@ _MAX_STEP_HALVINGS = 5
 
 
 @dataclass(frozen=True)
+class Constraint:
+    """Ограничение на внутреннюю координату (индексы атомов — с нуля).
+
+    ``atoms``: 2 — длина связи (бор), 3 — угол (радианы), 4 — двугранный угол
+    (радианы). ``value`` — целевое значение в тех же единицах; ``None`` —
+    удерживать то значение, которое координата имеет в исходной геометрии.
+    """
+
+    atoms: tuple[int, ...]
+    value: float | None = None
+
+
+@dataclass(frozen=True)
 class OptimizationSettings:
-    """Параметры оптимизации геометрии."""
+    """Параметры оптимизации геометрии.
+
+    ``coordinates``: ``cartesian`` — квазиньютоновский метод в декартовых
+    координатах (этот модуль); ``redundant_internal`` — избыточные внутренние
+    координаты с проекцией ограничений
+    (:mod:`quantumlab.engine.redundant_optimizer`). ``constraints`` допустимы
+    только во втором случае.
+    """
 
     max_steps: int = 100
     max_force: float = 0.00045
@@ -70,6 +88,8 @@ class OptimizationSettings:
     rms_displacement: float = 0.0012
     trust_radius: float = 0.3
     frozen_atoms: tuple[int, ...] = ()
+    coordinates: str = "cartesian"
+    constraints: tuple[Constraint, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -213,6 +233,18 @@ def optimize_geometry(
     атомов, заряд и кратность.
     """
     options = settings or OptimizationSettings()
+    if options.coordinates == "redundant_internal":
+        from quantumlab.engine.redundant_optimizer import optimize_redundant
+
+        return optimize_redundant(
+            molecule, energy_and_gradient, options, resume=resume, on_state=on_state
+        )
+    if options.coordinates != "cartesian":
+        msg = f"Система координат {options.coordinates!r} не реализована"
+        raise ValueError(msg)
+    if options.constraints:
+        msg = "Ограничения координат требуют redundant_internal"
+        raise ValueError(msg)
     frozen = tuple(options.frozen_atoms)
     for index in frozen:
         if not 0 <= index < molecule.n_atoms:
@@ -237,6 +269,14 @@ def optimize_geometry(
     if resume is not None:
         if resume.coordinates.shape != coordinates.shape or resume.hessian.shape != hessian.shape:
             msg = "Состояние оптимизатора не соответствует размеру задачи"
+            raise ValueError(msg)
+        if resume.previous_step is not None and resume.previous_step.shape != (n_free,):
+            msg = "Шаг в контрольной точке не соответствует размеру задачи"
+            raise ValueError(msg)
+        if resume.previous_gradient is not None and resume.previous_gradient.shape != (
+            coordinates.shape
+        ):
+            msg = "Градиент в контрольной точке не соответствует размеру задачи"
             raise ValueError(msg)
         coordinates = resume.coordinates.copy()
         structure = _unflatten(molecule, coordinates)

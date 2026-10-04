@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QuantumLab</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <h1 id="title">QuantumLab</h1>
+      <span id="subtitle" class="muted"></span>
+      <span class="spacer"></span>
+      <span id="health" class="badge"></span>
+      <label class="muted"><span data-i18n="gui.language">Язык</span>
+        <select id="locale">
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+        </select>
+      </label>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="work" class="active" data-i18n="gui.tabWork">Расчёты</button>
+      <button data-tab="capabilities" data-i18n="gui.tabCapabilities">Возможности</button>
+    </nav>
+
+    <div id="banner" class="banner" hidden></div>
+
+    <main id="tab-work" class="tab">
+      <section class="panel" id="projects-panel">
+        <h2 data-i18n="gui.projects">Проекты</h2>
+        <ul id="project-list" class="list"></ul>
+        <form id="project-form" class="row">
+          <input id="project-name" required maxlength="200" data-i18n-placeholder="gui.projectName" placeholder="Название проекта">
+          <button type="submit" data-i18n="gui.create">Создать</button>
+        </form>
+      </section>
+
+      <section class="panel" id="molecules-panel">
+        <h2 data-i18n="gui.molecules">Структуры</h2>
+        <ul id="molecule-list" class="list"></ul>
+        <form id="molecule-form" class="col">
+          <input id="molecule-name" data-i18n-placeholder="gui.moleculeName" placeholder="Название структуры">
+          <textarea id="molecule-xyz" rows="6" required spellcheck="false" data-i18n-placeholder="gui.xyzContent" placeholder="XYZ: число атомов, комментарий, строки «символ x y z»"></textarea>
+          <div class="row">
+            <label><span data-i18n="gui.charge">Заряд</span> <input id="molecule-charge" type="number" value="0" step="1"></label>
+            <label><span data-i18n="gui.multiplicity">Мультиплетность</span> <input id="molecule-multiplicity" type="number" value="1" min="1" step="1"></label>
+          </div>
+          <div class="row">
+            <button type="submit" data-i18n="gui.save">Сохранить</button>
+            <button type="button" id="example-water" class="secondary" data-i18n="gui.exampleWater">Пример: вода</button>
+          </div>
+        </form>
+        <svg id="preview" viewBox="-60 -60 120 120" aria-label="структура"></svg>
+      </section>
+
+      <section class="panel" id="calc-panel">
+        <h2 data-i18n="gui.calculation">Расчёт</h2>
+        <div class="col">
+          <label><span data-i18n="gui.task">Задача</span>
+            <select id="task"></select></label>
+          <label><span data-i18n="gui.profile">Профиль точности</span>
+            <select id="profile"></select></label>
+          <div class="row">
+            <button id="plan-button" type="button" data-i18n="gui.plan">Подобрать параметры</button>
+            <button id="submit-button" type="button" disabled data-i18n="gui.submit">Поставить в очередь</button>
+          </div>
+        </div>
+        <div id="plan-result"></div>
+      </section>
+
+      <section class="panel wide" id="jobs-panel">
+        <h2 data-i18n="gui.jobs">Задания</h2>
+        <table class="jobs">
+          <thead><tr>
+            <th data-i18n="gui.columnName">Название</th>
+            <th data-i18n="gui.columnStatus">Статус</th>
+            <th data-i18n="gui.columnPriority">Приоритет</th>
+            <th data-i18n="gui.columnCreated">Создано</th>
+          </tr></thead>
+          <tbody id="job-rows"></tbody>
+        </table>
+        <p id="no-jobs" class="muted" data-i18n="gui.noJobs">Заданий пока нет</p>
+        <div id="job-details"></div>
+      </section>
+    </main>
+
+    <main id="tab-capabilities" class="tab" hidden>
+      <section class="panel wide">
+        <h2 data-i18n="gui.capabilities">Что реально реализовано</h2>
+        <div id="capability-list"></div>
+      </section>
+    </main>
+  </div>
+  <script src="app.js" defer></script>
+</body>
+</html>

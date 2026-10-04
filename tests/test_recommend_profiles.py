@@ -327,15 +327,15 @@ def test_every_decision_is_localized_in_both_languages(water: Molecule) -> None:
 def test_research_profile_tightens_numerics_and_damps(water: Molecule) -> None:
     """Исследовательский профиль ужесточает численные параметры.
 
-    Анализ устойчивости реализован только для HF в одной точке. Профиль выбирает
-    DFT, поэтому ``stability_analysis`` выключен — иначе план отклонялся бы
-    движком, — а причина записана отдельным решением.
+    Анализ устойчивости реализован для HF и DFT (без meta-GGA) в одной точке,
+    поэтому исследовательский профиль DFT-одноточки его включает — движок такой
+    план принимает.
     """
     resolution = resolve_profile(PrecisionProfile.RESEARCH, task=Task.SINGLE_POINT, molecule=water)
     assert resolution.spec.method is not None
     assert resolution.spec.method.theory is TheoryFamily.DFT
-    assert resolution.spec.scf.stability_analysis is False
-    assert any(decision.parameter == "stability_analysis" for decision in resolution.decisions)
+    assert resolution.spec.scf.stability_analysis is True
+    assert not any(decision.parameter == "stability_analysis" for decision in resolution.decisions)
     assert resolution.spec.scf.damping > 0.0
     assert resolution.spec.scf.energy_threshold <= 1e-10
 
@@ -375,7 +375,7 @@ def test_unavailable_scf_option_is_reported_as_a_decision(water: Molecule) -> No
     нечто иное, чем написано (§8 ТЗ).
     """
     resolution = resolve_profile(
-        PrecisionProfile.HIGH_ACCURACY, task=Task.SINGLE_POINT, molecule=water
+        PrecisionProfile.HIGH_ACCURACY, task=Task.OPTIMIZATION, molecule=water
     )
     assert resolution.spec.scf.stability_analysis is False
     rendered = next(

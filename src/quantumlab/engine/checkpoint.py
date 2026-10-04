@@ -477,7 +477,12 @@ def read_optimization_checkpoint(payload: str, *, molecule: Molecule) -> Optimiz
     if float(np.max(np.abs(hessian - hessian.T))) > 1e-8:
         msg = "Гессиан в контрольной точке несимметричен: файл повреждён"
         raise CheckpointError(msg)
-    if previous_gradient is not None and previous_gradient.shape != (n_cartesian,):
+    # Предыдущий градиент — декартов (n_cartesian) либо во внутренних координатах
+    # (размер гессиана); какой именно, проверяет оптимизатор по своей системе координат.
+    if previous_gradient is not None and previous_gradient.shape not in (
+        (n_cartesian,),
+        (hessian.shape[0],),
+    ):
         msg = "Размер предыдущего градиента не соответствует задаче"
         raise CheckpointError(msg)
     if previous_step is not None and previous_step.shape != (hessian.shape[0],):

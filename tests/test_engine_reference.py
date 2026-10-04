@@ -608,17 +608,17 @@ def test_frozen_atom_survives_the_engine_round_trip() -> None:
     assert result.final_molecule.atoms[0].position == start.atoms[0].position
 
 
-def test_redundant_internal_coordinates_are_rejected_honestly() -> None:
-    """Дефолт спецификации — избыточные внутренние координаты, которых нет.
+def test_internal_coordinates_without_redundancy_are_rejected_honestly() -> None:
+    """Неизбыточные внутренние координаты (Z-матрица) не реализованы.
 
-    Подменять их декартовыми молча нельзя: это другая система координат и
-    другая скорость сходимости, пользователь должен знать, что именно считается.
+    Подменять их другой системой молча нельзя: это другая скорость сходимости,
+    пользователь должен знать, что именно считается.
     """
     engine = ReferenceEngine()
     spec = CalculationSpec(
         task=Task.OPTIMIZATION,
         method=MethodSpec(theory=TheoryFamily.HF, basis="sto-3g"),
-        optimization=OptimizationSpec(coordinates="redundant_internal"),
+        optimization=OptimizationSpec(coordinates="internal"),
     )
     with pytest.raises(MethodNotAvailableError):
         engine.run(EngineRequest(job_id="job-opt", molecule=_h2(0.95), spec=spec))
@@ -664,12 +664,19 @@ def test_unimplemented_scf_strategies_are_rejected_not_silently_skipped() -> Non
     for strategies in (("diis", "soscf"), ("soscf", "damping", "level_shift")):
         with pytest.raises(MethodNotAvailableError):
             engine.assert_supported(_option_spec(scf=ScfSpec(fallback_strategies=strategies)))
-    # Анализ устойчивости реализован для HF в одной точке; для DFT — отказ.
+    # Анализ устойчивости реализован для HF и DFT (LDA/GGA/гибриды) в одной
+    # точке; для meta-GGA ядро ответа ``f_xc`` по τ в гессиане нет — отказ.
     assert engine.assert_supported(_option_spec(scf=ScfSpec(stability_analysis=True)))
+    assert engine.assert_supported(
+        _option_spec(
+            method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="pbe"),
+            scf=ScfSpec(stability_analysis=True),
+        )
+    )
     with pytest.raises(CombinationUnavailableError):
         engine.assert_supported(
             _option_spec(
-                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="pbe"),
+                method=MethodSpec(theory=TheoryFamily.DFT, basis="sto-3g", functional="tpssh"),
                 scf=ScfSpec(stability_analysis=True),
             )
         )

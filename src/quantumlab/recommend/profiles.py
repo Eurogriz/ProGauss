@@ -32,6 +32,7 @@ from quantumlab.domain.spec import (
     Task,
     TheoryFamily,
 )
+from quantumlab.engine.functional import get_functional
 from quantumlab.engine.registry import CapabilityRegistry, default_registry
 from quantumlab.i18n import DEFAULT_LOCALE, t
 
@@ -50,9 +51,10 @@ _BASIS_FUNCTIONS_PER_ATOM: Final[dict[str, int]] = {
 #: Порог «крупная молекула», после которого точность обменивается на время.
 _LARGE_SYSTEM_ATOMS: Final = 80
 
-#: Единственная реализованная система координат оптимизации. Реестр
-#: возможностей сообщает о том же (``coordinates:cartesian`` = partial).
-_COORDINATES: Final = "cartesian"
+#: Система координат оптимизации по умолчанию: избыточные внутренние
+#: (``coordinates:redundant_internal``), сходятся за меньшее число шагов, чем
+#: декартовы. Декартовы остаются доступными явным выбором в спецификации.
+_COORDINATES: Final = "redundant_internal"
 
 #: Чем заменить функционал, которого в ядре нет: каждый шаг — на ближайший
 #: реализованный того же или соседнего уровня точности.
@@ -282,7 +284,9 @@ def resolve_profile(
         # объяснения её отсутствия была бы дублем, а не информацией.
         decisions.append(Decision("dispersion", dispersion.value, "profile.decision.dispersion"))
 
-    grid_preset, scf, stability_omitted = _numerics(profile, task, is_large, capabilities, theory)
+    grid_preset, scf, stability_omitted = _numerics(
+        profile, task, is_large, capabilities, theory, functional
+    )
     if stability_omitted:
         decisions.append(
             Decision(
@@ -327,19 +331,18 @@ def resolve_profile(
     )
 
     if task in (Task.OPTIMIZATION, Task.TS_OPTIMIZATION):
-        # Координаты оптимизации выбираются явно и с объяснением: дефолт
-        # спецификации — избыточные внутренние координаты, которых в ядре пока
-        # нет. Молча подставить декартовы нельзя (§8 ТЗ): у них другая скорость
-        # сходимости, и пользователь должен это видеть.
+        # Координаты оптимизации выбираются явно и с объяснением (§8 ТЗ): у
+        # декартовых и внутренних разная скорость сходимости, пользователь
+        # должен видеть, что именно считается.
         decisions.append(
             Decision(
                 "coordinates",
                 _COORDINATES,
                 "profile.decision.coordinates",
                 detail=(
-                    "избыточные внутренние координаты ещё не реализованы, "
-                    "поэтому расчёт идёт в декартовых — сходимость может "
-                    "потребовать больше шагов"
+                    "избыточные внутренние координаты: набор связей, углов и "
+                    "двугранных углов по исходной геометрии; поддерживают "
+                    "ограничения и обычно сходятся быстрее декартовых"
                 ),
             )
         )
@@ -392,6 +395,7 @@ def _numerics(
     is_large: bool,
     capabilities: CapabilityRegistry,
     theory: TheoryFamily,
+    functional: str | None,
 ) -> tuple[GridPreset, ScfSpec, bool]:
     """Сетка и пороги SCF.
 
@@ -427,12 +431,16 @@ def _numerics(
     # «подобранные параметры» неработоспособны. Поэтому сверяемся с реестром,
     # а пропуск объясняем отдельным решением (§8 ТЗ).
     wants_stability = profile in (PrecisionProfile.HIGH_ACCURACY, PrecisionProfile.RESEARCH)
-    # Анализ реализован для HF и только в одной точке: для DFT, оптимизации и
-    # частот запрос был бы отклонён движком, поэтому подборщик его не просит.
+    # Анализ реализован для HF и DFT (LDA/GGA/гибриды) и только в одной точке:
+    # для meta-GGA, оптимизации и частот запрос был бы отклонён движком,
+    # поэтому подборщик его не просит.
     has_stability = (
         capabilities.is_available("scf:stability_analysis")
-        and theory is TheoryFamily.HF
         and task is Task.SINGLE_POINT
+        and (
+            theory is TheoryFamily.HF
+            or (functional is not None and not get_functional(functional).requires_tau)
+        )
     )
     scf = ScfSpec(
         max_iterations=80 if profile is PrecisionProfile.SCREENING else 128,

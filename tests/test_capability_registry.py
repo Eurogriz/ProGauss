@@ -184,6 +184,7 @@ def test_implemented_capabilities_match_the_verified_surface(
         "dispersion:none",
         "format:xyz",
         "job:retry",
+        "optimizer:constraints",
         "optimizer:frozen_atoms",
         "optimizer:hessian_update:bfgs",
         "scf:damping",
@@ -192,10 +193,11 @@ def test_implemented_capabilities_match_the_verified_surface(
         "task:optimization",
         "task:single_point",
     ]
-    # Оптимизация реализована, но только в декартовых координатах — поэтому
-    # coordinates:cartesian partial, а внутренние координаты не реализованы.
+    # Реализованы декартовы и избыточные внутренние координаты (обе partial);
+    # неизбыточные внутренние (Z-матрица) — нет.
     assert registry.get("coordinates:cartesian").availability is Availability.PARTIAL
-    assert not registry.is_available("coordinates:redundant_internal")
+    assert registry.get("coordinates:redundant_internal").availability is Availability.PARTIAL
+    assert not registry.is_available("coordinates:internal")
     # Частоты доступны, но partial: гессиан численный, а не аналитический.
     assert registry.get("task:frequencies").availability is Availability.PARTIAL
     assert registry.is_available("task:frequencies")
@@ -306,4 +308,4 @@ def test_scf_and_optimizer_options_are_declared_not_just_unknown() -> None:
     assert registry.get("scf:diis").availability is Availability.IMPLEMENTED
     assert registry.get("scf:ediis").availability is Availability.PARTIAL
     assert registry.get("scf:direct").availability is Availability.PARTIAL
-    assert registry.get("optimizer:constraints").availability is Availability.NOT_IMPLEMENTED
+    assert registry.get("optimizer:constraints").availability is Availability.IMPLEMENTED

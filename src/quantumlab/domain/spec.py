@@ -222,7 +222,25 @@ class OptimizationSpec(BaseModel):
     trust_radius: float = Field(default=0.3, gt=0.0, description="Bohr")
     hessian_update: str = Field(default="bfgs", pattern="^(bfgs|bofill|none)$")
     frozen_atoms: tuple[int, ...] = ()
+    #: Ограничения координат (индексы атомов — с нуля). Значение: длина связи — в
+    #: ангстремах, валентный и двугранный углы — в градусах; ``frozen=True`` без
+    #: значения удерживает исходную величину. Поддерживаются только в системе
+    #: координат ``redundant_internal``.
     constraints: tuple[CoordinateConstraint, ...] = ()
+
+    @model_validator(mode="after")
+    def _constraints_are_definite(self) -> OptimizationSpec:
+        for constraint in self.constraints:
+            if constraint.value is None and not constraint.frozen:
+                msg = (
+                    "Ограничение для оптимизации требует значение (value) "
+                    "или frozen=true: иначе непонятно, что удерживать"
+                )
+                raise ValueError(msg)
+            if constraint.value is not None and constraint.frozen:
+                msg = "Ограничение не может одновременно иметь value и frozen=true"
+                raise ValueError(msg)
+        return self
 
 
 class ScanSpec(BaseModel):

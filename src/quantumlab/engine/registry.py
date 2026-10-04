@@ -243,13 +243,31 @@ _SPINS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
     ),
 )
 
-#: Системы координат оптимизации. Реализованы только декартовы: избыточные
-#: внутренние требуют матрицы Вильсона и её псевдообращения — отдельная задача.
+#: Системы координат оптимизации. Декартовы и избыточные внутренние
+#: (``redundant_internal``: примитивы по связности, матрица Вильсона,
+#: проекция ограничений); неизбыточные ``internal`` (Z-матрица) не реализованы.
 _COORDINATES: tuple[tuple[str, Availability], ...] = (
     ("cartesian", Availability.PARTIAL),
     ("internal", Availability.NOT_IMPLEMENTED),
-    ("redundant_internal", Availability.NOT_IMPLEMENTED),
+    ("redundant_internal", Availability.PARTIAL),
 )
+
+_COORDINATE_LIMITATIONS: dict[str, tuple[str, ...]] = {
+    "cartesian": (
+        "Сходимость медленнее, чем в избыточных внутренних координатах: шесть "
+        "нулевых мод (поступательные и вращательные) ухудшают приближение гессиана.",
+        "Ограничения координат (constraints) в декартовых координатах не "
+        "поддерживаются; замороженные атомы — поддерживаются.",
+    ),
+    "redundant_internal": (
+        "Набор примитивов (связи, углы, двугранные и линейные изгибы) строится "
+        "один раз по исходной геометрии и не пересматривается: разрыв связи или "
+        "прохождение угла через 180° в ходе оптимизации им не отслеживается.",
+        "Ограничения: длина связи (Å), валентный угол в интервале 0–175° и "
+        "двугранный угол (градусы); замороженные атомы вводятся декартовыми "
+        "ограничениями. Начальный гессиан — модель Линдха, обновление — BFGS.",
+    ),
+}
 
 _BACKENDS: tuple[tuple[str, Availability], ...] = (
     ("reference-cpu", Availability.IMPLEMENTED),
@@ -396,7 +414,12 @@ _JOB_OPTIONS: tuple[tuple[str, Availability, tuple[str, ...]], ...] = (
 _OPTIMIZER_OPTIONS: tuple[tuple[str, bool, str], ...] = (
     ("frozen_atoms", True, ""),
     ("hessian_update:bfgs", True, ""),
-    ("constraints", False, "Ограничения координат не реализованы."),
+    (
+        "constraints",
+        True,
+        "Только в системе координат redundant_internal: длина связи (Å), "
+        "валентный и двугранный углы (градусы), либо удержание исходного значения.",
+    ),
     (
         "hessian_update:bofill",
         False,
@@ -583,15 +606,7 @@ def default_registry() -> CapabilityRegistry:
                 name=name,
                 availability=availability,
                 since_version=__version__ if availability.is_usable else None,
-                limitations=(
-                    (
-                        "Сходимость медленнее, чем в избыточных внутренних "
-                        "координатах: шесть нулевых мод (поступательные и "
-                        "вращательные) ухудшают приближение гессиана.",
-                    )
-                    if name == "cartesian"
-                    else ()
-                ),
+                limitations=_COORDINATE_LIMITATIONS.get(name, ()),
             )
         )
 
@@ -712,7 +727,7 @@ def default_registry() -> CapabilityRegistry:
                     Availability.IMPLEMENTED if available else Availability.NOT_IMPLEMENTED
                 ),
                 since_version=__version__ if available else None,
-                limitations=() if available else (note,),
+                limitations=(note,) if note else (),
             )
         )
 

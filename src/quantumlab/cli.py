@@ -45,7 +45,8 @@ from quantumlab.errors import JobNotResumableError, QuantumLabError
 from quantumlab.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, t
 from quantumlab.jobs.state_machine import JobStatus
 from quantumlab.recommend.profiles import HardwareContext, Resolution, resolve_profile
-from quantumlab.storage.local_jobs import LocalJobStore
+from quantumlab.storage.base import JobStore
+from quantumlab.storage.factory import open_catalog, open_job_store
 from quantumlab.version import __version__, api_version
 
 _PROFILE_BY_CLI_NAME: dict[str, PrecisionProfile] = {
@@ -57,9 +58,9 @@ _PROFILE_BY_CLI_NAME: dict[str, PrecisionProfile] = {
     "research": PrecisionProfile.RESEARCH,
 }
 
-#: Система координат оптимизации в экспертном режиме CLI: единственная
-#: реализованная. Совпадает с выбором автоподбора (``recommend/profiles.py``).
-_CLI_COORDINATES = "cartesian"
+#: Система координат оптимизации в экспертном режиме CLI: избыточные внутренние.
+#: Совпадает с выбором автоподбора (``recommend/profiles.py``).
+_CLI_COORDINATES = "redundant_internal"
 
 _TASK_BY_CLI_NAME: dict[str, Task] = {
     "energy": Task.SINGLE_POINT,
@@ -92,6 +93,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path.home() / ".quantumlab",
         help="каталог локального хранилища заданий",
+    )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "DSN PostgreSQL (postgresql://…): задания хранятся в базе вместо каталога; "
+            "по умолчанию — переменная QUANTUMLAB_DATABASE_URL"
+        ),
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -143,6 +152,24 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("spherical", "cartesian"),
         default="spherical",
         help="угловая схема, в которой определён базис (для Gaussian94)",
+    )
+
+    serve_parser = subparsers.add_parser(
+        "serve", help="поднять REST API и веб-интерфейс (откройте /ui/ в браузере)"
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="адрес прослушивания")
+    serve_parser.add_argument("--port", type=int, default=8000, help="порт")
+    serve_parser.add_argument(
+        "--worker",
+        action="store_true",
+        help="выполнять очередь заданий внутри процесса сервера",
+    )
+
+    worker_parser = subparsers.add_parser(
+        "worker", help="выполнять очередь заданий (для PostgreSQL можно запускать несколько)"
+    )
+    worker_parser.add_argument(
+        "--poll", type=float, default=1.0, help="пауза между опросами пустой очереди, с"
     )
 
     job_parser = subparsers.add_parser("job", help="управление заданиями")
@@ -281,6 +308,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _command_plan(args, registry, locale)
         if args.command == "run":
             return _command_run(args, registry, locale)
+        if args.command == "serve":
+            return _command_serve(args, locale)
+        if args.command == "worker":
+            return _command_worker(args, locale)
         if args.command == "job":
             return _command_job(args, registry, locale)
     except QuantumLabError as error:
@@ -414,7 +445,7 @@ def _command_plan(args: argparse.Namespace, registry: CapabilityRegistry, locale
 
 
 def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale: str) -> int:
-    store = LocalJobStore(args.data_dir)
+    store = open_job_store(args.data_dir, args.database_url)
     molecule, spec, _ = _resolution(args, registry)
 
     job = Job(
@@ -422,12 +453,12 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
         project_id=args.project,
         owner=args.owner,
         spec=spec,
-        molecule_uri=f"file://{store.molecule_path('pending')}",
+        molecule_uri=store.molecule_locator("pending"),
         molecule_hash=molecule.structure_hash(),
         resources=spec.resources,
     )
     store.store_molecule(job.id, molecule.to_xyz())
-    job = job.model_copy(update={"molecule_uri": f"file://{store.molecule_path(job.id)}"})
+    job = job.model_copy(update={"molecule_uri": store.molecule_locator(job.id)})
     store.save(job)
     print(t("cli.job.created", locale, id=job.id, name=job.name))
 
@@ -436,9 +467,7 @@ def _command_run(args: argparse.Namespace, registry: CapabilityRegistry, locale:
     return _execute_job(store, job.id, registry, locale)
 
 
-def _execute_job(
-    store: LocalJobStore, job_id: str, registry: CapabilityRegistry, locale: str
-) -> int:
+def _execute_job(store: JobStore, job_id: str, registry: CapabilityRegistry, locale: str) -> int:
     """Исполняет задание и печатает итог.
 
     Общий путь для ``run``, ``job retry`` и ``job resume``. Держать три копии
@@ -453,9 +482,7 @@ def _execute_job(
     продолжение.
     """
     job = store.load(job_id)
-    molecule = Molecule.from_xyz(
-        store.molecule_path(job_id).read_text(encoding="utf-8"), name=job.name
-    )
+    molecule = Molecule.from_xyz(store.load_molecule(job_id), name=job.name)
     spec = job.spec
     engine = ReferenceEngine(registry)
 
@@ -524,14 +551,14 @@ def _execute_job(
         print(f"{t('cli.run.failed', locale)}: {explanation}", file=sys.stderr)
         return 1
 
-    result_path = store.save_result(job.id, result.model_dump_json(indent=2))
+    result_path = str(store.save_result(job.id, result.model_dump_json(indent=2)))
     if result.final_molecule is not None:
-        geometry_path = store.save_geometry(job.id, result.final_molecule.to_xyz())
+        geometry_path = str(store.save_geometry(job.id, result.final_molecule.to_xyz()))
         geometry_note: str | None = t("cli.run.geometry_saved", locale, path=geometry_path)
     else:
         geometry_note = None
     final = JobStatus.COMPLETED_WITH_WARNINGS if result.warnings else JobStatus.COMPLETED
-    uri = f"file://{result_path}"
+    uri = store.result_locator(job.id)
     store.update(job.id, lambda item: _mark_finished(item, uri, final))
 
     key = "cli.run.iterations" if result.converged else "cli.run.not_converged"
@@ -599,8 +626,38 @@ def _mark_finished(job: Job, result_uri: str, status: JobStatus) -> None:
     job.transition_to(status, actor="cli")
 
 
+def _command_serve(args: argparse.Namespace, locale: str) -> int:
+    """Поднимает REST API и веб-интерфейс."""
+    import uvicorn
+
+    from quantumlab.server.app import create_app
+
+    app = create_app(args.data_dir, args.database_url, embedded_worker=args.worker or None)
+    print(t("cli.serve.starting", locale, host=args.host, port=args.port))
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+def _command_worker(args: argparse.Namespace, locale: str) -> int:
+    """Выполняет очередь заданий до прерывания (Ctrl+C)."""
+    import threading
+
+    from quantumlab.server.worker import serve_forever
+
+    jobs = open_job_store(Path(args.data_dir) / "jobs", args.database_url)
+    catalog = open_catalog(args.data_dir, args.database_url)
+    stop = threading.Event()
+    print(t("cli.worker.starting", locale, store=jobs.describe()))
+    try:
+        serve_forever(jobs, catalog, stop, poll_seconds=args.poll)
+    except KeyboardInterrupt:
+        stop.set()
+    print(t("cli.worker.stopped", locale))
+    return 0
+
+
 def _command_job(args: argparse.Namespace, registry: CapabilityRegistry, locale: str) -> int:
-    store = LocalJobStore(args.data_dir)
+    store = open_job_store(args.data_dir, args.database_url)
     command: str = args.job_command
 
     if command == "list":
@@ -661,7 +718,7 @@ def _command_job(args: argparse.Namespace, registry: CapabilityRegistry, locale:
             # исполняет расчёты синхронно. Поэтому очередь обрабатывается здесь.
             return _execute_job(store, job.id, registry, locale)
     except LookupError:
-        print(t("cli.job.not_found", locale, id=job_id, store=str(store.root)), file=sys.stderr)
+        print(t("cli.job.not_found", locale, id=job_id, store=store.describe()), file=sys.stderr)
         return 2
     except QuantumLabError as error:
         print(f"{t('cli.error.header', locale)}: {error.explain(locale)}", file=sys.stderr)

@@ -74,6 +74,33 @@ class LocalJobStore:
         """Путь чекпоинта: зависит от попытки, поэтому повторы не затирают его."""
         return self.checkpoints_dir / f"{job_id}-{attempt}.json"
 
+    # -- интерфейс JobStore (см. storage/base.py) --------------------------- #
+    def describe(self) -> str:
+        """Каталог хранилища."""
+        return str(self.root)
+
+    def molecule_locator(self, job_id: str) -> str:
+        """Локатор структуры: ``file://``-путь."""
+        return f"file://{self.molecule_path(job_id)}"
+
+    def load_molecule(self, job_id: str) -> str:
+        """Текст XYZ структуры задания."""
+        return self.molecule_path(job_id).read_text(encoding="utf-8")
+
+    def result_locator(self, job_id: str) -> str:
+        """Локатор результата: ``file://``-путь."""
+        return f"file://{self.result_path(job_id)}"
+
+    def load_result(self, job_id: str) -> str | None:
+        """JSON результата либо ``None``."""
+        path = self.result_path(job_id)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def load_geometry(self, job_id: str) -> str | None:
+        """Итоговая геометрия либо ``None``."""
+        path = self.geometry_path(job_id)
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
     # -- операции ------------------------------------------------------------ #
     def save(self, job: Job) -> Path:
         """Атомарно сохраняет задание."""

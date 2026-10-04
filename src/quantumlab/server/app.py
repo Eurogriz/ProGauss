@@ -9,13 +9,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
+import os
+import threading
+from collections.abc import AsyncIterator, Callable, Coroutine
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any, cast
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from quantumlab.domain.job import Job
@@ -26,8 +30,9 @@ from quantumlab.errors import CatalogEntryNotFoundError, QuantumLabError
 from quantumlab.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, get_catalog, t
 from quantumlab.jobs.state_machine import JobStatus
 from quantumlab.recommend.profiles import HardwareContext, resolve_profile
-from quantumlab.storage.local_catalog import LocalCatalog, MoleculeRecord
-from quantumlab.storage.local_jobs import LocalJobStore
+from quantumlab.storage.base import Catalog, JobStore
+from quantumlab.storage.factory import open_catalog, open_job_store
+from quantumlab.storage.local_catalog import MoleculeRecord
 from quantumlab.version import __version__
 
 #: JSON-значение — то, что может лежать в теле ответа. Алиас рекурсивный и
@@ -207,13 +212,17 @@ class JobCreateRequest(ApiModel):
 # Зависимости
 # --------------------------------------------------------------------------- #
 class Services:
-    """Общее состояние приложения: хранилища, реестр, ядро."""
+    """Общее состояние приложения: хранилища, реестр, ядро.
 
-    def __init__(self, data_dir: Path) -> None:
-        """Создаёт сервисы поверх каталога данных ``data_dir``."""
+    Хранилище — файловое (``data_dir``) или PostgreSQL (``database_url`` либо
+    переменная ``QUANTUMLAB_DATABASE_URL``).
+    """
+
+    def __init__(self, data_dir: Path, database_url: str | None = None) -> None:
+        """Создаёт сервисы поверх каталога данных ``data_dir`` или базы данных."""
         self.data_dir = data_dir
-        self.catalog = LocalCatalog(data_dir / "catalog")
-        self.jobs = LocalJobStore(data_dir / "jobs")
+        self.catalog: Catalog = open_catalog(data_dir, database_url)
+        self.jobs: JobStore = open_job_store(data_dir / "jobs", database_url)
         self.registry = default_registry()
 
 
@@ -229,14 +238,63 @@ ServicesDep = Annotated[Services, Depends(get_services)]
 # --------------------------------------------------------------------------- #
 # Фабрика приложения
 # --------------------------------------------------------------------------- #
-def create_app(data_dir: Path | str = "data") -> FastAPI:
-    """Создаёт приложение поверх каталога данных ``data_dir``."""
+#: Каталог статических файлов веб-интерфейса.
+STATIC_DIR = Path(__file__).parent / "static"
+
+#: Переменная окружения: запускать воркер внутри процесса сервера.
+EMBEDDED_WORKER_ENV = "QUANTUMLAB_EMBEDDED_WORKER"
+
+
+def create_app(
+    data_dir: Path | str | None = None,
+    database_url: str | None = None,
+    *,
+    embedded_worker: bool | None = None,
+) -> FastAPI:
+    """Создаёт приложение поверх каталога данных или PostgreSQL.
+
+    ``embedded_worker`` запускает выполнение очереди в потоке процесса сервера
+    (удобно для одиночного развёртывания и веб-интерфейса); по умолчанию — по
+    переменной окружения ``QUANTUMLAB_EMBEDDED_WORKER``. Отдельные воркеры
+    (``quantumlab worker``) предпочтительнее при нескольких пользователях.
+    Каталог по умолчанию — ``QUANTUMLAB_DATA_DIR`` либо ``data``.
+    """
+    root = Path(data_dir or os.environ.get("QUANTUMLAB_DATA_DIR", "data"))
+    run_worker = (
+        embedded_worker
+        if embedded_worker is not None
+        else os.environ.get(EMBEDDED_WORKER_ENV, "").lower() in {"1", "true", "yes"}
+    )
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        stop = threading.Event()
+        thread: threading.Thread | None = None
+        if run_worker:
+            from quantumlab.server.worker import serve_forever
+
+            services: Services = application.state.services
+            thread = threading.Thread(
+                target=serve_forever,
+                args=(services.jobs, services.catalog, stop),
+                name="quantumlab-worker",
+                daemon=True,
+            )
+            thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            if thread is not None:
+                thread.join(timeout=5.0)
+
     app = FastAPI(
         title="QuantumLab API",
         version=__version__,
         description="REST API платформы QuantumLab (контракт: api/openapi/v1.yaml)",
+        lifespan=lifespan,
     )
-    app.state.services = Services(Path(data_dir))
+    app.state.services = Services(root, database_url)
 
     @app.exception_handler(QuantumLabError)
     async def _quantumlab_error(request: Request, error: QuantumLabError) -> JSONResponse:
@@ -268,6 +326,7 @@ def create_app(data_dir: Path | str = "data") -> FastAPI:
     _register_calculation_routes(app)
     _register_job_routes(app)
     _register_stubs(app)
+    _register_ui(app)
     return app
 
 
@@ -288,7 +347,7 @@ def _register_health(app: FastAPI) -> None:
             services.jobs.list()
             services.catalog.list_projects()
             checks["storage"] = True
-        except OSError:
+        except Exception:
             checks["storage"] = False
         status = "ready" if all(checks.values()) else "not_ready"
         return to_api({"status": status, "checks": checks})
@@ -493,10 +552,10 @@ def _register_job_routes(app: FastAPI) -> None:
     async def get_result(job_id: str, services: ServicesDep) -> JsonValue:
         """Результат выполненного задания."""
         job = _load_job(services, job_id)
-        path = services.jobs.result_path(job.id)
-        if not path.exists():
+        payload = services.jobs.load_result(job.id)
+        if payload is None:
             raise HTTPException(status_code=409, detail="result is not available yet")
-        result = CalculationResult.model_validate_json(path.read_text(encoding="utf-8"))
+        result = CalculationResult.model_validate_json(payload)
         return to_api(result.model_dump(mode="json"))
 
 
@@ -569,3 +628,23 @@ def _register_stubs(app: FastAPI) -> None:
             tags=["not-implemented"],
             summary=f"Не реализовано: {operation}",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Веб-интерфейс
+# --------------------------------------------------------------------------- #
+def _register_ui(app: FastAPI) -> None:
+    """Статический веб-интерфейс и префикс ``/api/v1`` из контракта.
+
+    Страница не содержит научной логики: она вызывает те же эндпоинты, что и
+    любой клиент API, и берёт тексты интерфейса из ``/i18n/{locale}``.
+    Контракт объявляет сервер ``/api/v1``; приложение отвечает и по этому
+    префиксу, и без него (клиенты тестов и существующие развёртывания).
+    """
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="ui/")
+
+    app.mount("/ui", StaticFiles(directory=STATIC_DIR, html=True), name="ui")
+    app.mount("/api/v1", app, name="api-v1")

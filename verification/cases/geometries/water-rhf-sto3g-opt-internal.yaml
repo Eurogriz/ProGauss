@@ -1,12 +1,12 @@
-id: water-rhf-sto3g-geometry
+id: water-rhf-sto3g-geometry-internal
 level: L5
 slow: true  # измерено: > 10 c на кейс
-description: Оптимизированная геометрия воды RHF/STO-3G (декартовы координаты) против минимума, найденного PySCF независимо.
+description: Оптимизированная геометрия воды RHF/STO-3G (избыточные внутренние координаты) против минимума, найденного PySCF независимо.
 molecule: tests/fixtures/water.xyz
 spec:
   task: optimization
   method: { theory: hf, basis: sto-3g }
-  optimization: { coordinates: cartesian, max_steps: 40 }
+  optimization: { coordinates: redundant_internal, max_steps: 40 }
 expect:
   energy_hartree:
     value: -74.9659011923
